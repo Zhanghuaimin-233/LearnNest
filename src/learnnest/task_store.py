@@ -1,0 +1,217 @@
+"""Persistent storage for the task state record."""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
+
+from learnnest.execution_models import SourceIdentities
+from learnnest.identities import identity_keys, normalize_local_source, stream_sha256
+from learnnest.models import StageStatus, TaskProfile, TaskRecord
+from learnnest.note_types import ConcreteNoteType
+
+
+def create_task(
+    *,
+    task_id: str,
+    source_path: str,
+    source_input: str | None = None,
+    source_type: str = "local_file",
+    media_path: str | None = None,
+    source_fingerprint: str,
+    title: str,
+    profile: TaskProfile = "evidence",
+    note_type_override: ConcreteNoteType | None = None,
+) -> TaskRecord:
+    """Create a task record from stable source metadata."""
+    return TaskRecord(
+        task_id=task_id,
+        source_path=source_path,
+        source_input=source_input,
+        source_type=source_type,
+        media_path=media_path,
+        source_fingerprint=source_fingerprint,
+        title=title,
+        profile=profile,
+        note_type_override=note_type_override,
+    )
+
+
+def write_task_atomic(task_dir: str | Path, task: TaskRecord) -> Path:
+    """Write ``task.json`` through a temporary file and atomically replace it."""
+    validated = TaskRecord.model_validate(task.model_dump(mode="python"))
+    directory = Path(task_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / "task.json"
+    serialized = json.dumps(
+        validated.model_dump(mode="json"), ensure_ascii=False, indent=2, sort_keys=True
+    )
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=directory, suffix=".tmp", delete=False
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(f"{serialized}\n")
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, destination)
+    except Exception:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    return destination
+
+
+def load_task(path: str | Path) -> TaskRecord:
+    """Load and validate a task record from a ``task.json`` path or directory."""
+    task_path = Path(path)
+    if task_path.is_dir():
+        task_path /= "task.json"
+    return parse_task_bytes(task_path.read_bytes(), base_dir=task_path.parent)
+
+
+def parse_task_bytes(data: bytes, *, base_dir: Path) -> TaskRecord:
+    """Parse one task fact snapshot already read from disk."""
+    payload = json.loads(data.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("task.json root must be an object")
+    if payload.get("schema_version", "1.0") == "1.0":
+        payload = _migrate_task_1_to_2(payload, base_dir=base_dir)
+    return TaskRecord.model_validate(payload)
+
+
+def _migrate_task_1_to_2(
+    payload: dict[str, object], *, base_dir: Path
+) -> dict[str, object]:
+    migrated = dict(payload)
+    source_path = migrated.get("source_path")
+    source_input = migrated.get("source_input") or source_path
+    migrated["schema_version"] = "2.0"
+    normalized_source = source_input
+    if migrated.get("source_type", "local_file") == "local_file" and isinstance(
+        source_input, str
+    ):
+        source_path = Path(source_input).expanduser()
+        if not source_path.is_absolute():
+            source_path = base_dir / source_path
+        normalized_source = normalize_local_source(source_path)
+    migrated.setdefault("identities", {"normalized_source": normalized_source})
+    migrated.setdefault("duplicate_of_task_id", None)
+    migrated.setdefault("note_type_override", None)
+    migrated.setdefault("active_attempt_id", None)
+    migrated.setdefault("attempts", [])
+    return migrated
+
+
+def find_task_by_fingerprint(
+    output_root: str | Path,
+    source_fingerprint: str,
+    *,
+    require_completed_content_pack: bool = False,
+) -> tuple[Path, TaskRecord] | None:
+    """Find one persisted task by stable source identity without an index DB."""
+    task_root = Path(output_root).resolve() / "视频学习素材"
+    if not task_root.is_dir():
+        return None
+    for task_json in sorted(task_root.glob("*/task.json")):
+        try:
+            task = load_task(task_json)
+        except (OSError, ValueError):
+            continue
+        if task.source_fingerprint != source_fingerprint:
+            continue
+        if require_completed_content_pack and (
+            task.stages.get("content_pack") is not StageStatus.COMPLETED
+        ):
+            continue
+        return task_json.parent, task
+    return None
+
+
+def find_task_by_identities(
+    output_root: str | Path,
+    identities: SourceIdentities,
+    source_fingerprint: str,
+    *,
+    include_derived: bool = True,
+    require_completed: bool = False,
+    exclude_task_id: str | None = None,
+) -> tuple[Path, TaskRecord] | None:
+    """Find a task by the strongest available identity, then legacy fallback."""
+    task_root = Path(output_root).resolve() / "视频学习素材"
+    if not task_root.is_dir():
+        return None
+    candidates: list[tuple[Path, TaskRecord]] = []
+    for task_json in sorted(task_root.glob("*/task.json")):
+        try:
+            task = load_task(task_json)
+        except (OSError, ValueError):
+            continue
+        if task.task_id == exclude_task_id or task.identities is None:
+            continue
+        if require_completed and not _is_completed_task(task):
+            continue
+        candidates.append((task_json.parent, task))
+
+    for kind, value in identity_keys(identities, source_fingerprint):
+        if kind in {"content_sha256", "platform_id"} and not include_derived:
+            continue
+        for task_dir, task in candidates:
+            candidate_values = dict(
+                identity_keys(task.identities, task.source_fingerprint)
+            )
+            if kind == "content_sha256" and kind not in candidate_values:
+                legacy_hash = _legacy_content_sha256(task_dir, task)
+                if legacy_hash is not None:
+                    candidate_values[kind] = legacy_hash
+            if candidate_values.get(kind) == value:
+                return task_dir, task
+    return None
+
+
+def _legacy_content_sha256(task_dir: Path, task: TaskRecord) -> str | None:
+    if task.source_type != "local_file":
+        return None
+    candidate = Path(task.media_path or task.source_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = task_dir / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    if not resolved.is_file():
+        return None
+    return stream_sha256(resolved)
+
+
+def _is_completed_task(task: TaskRecord) -> bool:
+    if task.active_attempt_id is not None:
+        return False
+    if task.attempts:
+        return task.attempts[-1].status == "completed"
+    return task.stages.get("content_pack") is StageStatus.COMPLETED
+
+
+def find_task_by_id(
+    output_root: str | Path,
+    task_id: str,
+) -> tuple[Path, TaskRecord] | None:
+    """Find one task by its stable ID without trusting its directory name."""
+    task_root = Path(output_root).resolve() / "视频学习素材"
+    if not task_root.is_dir():
+        return None
+    for task_json in sorted(task_root.glob("*/task.json")):
+        try:
+            task = load_task(task_json)
+        except (OSError, ValueError):
+            continue
+        if task.task_id == task_id:
+            return task_json.parent, task
+    return None

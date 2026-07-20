@@ -1,0 +1,1815 @@
+"""Command-line entry point for learnnest."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Mapping
+from contextlib import ExitStack, contextmanager
+from enum import StrEnum
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from pydantic import SecretStr
+
+from learnnest import providers
+from learnnest.artifact_layout import migrate_artifact_layout, plan_artifact_layout
+from learnnest.adapters.douyin import DouyinFavoritesAdapter
+from learnnest.adapters.douyin_http import DouyinHttpTransport
+from learnnest.adapters.folder import FolderAdapter
+from learnnest.batch import resume_batch, run_batch
+from learnnest.batch_store import load_batch
+from learnnest.download_queue import run_pending_downloads
+from learnnest.execution import plan_recovery
+from learnnest.index import (
+    IndexRebuildError,
+    index_status,
+    query_failure_queue,
+    query_history,
+    query_history_facts,
+    rebuild_index,
+)
+from learnnest.locks import LockUnavailable, schedule_lock, task_lock
+from learnnest.note_generation import (
+    build_and_activate_external_v4_note,
+    generate_and_activate_v4_note,
+    rerender_and_activate_note,
+    validate_external_v4_note,
+)
+from learnnest.note_providers import (
+    DEFAULT_NOTE_SAFE_INPUT_TOKENS,
+    MimoNoteProvider,
+    MimoNoteReviewer,
+    OpenAICompatibleChatConfig,
+    OpenAICompatibleNoteProvider,
+    OpenAICompatibleNoteReviewer,
+)
+from learnnest.note_templates import (
+    load_template_file,
+    resolve_note_template,
+    template_snapshot_sha256,
+)
+from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
+from learnnest.podcast_generation import (
+    build_and_activate_external_podcast,
+    generate_and_activate_podcast,
+)
+from learnnest.podcast_providers import MimoPodcastProvider
+from learnnest.preflight import preflight_runtime, preflight_sources
+from learnnest.queue_runner import run_failure_queue
+from learnnest.runtime_config import load_runtime_environment
+from learnnest.scheduler import ResourceScheduler
+from learnnest.schedule_store import (
+    list_schedules,
+    load_schedule,
+    schedule_path,
+    write_schedule_atomic,
+)
+from learnnest.schedules import (
+    create_interval_douyin_schedule,
+    create_interval_folder_schedule,
+    ensure_manual_folder_schedule,
+    run_schedule_once,
+    tick_schedules,
+)
+from learnnest.sources import SourceParseError, collect_sources
+from learnnest.stages import STAGES
+from learnnest.task_store import load_task
+from learnnest.tts_generation import (
+    DEFAULT_TTS_STYLE,
+    generate_and_activate_tts,
+)
+from learnnest.tts_providers import MimoTtsProvider
+from learnnest.validation import validate_task
+
+app = typer.Typer(no_args_is_help=True)
+index_app = typer.Typer(no_args_is_help=True)
+queue_app = typer.Typer(no_args_is_help=True)
+download_app = typer.Typer(no_args_is_help=True)
+batch_app = typer.Typer(no_args_is_help=True)
+scan_app = typer.Typer(no_args_is_help=True)
+schedule_app = typer.Typer(no_args_is_help=True)
+template_app = typer.Typer(no_args_is_help=True)
+flow_app = typer.Typer(no_args_is_help=True)
+layout_app = typer.Typer(no_args_is_help=True)
+app.add_typer(
+    index_app, name="index", help="Inspect or rebuild the Vault SQLite read model."
+)
+app.add_typer(
+    template_app, name="template", help="Validate constrained V4 note templates."
+)
+app.add_typer(
+    queue_app, name="queue", help="Inspect the derived retryable failure queue."
+)
+app.add_typer(
+    download_app, name="download", help="Consume persisted discovered download links."
+)
+app.add_typer(batch_app, name="batch", help="Resume persisted batch execution ledgers.")
+app.add_typer(scan_app, name="scan", help="Run one foreground incremental scan.")
+app.add_typer(
+    schedule_app,
+    name="schedule",
+    help="Manage project-internal foreground schedules.",
+)
+app.add_typer(
+    flow_app,
+    name="flow",
+    help="Run explicit monitor-to-delivery foreground workflows.",
+)
+app.add_typer(
+    layout_app,
+    name="layout",
+    help="Preview or explicitly migrate artifact roots without copying files.",
+)
+
+
+class ProfileOption(StrEnum):
+    """The supported v0.1 pipeline profiles exposed by the CLI."""
+
+    EVIDENCE = "evidence"
+    NOTE = "note"
+    FULL = "full"
+
+
+class StageOption(StrEnum):
+    """The stages from which a persisted task may be resumed."""
+
+    SOURCE = "source"
+    TRANSCRIPT = "transcript"
+    FRAMES = "frames"
+    OCR = "ocr"
+    EVIDENCE = "evidence"
+    CONTENT_PACK = "content_pack"
+    NOTE = "note"
+    PUBLISH = "publish"
+
+
+class NoteTypeOption(StrEnum):
+    """User-facing note-type requests for structured note commands."""
+
+    AUTO = "auto"
+    CONCEPT = "concept"
+    RESOURCE = "resource"
+    PRACTICAL = "practical"
+
+
+class ReviewModeOption(StrEnum):
+    """Optional V4 semantic-audit policy for an explicit note command."""
+
+    NONE = "none"
+    REPORT = "report"
+    GATE = "gate"
+
+
+@app.callback()
+def main() -> None:
+    """Convert local learning videos into traceable evidence packs."""
+
+
+@app.command()
+def doctor() -> None:
+    """Verify ASR and OCR in separate provider worker processes."""
+    try:
+        checked = _verify_provider_workers(_runtime_environment())
+    except (KeyError, RuntimeError, json.JSONDecodeError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    for provider in checked:
+        typer.echo(f"OK: {provider}")
+
+
+@app.command()
+def readiness(
+    douyin: Annotated[
+        bool,
+        typer.Option("--douyin", help="Require the Douyin monitor prerequisites."),
+    ] = False,
+    note: Annotated[
+        bool,
+        typer.Option("--note", help="Require an explicit note provider configuration."),
+    ] = False,
+    podcast: Annotated[
+        bool,
+        typer.Option("--podcast", help="Require the MiMo podcast configuration."),
+    ] = False,
+    tts: Annotated[
+        bool,
+        typer.Option("--tts", help="Require the MiMo TTS configuration."),
+    ] = False,
+    verify_providers: Annotated[
+        bool,
+        typer.Option(
+            "--verify-providers/--skip-providers",
+            help="Run isolated ASR/OCR checks after static checks pass.",
+        ),
+    ] = True,
+    output_root: Annotated[
+        Path | None,
+        typer.Option("--output-root", help="Vault root."),
+    ] = None,
+) -> None:
+    """Preflight an explicit workflow before discovery, downloads, or paid calls."""
+    runtime_environ = _runtime_environment()
+    result = preflight_runtime(
+        _output_root(output_root),
+        require_douyin=douyin,
+        require_note=note,
+        require_podcast=podcast,
+        require_tts=tts,
+        runtime_environ=runtime_environ,
+    )
+    for issue in result.issues:
+        typer.echo(
+            f"{issue.severity.upper()}: {issue.code}: {issue.message}",
+            err=issue.severity == "error",
+        )
+    if not result.ok:
+        raise typer.Exit(code=1)
+    if verify_providers:
+        try:
+            checked = _verify_provider_workers(runtime_environ)
+        except (KeyError, RuntimeError, json.JSONDecodeError) as error:
+            typer.echo(f"ERROR: provider_check_failed: {error}", err=True)
+            raise typer.Exit(code=1) from error
+        for provider in checked:
+            typer.echo(f"OK: {provider}")
+    typer.echo("Readiness: OK")
+
+
+@flow_app.command("run")
+def flow_run(
+    schedule_id: Annotated[str, typer.Argument(help="Stable Douyin monitor ID.")],
+    max_items: Annotated[
+        int,
+        typer.Option("--max-items", min=1, help="Maximum discovered links to consume."),
+    ] = 10,
+    latest_only: Annotated[
+        bool,
+        typer.Option(
+            "--latest-only",
+            help="One-shot test selector; never changes monitor cursor semantics.",
+        ),
+    ] = False,
+    with_note: Annotated[
+        bool,
+        typer.Option(
+            "--with-note", help="Generate a V4 note after deterministic work."
+        ),
+    ] = False,
+    with_podcast: Annotated[
+        bool,
+        typer.Option("--with-podcast", help="Generate a podcast after the note."),
+    ] = False,
+    with_tts: Annotated[
+        bool,
+        typer.Option("--with-tts", help="Generate audio after the podcast."),
+    ] = False,
+    confirm_paid: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-paid", help="Required before any requested paid stage."
+        ),
+    ] = False,
+    template: Annotated[
+        str,
+        typer.Option("--template", help="V4 note template ID or constrained file."),
+    ] = "concept-explanation",
+    review_mode: Annotated[
+        ReviewModeOption,
+        typer.Option("--review-mode", help="Optional V4 NoteAudit policy."),
+    ] = ReviewModeOption.NONE,
+    output_root: Annotated[
+        Path | None,
+        typer.Option("--output-root", help="Vault root."),
+    ] = None,
+) -> None:
+    """Run one monitor, consume its links, then optionally run paid stages once."""
+    if with_tts and not with_podcast:
+        typer.echo("ERROR: --with-tts requires --with-podcast", err=True)
+        raise typer.Exit(code=1)
+    if with_podcast and not with_note:
+        typer.echo("ERROR: --with-podcast requires --with-note", err=True)
+        raise typer.Exit(code=1)
+    paid_requested = with_note or with_podcast or with_tts
+    if paid_requested and not confirm_paid:
+        typer.echo("ERROR: paid stages require --confirm-paid", err=True)
+        raise typer.Exit(code=1)
+    root = _output_root(output_root)
+    runtime_environ = _runtime_environment()
+    readiness_result = preflight_runtime(
+        root,
+        require_douyin=True,
+        require_note=with_note,
+        require_podcast=with_podcast,
+        require_tts=with_tts,
+        runtime_environ=runtime_environ,
+    )
+    for issue in readiness_result.issues:
+        typer.echo(
+            f"{issue.severity.upper()}: {issue.code}: {issue.message}",
+            err=issue.severity == "error",
+        )
+    if not readiness_result.ok:
+        raise typer.Exit(code=1)
+    secret: SecretStr | None = None
+    try:
+        _verify_provider_workers(runtime_environ)
+        schedule = load_schedule(schedule_path(root, schedule_id))
+        outcome = run_schedule_once(
+            root,
+            schedule_id,
+            adapter_factory=_schedule_adapter,
+            runtime_credentials=_load_douyin_cookie(),
+        )
+        if outcome.status not in {"completed", "partial"}:
+            raise RuntimeError(
+                f"monitor did not complete: {outcome.status}"
+                + (f" ({outcome.error})" if outcome.error else "")
+            )
+        downloads = run_pending_downloads(
+            root,
+            max_items=1 if latest_only else max_items,
+            profile=schedule.profile,
+            schedule_id=schedule_id,
+            selection="latest_observed" if latest_only else "oldest",
+            douyin_cookie=_load_douyin_cookie(),
+        )
+        if downloads.failed_count:
+            raise RuntimeError("download consumer reported failed links")
+        if paid_requested and not downloads.task_ids:
+            raise RuntimeError(
+                "the selected links produced no video tasks; use individual commands "
+                "for existing tasks or choose video links"
+            )
+        selected_template = (
+            resolve_note_template(template, default_id="concept-explanation")
+            if with_note
+            else None
+        )
+        for task_id in downloads.task_ids:
+            task_dir = _find_task_dir(task_id, root)
+            if with_note:
+                with _task_execution_lock(root, task_dir):
+                    provider, auditor, secret = _note_provider_pair(runtime_environ)
+                    with _resource_execution(root, "network", "llm"):
+                        note_result = generate_and_activate_v4_note(
+                            task_dir,
+                            provider,
+                            root,
+                            template=selected_template,
+                            review_mode=review_mode.value,
+                            auditor=auditor,
+                        )
+                    if not note_result.activated:
+                        raise RuntimeError(
+                            "note candidate was retained without activation; "
+                            "podcast generation is not started"
+                        )
+            if with_podcast:
+                with _task_execution_lock(root, task_dir):
+                    secret = _mimo_api_key(runtime_environ)
+                    with _resource_execution(root, "network", "llm"):
+                        generate_and_activate_podcast(
+                            task_dir, MimoPodcastProvider(secret), root
+                        )
+            if with_tts:
+                with _task_execution_lock(root, task_dir):
+                    secret = _mimo_api_key(runtime_environ)
+                    with _resource_execution(root, "network", "tts", "ffmpeg"):
+                        generate_and_activate_tts(
+                            task_dir, MimoTtsProvider(secret), root
+                        )
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, PipelineError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Flow completed: schedule={schedule_id} "
+        f"claimed={downloads.claimed_count} tasks={len(downloads.task_ids)}"
+    )
+
+
+def _verify_provider_workers(runtime_environ: Mapping[str, str]) -> list[str]:
+    """Check installed ASR/OCR assets without forwarding any credentials."""
+    provider_environment = {"HF_HUB_OFFLINE": "1"}
+    cache = runtime_environ.get("HUGGINGFACE_HUB_CACHE", "").strip()
+    if cache:
+        provider_environment["HUGGINGFACE_HUB_CACHE"] = cache
+    checked: list[str] = []
+    for command in ("doctor-asr", "doctor-ocr"):
+        result = providers.run_worker([command], environment=provider_environment)
+        payload = json.loads(result.stdout)
+        checked.append(str(payload["provider"]))
+    return checked
+
+
+@app.command()
+def process(
+    input_value: Annotated[
+        str | None,
+        typer.Argument(help="Local video path or public yt-dlp URL."),
+    ] = None,
+    profile: Annotated[
+        ProfileOption,
+        typer.Option(help="Pipeline profile: evidence, note, or full."),
+    ] = ProfileOption.EVIDENCE,
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+    tasks_path: Annotated[
+        Path | None,
+        typer.Option("--tasks", help="TXT or JSONL source list."),
+    ] = None,
+    input_dir: Annotated[
+        Path | None,
+        typer.Option("--input-dir", help="Directory containing local videos."),
+    ] = None,
+    recursive: Annotated[
+        bool,
+        typer.Option("--recursive", help="Recursively scan --input-dir."),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preflight without downloads or formal writes."),
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Re-run the canonical task as a force attempt."),
+    ] = False,
+    allow_duplicate: Annotated[
+        bool,
+        typer.Option(
+            "--allow-duplicate",
+            help="Allow duplicate content from a different source to create a task.",
+        ),
+    ] = False,
+) -> None:
+    """Process or preflight local, URL, task-file, or directory sources."""
+    root = _output_root(output_root)
+    try:
+        sources = collect_sources(
+            input_value=input_value,
+            tasks_path=tasks_path,
+            input_dir=input_dir,
+            recursive=recursive,
+        )
+        if dry_run:
+            result = preflight_sources(sources, root)
+            typer.echo(f"DRY-RUN: {'OK' if result.ok else 'FAILED'}")
+            for item in result.items:
+                duplicate = " duplicate" if item.duplicate else ""
+                typer.echo(f"- {item.task_id}: {item.planned_directory}{duplicate}")
+            for issue in result.issues:
+                typer.echo(
+                    f"{issue.severity.upper()}: {issue.code}: {issue.message}",
+                    err=issue.severity == "error",
+                )
+            if not result.ok:
+                raise typer.Exit(code=1)
+            return
+        if tasks_path is not None or input_dir is not None:
+            if force or allow_duplicate:
+                raise ValueError("--force and --allow-duplicate require a single INPUT")
+            manifest = run_batch(sources, root, profile.value)
+            typer.echo(
+                f"Processed batch: {manifest.batch_id} "
+                f"completed={manifest.completed_count} "
+                f"failed={manifest.failed_count} "
+                f"skipped={manifest.skipped_count}"
+            )
+            return
+        identity_options = (
+            {"force": force, "allow_duplicate": allow_duplicate}
+            if force or allow_duplicate
+            else {}
+        )
+        if sources[0].input_type == "local_file":
+            task = process_video(
+                Path(sources[0].input),
+                root,
+                profile.value,
+                **identity_options,
+            )
+        else:
+            task = process_source(
+                sources[0],
+                root,
+                profile.value,
+                **identity_options,
+            )
+    except LockUnavailable as error:
+        typer.echo("ERROR: task is still running", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, PipelineError, SourceParseError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Processed task: {task.task_id}")
+
+
+@app.command()
+def run(
+    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
+    from_stage: Annotated[
+        StageOption,
+        typer.Option("--from", help="Stage at which to resume processing."),
+    ],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Resume a persisted task from one stage and rerun its downstream stages."""
+    task_dir = _find_task_dir(task_id, _output_root(output_root))
+    try:
+        task = rerun_task(task_dir, from_stage.value)
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: task is still running: {task_id}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, PipelineError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Processed task: {task.task_id}")
+
+
+@app.command()
+def recover(
+    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Report the recovery point without writing."),
+    ] = False,
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Resume a failed or interrupted deterministic task from its earliest invalid stage."""
+    root = _output_root(output_root)
+    task_dir = _find_task_dir(task_id, root)
+    try:
+        persisted = load_task(task_dir)
+        with task_lock(root, persisted.task_id, timeout=0):
+            plan = plan_recovery(task_dir)
+            if plan.from_stage is None:
+                typer.echo(f"No recovery needed: {task_id}")
+                return
+            typer.echo(
+                f"Recovery plan: {task_id} from={plan.from_stage} "
+                f"paid={str(plan.requires_paid).lower()} "
+                f"reason={'; '.join(plan.reasons)}"
+            )
+            if dry_run:
+                return
+            if plan.requires_paid:
+                typer.echo(
+                    "ERROR: recovery reached a paid stage; "
+                    "use the explicit note, podcast, or tts command",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            task = rerun_task(
+                task_dir,
+                plan.from_stage,
+                reason="resume",
+                _task_lock_held=True,
+            )
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: task is still running: {task_id}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, PipelineError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Recovered task: {task.task_id}")
+
+
+@app.command()
+def retry(
+    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
+    from_stage: Annotated[
+        str,
+        typer.Option("--from", help="Stage to retry, or auto for recovery planning."),
+    ] = "auto",
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Append an explicit retry attempt without rewriting earlier attempt history."""
+    root = _output_root(output_root)
+    task_dir = _find_task_dir(task_id, root)
+    try:
+        persisted = load_task(task_dir)
+        with task_lock(root, persisted.task_id, timeout=0):
+            if from_stage == "auto":
+                plan = plan_recovery(task_dir)
+                selected = plan.from_stage
+                requires_paid = plan.requires_paid
+            else:
+                if from_stage not in STAGES:
+                    raise typer.BadParameter(
+                        f"unknown stage: {from_stage}", param_hint="--from"
+                    )
+                selected = from_stage
+                requires_paid = selected in {"note", "podcast_script", "tts"}
+            if selected is None:
+                typer.echo(f"No retry needed: {task_id}")
+                return
+            if requires_paid:
+                typer.echo(
+                    "ERROR: retry reached a paid stage; "
+                    "use the explicit note, podcast, or tts command",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            task = rerun_task(
+                task_dir,
+                selected,
+                reason="retry",
+                _task_lock_held=True,
+            )
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: task is still running: {task_id}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, PipelineError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Retried task: {task.task_id}")
+
+
+@batch_app.command("resume")
+def resume_batch_command(
+    batch_id: Annotated[str, typer.Argument(help="Stable batch ID from batch.json.")],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Resume pending or interrupted items without repeating final items."""
+    root = _output_root(output_root)
+    batch_dir = root / "视频学习批次" / batch_id
+    if not (batch_dir / "batch.json").is_file():
+        raise typer.BadParameter(f"batch not found: {batch_id}", param_hint="batch_id")
+    try:
+        manifest = resume_batch(batch_dir)
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: batch is still running: {batch_id}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, PipelineError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Resumed batch: {manifest.batch_id} "
+        f"completed={manifest.completed_count} "
+        f"failed={manifest.failed_count} "
+        f"skipped={manifest.skipped_count}"
+    )
+
+
+@index_app.command("rebuild")
+def index_rebuild(
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Rebuild SQLite from task, batch, and schedule fact files."""
+    try:
+        result = rebuild_index(_output_root(output_root))
+    except LockUnavailable as error:
+        typer.echo("ERROR: index rebuild is already running", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, IndexRebuildError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Rebuilt index: tasks={result.task_count} attempts={result.attempt_count} "
+        f"batches={result.batch_count} schedules={result.schedule_count} "
+        f"path={result.database_path}"
+    )
+
+
+@index_app.command("status")
+def show_index_status(
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Report whether the SQLite projection matches current fact files."""
+    status = index_status(_output_root(output_root))
+    typer.echo(
+        f"Index status: exists={str(status.exists).lower()} "
+        f"stale={str(status.stale).lower()} tasks={status.task_count} "
+        f"attempts={status.attempt_count} batches={status.batch_count} "
+        f"schedules={status.schedule_count} "
+        f"reason={status.reason}"
+    )
+    if status.stale:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def history(
+    task_id: Annotated[
+        str | None,
+        typer.Option("--task-id", help="Limit history to one stable task ID."),
+    ] = None,
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Query task and immutable attempt history from the SQLite projection."""
+    try:
+        rows = query_history(_output_root(output_root), task_id=task_id)
+    except (OSError, sqlite3.Error, IndexRebuildError) as index_error:
+        try:
+            rows = query_history_facts(_output_root(output_root), task_id=task_id)
+        except (OSError, ValueError, IndexRebuildError) as fact_error:
+            typer.echo(f"ERROR: {fact_error}", err=True)
+            raise typer.Exit(code=1) from fact_error
+        typer.echo(
+            f"WARNING: index unavailable ({index_error}); using task facts",
+            err=True,
+        )
+    if not rows:
+        typer.echo("No history entries.")
+        return
+    for row in rows:
+        typer.echo(
+            f"{row['task_id']} attempt={row['ordinal'] or '-'} "
+            f"status={row['attempt_status'] or '-'} "
+            f"from={row['from_stage'] or '-'} title={row['title']}"
+        )
+
+
+@app.command()
+def status(
+    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Report one task directly from its fact file, without SQLite dependency."""
+    root = _output_root(output_root)
+    try:
+        task_dir = _find_task_dir(task_id, root, include_invalid=True)
+        task = load_task(task_dir)
+    except (OSError, ValueError, typer.BadParameter) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    stages = " ".join(f"{name}={value}" for name, value in task.stages.items())
+    active = " ".join(
+        f"{stage}:{paths[0]}" for stage, paths in task.artifacts.items() if paths
+    )
+    typer.echo(f"{task.task_id} title={task.title}")
+    typer.echo(f"stages: {stages}")
+    typer.echo(f"active-artifacts: {active or '-'}")
+    typer.echo(
+        f"attempts={len(task.attempts)} active_attempt={task.active_attempt_id or '-'}"
+    )
+
+
+@layout_app.command("plan")
+def layout_plan(
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Preview the compatibility-preserving delivery/audit directory migration."""
+    moves = plan_artifact_layout(_output_root(output_root))
+    if not moves:
+        typer.echo("Artifact layout already has no legacy roots to migrate.")
+        return
+    for move in moves:
+        typer.echo(f"MOVE {move.source} -> {move.destination}")
+    typer.echo("Legacy paths will become directory aliases; no files are copied.")
+
+
+@layout_app.command("migrate")
+def layout_migrate(
+    confirm: Annotated[
+        bool,
+        typer.Option("--confirm", help="Acknowledge the physical directory move."),
+    ] = False,
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Move legacy roots once and preserve their old paths as directory aliases."""
+    if not confirm:
+        typer.echo("ERROR: layout migration requires --confirm", err=True)
+        raise typer.Exit(code=1)
+    try:
+        moves = migrate_artifact_layout(_output_root(output_root))
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    if not moves:
+        typer.echo("Artifact layout already has no legacy roots to migrate.")
+        return
+    typer.echo(f"Migrated artifact roots: {len(moves)}")
+
+
+@queue_app.command("list")
+def queue_list(
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """List due retryable failures; this command never executes paid work."""
+    try:
+        rows = query_failure_queue(_output_root(output_root))
+    except (OSError, sqlite3.Error, IndexRebuildError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    if not rows:
+        typer.echo("Failure queue is empty.")
+        return
+    for row in rows:
+        typer.echo(
+            f"{row['task_id']} attempt={row['ordinal']} "
+            f"stage={row['failed_stage']} code={row['failure_code']} "
+            f"next={row['next_retry_at'] or 'now'}"
+        )
+
+
+@queue_app.command("run")
+def queue_run(
+    workers: Annotated[
+        int,
+        typer.Option("--workers", min=1, help="Concurrent free recovery workers."),
+    ] = 2,
+    max_items: Annotated[
+        int,
+        typer.Option("--max-items", min=1, help="Maximum due items to claim."),
+    ] = 10,
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Run due retryable deterministic stages; never invoke paid providers."""
+    try:
+        results = run_failure_queue(
+            _output_root(output_root),
+            workers=workers,
+            max_items=max_items,
+        )
+    except (
+        OSError,
+        sqlite3.Error,
+        ValueError,
+        IndexRebuildError,
+        LockUnavailable,
+    ) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    if not results:
+        typer.echo("Failure queue is empty.")
+        return
+    for item in results:
+        typer.echo(
+            f"{item.task_id}: {item.status}"
+            + (f" ({item.error})" if item.error else "")
+        )
+    if any(item.status != "completed" for item in results):
+        raise typer.Exit(code=1)
+
+
+@download_app.command("pending")
+def download_pending(
+    max_items: Annotated[
+        int,
+        typer.Option("--max-items", min=1, help="Maximum discovered links to claim."),
+    ] = 10,
+    retry_failed: Annotated[
+        bool,
+        typer.Option("--retry-failed", help="Retry previously retryable downloads."),
+    ] = False,
+    schedule_id: Annotated[
+        str | None,
+        typer.Option("--schedule-id", help="Consume links from one monitor only."),
+    ] = None,
+    latest_only: Annotated[
+        bool,
+        typer.Option(
+            "--latest-only",
+            help="Test selector: consume only the newest link from this fresh observation.",
+        ),
+    ] = False,
+    profile: Annotated[
+        ProfileOption,
+        typer.Option(help="Pipeline profile for downloaded links."),
+    ] = ProfileOption.EVIDENCE,
+    output_root: Annotated[
+        Path | None,
+        typer.Option("--output-root", help="Vault root."),
+    ] = None,
+) -> None:
+    """Download persisted monitor links without running the monitor.
+
+    The normal queue retains every discovered item. ``--latest-only`` is only
+    for one-shot verification and never changes monitor cursor semantics.
+    """
+    try:
+        if latest_only and schedule_id is None:
+            raise ValueError("--latest-only requires --schedule-id")
+        outcome = run_pending_downloads(
+            _output_root(output_root),
+            max_items=1 if latest_only else max_items,
+            retry_failed=retry_failed,
+            schedule_id=schedule_id,
+            selection="latest_observed" if latest_only else "oldest",
+            profile=profile.value,
+            douyin_cookie=_load_douyin_cookie(),
+        )
+    except (LockUnavailable, OSError, PipelineError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    if outcome.claimed_count == 0:
+        typer.echo("Pending download queue is empty.")
+        return
+    typer.echo(
+        f"Downloaded links: batch={outcome.batch_id} "
+        f"claimed={outcome.claimed_count} "
+        f"completed={outcome.completed_count} failed={outcome.failed_count}"
+    )
+    if outcome.failed_count:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def validate(
+    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Validate one task's persisted artifacts and evidence references."""
+    task_dir = _find_task_dir(task_id, _output_root(output_root), include_invalid=True)
+    errors = validate_task(task_dir)
+    if errors:
+        for error in errors:
+            typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Valid task: {task_id}")
+
+
+@app.command("note-status")
+def note_status(
+    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Explain V4 candidate/source/audit/activation state without a provider call."""
+    root = _output_root(output_root)
+    task_dir = _find_task_dir(task_id, root)
+    task = load_task(task_dir)
+    active_note = next(
+        (
+            task_dir / path
+            for path in task.artifacts.get("note", [])
+            if Path(path).name == "note.json"
+        ),
+        None,
+    )
+    active_bundle = active_note.parent.resolve() if active_note is not None else None
+    bundles_root = task_dir / "generated_notes"
+    if not bundles_root.is_dir():
+        typer.echo("No generated note bundles.")
+        return
+    rows: list[tuple[str, dict[str, object], bool]] = []
+    for bundle in sorted(path for path in bundles_root.iterdir() if path.is_dir()):
+        metadata_path = bundle / "generation.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("note_schema_version") != "4.0"
+        ):
+            continue
+        rows.append((bundle.name, metadata, bundle.resolve() == active_bundle))
+    if not rows:
+        typer.echo("No GeneratedNote 4.0 bundles.")
+        return
+    for run_id, metadata, is_active in rows:
+        review = metadata.get("review")
+        review_status = review.get("status") if isinstance(review, dict) else "invalid"
+        template_validation = metadata.get("template_validation")
+        template_status = (
+            template_validation.get("status")
+            if isinstance(template_validation, dict)
+            else "not_recorded"
+        )
+        typer.echo(
+            f"{run_id}: candidate={metadata.get('candidate_status')} "
+            f"source={metadata.get('source_validation_status')} "
+            f"template={template_status} "
+            f"review={review_status} "
+            f"activation={metadata.get('activation_decision')} "
+            f"active={'yes' if is_active else 'no'}"
+        )
+
+
+@template_app.command("validate")
+def validate_template(
+    template_path: Annotated[
+        Path,
+        typer.Argument(exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+) -> None:
+    """Validate one constrained, versioned V4 JSON template without a model call."""
+    try:
+        template = load_template_file(template_path)
+    except ValueError as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Valid template: {template.template_id} ({template_snapshot_sha256(template)})"
+    )
+
+
+@app.command()
+def note(
+    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
+    external_note: Annotated[
+        Path | None,
+        typer.Option(
+            "--external-note",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="GeneratedNote 4.0 JSON from an external Agent.",
+        ),
+    ] = None,
+    template: Annotated[
+        str | None,
+        typer.Option(
+            "--template",
+            help="Official preset ID or a constrained JSON template file.",
+        ),
+    ] = None,
+    note_type: Annotated[
+        NoteTypeOption | None,
+        typer.Option(
+            "--note-type",
+            help="Compatibility alias mapping to an official V4 template preset.",
+        ),
+    ] = None,
+    review_mode: Annotated[
+        ReviewModeOption,
+        typer.Option(
+            "--review-mode",
+            help=(
+                "none activates source-valid notes; report retains an audit; "
+                "gate requires it to pass."
+            ),
+        ),
+    ] = ReviewModeOption.NONE,
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+    rerender: Annotated[
+        bool,
+        typer.Option(
+            "--rerender",
+            help="Re-render the active validated note without calling a provider.",
+        ),
+    ] = False,
+    retain_debug_artifacts: Annotated[
+        bool,
+        typer.Option(
+            "--retain-debug-artifacts",
+            help="Keep V4 provider and NoteAudit raw responses in this bundle.",
+        ),
+    ] = False,
+) -> None:
+    """Generate and publish a template-driven, traceable V4 note explicitly."""
+    root = _output_root(output_root)
+    task_dir = _find_task_dir(task_id, root)
+    secret: SecretStr | None = None
+    activated = True
+    candidate_bundle: Path | None = None
+    candidate_review = "not_requested"
+    debug_options = {"retain_debug_artifacts": True} if retain_debug_artifacts else {}
+    runtime_environ = _runtime_environment()
+    try:
+        with _task_execution_lock(root, task_dir):
+            if rerender and external_note is not None:
+                raise ValueError(
+                    "--rerender and --external-note are mutually exclusive"
+                )
+            if rerender and note_type is not None:
+                raise ValueError("--rerender and --note-type are mutually exclusive")
+            if rerender and template is not None:
+                raise ValueError("--rerender and --template are mutually exclusive")
+            if rerender and review_mode is not ReviewModeOption.NONE:
+                raise ValueError("--rerender and --review-mode are mutually exclusive")
+            if rerender and retain_debug_artifacts:
+                raise ValueError(
+                    "--rerender and --retain-debug-artifacts are mutually exclusive"
+                )
+            if rerender:
+                task = rerender_and_activate_note(task_dir, root)
+            else:
+                selected_template = _resolve_v4_template(
+                    task_dir,
+                    template,
+                    note_type.value if note_type is not None else None,
+                )
+                if external_note is not None:
+                    auditor: object | None = None
+                    if review_mode is not ReviewModeOption.NONE:
+                        auditor, secret = _optional_note_auditor(runtime_environ)
+                    if auditor is None:
+                        if review_mode is ReviewModeOption.NONE:
+                            result = build_and_activate_external_v4_note(
+                                task_dir,
+                                external_note,
+                                root,
+                                template=selected_template,
+                                **debug_options,
+                            )
+                        else:
+                            result = build_and_activate_external_v4_note(
+                                task_dir,
+                                external_note,
+                                root,
+                                template=selected_template,
+                                review_mode=review_mode.value,
+                                auditor=None,
+                                **debug_options,
+                            )
+                    else:
+                        with _resource_execution(root, "network", "llm"):
+                            result = build_and_activate_external_v4_note(
+                                task_dir,
+                                external_note,
+                                root,
+                                template=selected_template,
+                                review_mode=review_mode.value,
+                                auditor=auditor,
+                                **debug_options,
+                            )
+                else:
+                    provider, auditor, secret = _note_provider_pair(runtime_environ)
+                    with _resource_execution(root, "network", "llm"):
+                        result = generate_and_activate_v4_note(
+                            task_dir,
+                            provider,
+                            root,
+                            template=selected_template,
+                            review_mode=review_mode.value,
+                            auditor=auditor,
+                            **debug_options,
+                        )
+                task = result.task
+                activated = result.activated
+                candidate_bundle = result.bundle_path
+                candidate_review = result.review_status
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: task is still running: {task_id}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
+        raise typer.Exit(code=1) from error
+    if activated:
+        typer.echo(f"Generated note: {task.task_id}")
+        return
+    assert candidate_bundle is not None
+    typer.echo(
+        "Source-valid candidate retained; active note is unchanged: "
+        f"{candidate_bundle} (review={candidate_review})",
+        err=True,
+    )
+    raise typer.Exit(code=2)
+
+
+@app.command("validate-note")
+def validate_note(
+    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
+    note_json: Annotated[
+        Path,
+        typer.Argument(exists=True, file_okay=True, dir_okay=False, readable=True),
+    ],
+    note_type: Annotated[
+        NoteTypeOption | None,
+        typer.Option(
+            "--note-type",
+            help="Compatibility alias mapping to an official V4 template preset.",
+        ),
+    ] = None,
+    template: Annotated[
+        str | None,
+        typer.Option(
+            "--template",
+            help="Official preset ID or a constrained JSON template file.",
+        ),
+    ] = None,
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+) -> None:
+    """Validate a new external GeneratedNote 4.0 against its template contract."""
+    task_dir = _find_task_dir(task_id, _output_root(output_root))
+    selected_template = _resolve_v4_template(
+        task_dir,
+        template,
+        note_type.value if note_type is not None else None,
+    )
+    errors = validate_external_v4_note(
+        task_dir,
+        note_json,
+        template=selected_template,
+    )
+    if errors:
+        for error in errors:
+            typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Valid generated note: {task_id}")
+
+
+@app.command()
+def podcast(
+    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
+    external_script: Annotated[
+        Path | None,
+        typer.Option(
+            "--external-script",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Validated PodcastScript 1.0 JSON from an external Agent.",
+        ),
+    ] = None,
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+    retain_debug_artifacts: Annotated[
+        bool,
+        typer.Option(
+            "--retain-debug-artifacts",
+            help="Keep provider raw responses in this generated podcast bundle.",
+        ),
+    ] = False,
+) -> None:
+    """Generate and activate a validated podcast script explicitly."""
+    root = _output_root(output_root)
+    task_dir = _find_task_dir(task_id, root)
+    secret: SecretStr | None = None
+    debug_options = {"retain_debug_artifacts": True} if retain_debug_artifacts else {}
+    try:
+        with _task_execution_lock(root, task_dir):
+            if external_script is not None:
+                if retain_debug_artifacts:
+                    raise ValueError(
+                        "--external-script and --retain-debug-artifacts are mutually exclusive"
+                    )
+                task = build_and_activate_external_podcast(
+                    task_dir,
+                    external_script,
+                    root,
+                )
+            else:
+                secret = _mimo_api_key(_runtime_environment())
+                with _resource_execution(root, "network", "llm"):
+                    task = generate_and_activate_podcast(
+                        task_dir,
+                        MimoPodcastProvider(secret),
+                        root,
+                        **debug_options,
+                    )
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: task is still running: {task_id}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Generated podcast: {task.task_id}")
+
+
+@app.command()
+def tts(
+    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+    style: Annotated[
+        str,
+        typer.Option("--style", help="Natural-language speech style instruction."),
+    ] = DEFAULT_TTS_STYLE,
+) -> None:
+    """Synthesize the active podcast speech into validated WAV and MP3."""
+    root = _output_root(output_root)
+    task_dir = _find_task_dir(task_id, root)
+    secret: SecretStr | None = None
+    typer.echo("正在请求 MiMo TTS，服务端可能需要几分钟；请勿重复执行。")
+    try:
+        with _task_execution_lock(root, task_dir):
+            secret = _mimo_api_key(_runtime_environment())
+            with _resource_execution(root, "network", "tts", "ffmpeg"):
+                task = generate_and_activate_tts(
+                    task_dir,
+                    MimoTtsProvider(secret),
+                    root,
+                    style_instruction=style,
+                )
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: task is still running: {task_id}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Generated audio: {task.task_id}")
+
+
+@scan_app.command("folder")
+def scan_folder_command(
+    path: Annotated[Path, typer.Argument(help="Folder containing local videos.")],
+    recursive: Annotated[
+        bool,
+        typer.Option("--recursive", help="Include nested folders."),
+    ] = False,
+    profile: Annotated[
+        ProfileOption,
+        typer.Option(help="Pipeline profile for newly discovered sources."),
+    ] = ProfileOption.EVIDENCE,
+    output_root: Annotated[
+        Path | None,
+        typer.Option("--output-root", help="Vault root."),
+    ] = None,
+) -> None:
+    """Run one recoverable incremental folder scan in the foreground."""
+    root = _output_root(output_root)
+    try:
+        adapter = FolderAdapter(path, recursive=recursive)
+        schedule = ensure_manual_folder_schedule(
+            root,
+            adapter,
+            profile=profile.value,
+        )
+        outcome = run_schedule_once(root, schedule.schedule_id, adapter=adapter)
+        manifest = (
+            load_batch(root / "视频学习批次" / outcome.batch_id)
+            if outcome.batch_id is not None
+            else None
+        )
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: scan is already running: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, PipelineError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    added = len(manifest.results) if manifest is not None else 0
+    typer.echo(
+        f"Scanned folder: {schedule.schedule_id} status={outcome.status} added={added}"
+    )
+    if outcome.status not in {"completed", "partial"}:
+        raise typer.Exit(code=1)
+
+
+@schedule_app.command("add-folder")
+def schedule_add_folder_command(
+    schedule_id: Annotated[str, typer.Argument(help="Stable schedule ID.")],
+    path: Annotated[Path, typer.Argument(help="Folder containing local videos.")],
+    every_minutes: Annotated[
+        int,
+        typer.Option("--every-minutes", min=1, help="Foreground tick interval."),
+    ] = 60,
+    recursive: Annotated[
+        bool,
+        typer.Option("--recursive", help="Include nested folders."),
+    ] = False,
+    profile: Annotated[
+        ProfileOption,
+        typer.Option(help="Pipeline profile for newly discovered sources."),
+    ] = ProfileOption.EVIDENCE,
+    output_root: Annotated[
+        Path | None,
+        typer.Option("--output-root", help="Vault root."),
+    ] = None,
+) -> None:
+    """Persist one interval definition; it runs only via `schedule tick`."""
+    root = _output_root(output_root)
+    try:
+        schedule = create_interval_folder_schedule(
+            root,
+            schedule_id,
+            path,
+            every_seconds=every_minutes * 60,
+            recursive=recursive,
+            profile=profile.value,
+        )
+    except (OSError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Added schedule: {schedule.schedule_id}")
+
+
+@schedule_app.command("add-douyin")
+def schedule_add_douyin_command(
+    schedule_id: Annotated[str, typer.Argument(help="Stable schedule ID.")],
+    url: Annotated[str, typer.Argument(help="Douyin favorites page URL.")],
+    every_minutes: Annotated[
+        int,
+        typer.Option("--every-minutes", min=1, help="Foreground tick interval."),
+    ] = 60,
+    profile: Annotated[
+        ProfileOption,
+        typer.Option(help="Pipeline profile for newly discovered sources."),
+    ] = ProfileOption.EVIDENCE,
+    output_root: Annotated[
+        Path | None,
+        typer.Option("--output-root", help="Vault root."),
+    ] = None,
+) -> None:
+    """Persist a default-video Douyin favorites monitor."""
+    root = _output_root(output_root)
+    try:
+        schedule = create_interval_douyin_schedule(
+            root,
+            schedule_id,
+            url,
+            every_seconds=every_minutes * 60,
+            profile=profile.value,
+        )
+    except (OSError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Added schedule: {schedule.schedule_id}")
+
+
+@schedule_app.command("list")
+def schedule_list_command(
+    output_root: Annotated[
+        Path | None,
+        typer.Option("--output-root", help="Vault root."),
+    ] = None,
+) -> None:
+    """List project-internal schedule facts."""
+    root = _output_root(output_root)
+    try:
+        schedules = list_schedules(root)
+    except (OSError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    for schedule in schedules:
+        typer.echo(
+            f"{schedule.schedule_id}\t{schedule.status}\t"
+            f"{schedule.source.kind}\t{schedule.trigger.kind}"
+        )
+
+
+@schedule_app.command("run")
+def schedule_run_command(
+    schedule_id: Annotated[str, typer.Argument(help="Stable schedule ID.")],
+    output_root: Annotated[
+        Path | None,
+        typer.Option("--output-root", help="Vault root."),
+    ] = None,
+) -> None:
+    """Run exactly one monitor in this foreground process, regardless of due time."""
+    root = _output_root(output_root)
+    runtime_credentials = _load_douyin_cookie()
+    try:
+        outcome = run_schedule_once(
+            root,
+            schedule_id,
+            adapter_factory=_schedule_adapter,
+            runtime_credentials=runtime_credentials,
+        )
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: schedule is already running: {schedule_id}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, PipelineError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"{outcome.schedule_id}: {outcome.status}"
+        + (f" batch={outcome.batch_id}" if outcome.batch_id else "")
+        + (f" ({outcome.error})" if outcome.error else "")
+    )
+    if outcome.status not in {"completed", "partial"}:
+        raise typer.Exit(code=1)
+
+
+@schedule_app.command("disable")
+def schedule_disable_command(
+    schedule_id: Annotated[str, typer.Argument(help="Stable schedule ID.")],
+    output_root: Annotated[
+        Path | None,
+        typer.Option("--output-root", help="Vault root."),
+    ] = None,
+) -> None:
+    """Disable one project-internal schedule without deleting its fact."""
+    root = _output_root(output_root)
+    try:
+        with schedule_lock(root, schedule_id, timeout=0):
+            current = load_schedule(schedule_path(root, schedule_id))
+            updated = current.model_copy(update={"status": "disabled"})
+            write_schedule_atomic(root, updated)
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: schedule is already running: {schedule_id}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Disabled schedule: {schedule_id}")
+
+
+@schedule_app.command("tick")
+def schedule_tick_command(
+    output_root: Annotated[
+        Path | None,
+        typer.Option("--output-root", help="Vault root."),
+    ] = None,
+) -> None:
+    """Run due schedules once in this foreground process."""
+    root = _output_root(output_root)
+    runtime_credentials = _load_douyin_cookie()
+    try:
+        outcomes = tick_schedules(
+            root,
+            adapter_factory=_schedule_adapter,
+            runtime_credentials=runtime_credentials,
+        )
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: schedule is already running: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, PipelineError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    failed = False
+    for outcome in outcomes:
+        typer.echo(
+            f"{outcome.schedule_id}: {outcome.status}"
+            + (f" ({outcome.error})" if outcome.error else "")
+        )
+        failed = failed or outcome.status in {"blocked", "failed", "interrupted"}
+    if failed:
+        raise typer.Exit(code=1)
+
+
+def _schedule_adapter(schedule, credentials):
+    if schedule.source.kind == "folder":
+        return FolderAdapter(
+            schedule.source.path,
+            recursive=schedule.source.recursive,
+        )
+    if credentials is None or not credentials.get_secret_value().strip():
+        raise RuntimeError(
+            "Douyin cookie is missing; set DOUYIN_COOKIE or provide a local .env"
+        )
+    if schedule.source.folder_ids:
+        raise RuntimeError(
+            "custom Douyin folder monitoring is not verified on the pure HTTP path"
+        )
+    transport = DouyinHttpTransport(credentials)
+    return DouyinFavoritesAdapter(
+        transport,
+        folder_ids=(),
+        include_default_video=schedule.source.include_default_video,
+    )
+
+
+def _load_douyin_cookie() -> SecretStr | None:
+    """Load a runtime-only Douyin cookie from the unified runtime config."""
+    value = _runtime_environment().get("DOUYIN_COOKIE", "")
+    return SecretStr(value) if value else None
+
+
+def _runtime_environment() -> dict[str, str]:
+    """Read whitelisted local runtime settings without storing their values."""
+    return load_runtime_environment(Path.cwd())
+
+
+def _output_root(output_root: Path | None) -> Path:
+    """Resolve the optional vault root at command execution time."""
+    return (output_root if output_root is not None else Path.cwd()).resolve()
+
+
+def _task_execution_lock(root: Path, task_dir: Path):
+    persisted = load_task(task_dir)
+    return task_lock(root, persisted.task_id, timeout=0)
+
+
+@contextmanager
+def _resource_execution(root: Path, *resources: str):
+    scheduler = ResourceScheduler(root)
+    with ExitStack() as stack:
+        for resource in resources:
+            stack.enter_context(scheduler.acquire(resource))
+        yield
+
+
+def _find_task_dir(
+    task_id: str, output_root: Path, *, include_invalid: bool = False
+) -> Path:
+    """Find one persisted task by stable ID without relying on its mutable title."""
+    tasks_root = output_root / "视频学习素材"
+    matches: list[Path] = []
+    for task_json in tasks_root.glob("*/task.json"):
+        try:
+            task = load_task(task_json.parent)
+        except (OSError, ValueError):
+            if include_invalid and _raw_task_id(task_json) == task_id:
+                matches.append(task_json.parent)
+            continue
+        if task.task_id == task_id:
+            matches.append(task_json.parent)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise typer.BadParameter(
+            f"multiple task directories found: {task_id}", param_hint="task_id"
+        )
+    raise typer.BadParameter(f"task not found: {task_id}", param_hint="task_id")
+
+
+def _raw_task_id(task_json: Path) -> str | None:
+    """Read only the raw task identity so validation can report schema errors."""
+    try:
+        payload = json.loads(task_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = payload.get("task_id") if isinstance(payload, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def _mimo_api_key(environ: Mapping[str, str]) -> SecretStr:
+    value = environ.get("MIMO_API_KEY", "").strip()
+    if not value:
+        raise ValueError("MIMO_API_KEY is missing")
+    return SecretStr(value)
+
+
+def _note_safe_input_tokens(environ: Mapping[str, str]) -> int:
+    """Read one transparent conservative provider budget for full-pack V4 calls."""
+    raw = environ.get("LEARNNEST_NOTE_SAFE_INPUT_TOKENS", "").strip()
+    if not raw:
+        return DEFAULT_NOTE_SAFE_INPUT_TOKENS
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(
+            "LEARNNEST_NOTE_SAFE_INPUT_TOKENS must be an integer"
+        ) from error
+    if value < 1_024:
+        raise ValueError("LEARNNEST_NOTE_SAFE_INPUT_TOKENS must be at least 1024")
+    return value
+
+
+def _resolve_v4_template(
+    task_dir: Path,
+    reference: str | None,
+    note_type: str | None,
+):
+    """Resolve V4 template intent deterministically without a classifier call."""
+    if reference is not None and note_type is not None:
+        raise ValueError("--template and --note-type are mutually exclusive")
+    preset_by_type = {
+        "concept": "concept-explanation",
+        "concept_explanation": "concept-explanation",
+        "resource": "resource-share",
+        "resource_share": "resource-share",
+        "practical": "practical-tutorial",
+        "practical_tutorial": "practical-tutorial",
+    }
+    if note_type is not None and note_type != "auto":
+        default_id = preset_by_type[note_type]
+    else:
+        stored = load_task(task_dir).note_type_override
+        default_id = preset_by_type.get(stored or "", "concept-explanation")
+    return resolve_note_template(reference, default_id=default_id)
+
+
+def _note_provider_pair(
+    environ: Mapping[str, str],
+) -> tuple[object, object, SecretStr]:
+    safe_input_tokens = _note_safe_input_tokens(environ)
+    generic_names = (
+        "LEARNNEST_NOTE_API_KEY",
+        "LEARNNEST_NOTE_BASE_URL",
+        "LEARNNEST_NOTE_MODEL",
+    )
+    if any(name in environ for name in generic_names):
+        values = {name: environ.get(name, "").strip() for name in generic_names}
+        if not all(values.values()):
+            raise ValueError(
+                "LEARNNEST_NOTE_API_KEY, LEARNNEST_NOTE_BASE_URL, and "
+                "LEARNNEST_NOTE_MODEL must be set together"
+            )
+        if environ.get("MIMO_API_KEY", "").strip():
+            raise ValueError(
+                "generic note provider configuration cannot be combined with "
+                "MIMO_API_KEY"
+            )
+        config = OpenAICompatibleChatConfig(
+            provider_name=environ.get("LEARNNEST_NOTE_PROVIDER", "").strip()
+            or "openai-compatible",
+            model=values["LEARNNEST_NOTE_MODEL"],
+            base_url=values["LEARNNEST_NOTE_BASE_URL"],
+            api_key=SecretStr(values["LEARNNEST_NOTE_API_KEY"]),
+            json_response_mode=environ.get(
+                "LEARNNEST_NOTE_JSON_MODE", "json_object"
+            ).strip()
+            or "json_object",
+            safe_input_tokens=safe_input_tokens,
+        )
+        return (
+            OpenAICompatibleNoteProvider(config),
+            OpenAICompatibleNoteReviewer(config),
+            config.api_key,
+        )
+
+    secret = _mimo_api_key(environ)
+    return (
+        MimoNoteProvider(secret, safe_input_tokens=safe_input_tokens),
+        MimoNoteReviewer(secret, safe_input_tokens=safe_input_tokens),
+        secret,
+    )
+
+
+def _optional_note_auditor(
+    environ: Mapping[str, str],
+) -> tuple[object | None, SecretStr | None]:
+    """Return an auditor only when a complete note-provider configuration exists."""
+    generic_names = (
+        "LEARNNEST_NOTE_API_KEY",
+        "LEARNNEST_NOTE_BASE_URL",
+        "LEARNNEST_NOTE_MODEL",
+    )
+    if (
+        any(name in environ for name in generic_names)
+        or environ.get("MIMO_API_KEY", "").strip()
+    ):
+        _provider, auditor, secret = _note_provider_pair(environ)
+        return auditor, secret
+    return None, None
+
+
+def _safe_error(error: Exception, secret: SecretStr | None) -> str:
+    message = str(error)
+    if secret is not None:
+        value = secret.get_secret_value()
+        if value:
+            message = message.replace(value, "***")
+    return message

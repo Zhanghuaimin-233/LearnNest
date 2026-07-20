@@ -1,0 +1,55 @@
+[project]
+name = "learnnest"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "filelock>=3.29.7",
+    "openai>=2.45.0",
+    "paddleocr",
+    "paddlepaddle==3.3.0",
+    "pillow>=12.3.0",
+    "pydantic>=2.13.4",
+    "typer>=0.26.8",
+    "yt-dlp>=2026.7.4",
+]
+
+[project.scripts]
+learnnest = "learnnest.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/learnnest"]
+exclude = [
+    "src/learnnest/fixtures/*.wav",
+    "src/learnnest/fixtures/*.png",
+]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'win32' and implementation_name == 'cpython'",
+]
+
+[tool.uv.sources]
+paddlepaddle = { index = "paddle-cpu" }
+
+[[tool.uv.index]]
+name = "paddle-cpu"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cpu/"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.21",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+cache_dir = "artifacts/local/test-runs/pytest-cache"
+
+[tool.ruff]
+cache-dir = "artifacts/local/test-runs/ruff-cache"

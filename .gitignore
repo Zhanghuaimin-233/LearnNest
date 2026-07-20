@@ -1,0 +1,55 @@
+# Python runtime and generated caches
+.venv/
+__pycache__/
+*.py[cod]
+# Root-level pytest/Ruff scratch and manually archived test runs are local only.
+.pytest_cache/
+.pytest-codex-*/
+.pytest-schema-preflight/
+.ruff_cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Local media and generated pipeline artifacts
+.learnnest/
+.learnpipe/
+.superpowers/
+artifacts/
+dist/
+*.log
+# Audio, image, video and document binaries stay local by default. The public
+# brand icon is the only intentional exception.
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.tif
+*.tiff
+*.avif
+*.heic
+*.ico
+*.pdf
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.avi
+*.m4v
+!assets/brand/icon.png
+视频学习素材/
+视频学习笔记/
+视频学习音频/
+视频学习批次/
+抖音图文素材/

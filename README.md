@@ -203,6 +203,25 @@ uv run learnnest note `
   --output-root .\learnnest-output
 ```
 
+### 质量优先学习笔记
+
+质量优先链路是独立的显式工作流，不改变旧 `learnnest note` 的默认行为。它先组织语义证据单元，再生成读者草稿，最后按需生成质量报告或执行 gate；每个计划会保存输入 SHA、分片、角色模型和最大调用数。
+
+```powershell
+uv run learnnest quality-note plan `
+  <task_id> `
+  --template mixed `
+  --review-mode gate `
+  --output-root .\learnnest-output
+
+uv run learnnest quality-note organize <plan.json> --output-root .\learnnest-output
+uv run learnnest quality-note generate <plan.json> --output-root .\learnnest-output
+uv run learnnest quality-note review <plan.json> --output-root .\learnnest-output
+uv run learnnest quality-note status <plan.json>
+```
+
+`plan`、`status` 和 `recover` 不调用 provider；恢复只处理已经落盘的本地候选和发布。质量报告不等同于人工阅读、图片或音频验收，`gate` 被拒绝时旧 active note 保持不变。
+
 继续生成播客稿和音频：
 
 ```powershell

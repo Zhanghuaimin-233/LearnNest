@@ -175,6 +175,10 @@ class ContentPack(BaseModel):
     source_fingerprint: str = Field(min_length=1)
     evidence: list[Evidence] = Field(default_factory=list)
 
+    def evidence_by_id(self) -> dict[str, Evidence]:
+        """Return the canonical evidence lookup used by derived workflows."""
+        return {item.id: item for item in self.evidence}
+
     @model_validator(mode="after")
     def evidence_ids_must_be_unique_and_resolvable(self) -> ContentPack:
         evidence_ids = [item.id for item in self.evidence]

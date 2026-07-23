@@ -31,6 +31,9 @@ def run_worker(
 
 
 def _asset_environment() -> dict[str, str]:
-    """Forward only local model-cache configuration to provider workers."""
+    """Force workers to use locally available model assets only."""
     cache = load_runtime_environment(os.getcwd()).get("HUGGINGFACE_HUB_CACHE", "")
-    return {"HUGGINGFACE_HUB_CACHE": cache} if cache else {}
+    environment = {"HF_HUB_OFFLINE": "1"}
+    if cache:
+        environment["HUGGINGFACE_HUB_CACHE"] = cache
+    return environment

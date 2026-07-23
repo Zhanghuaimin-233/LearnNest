@@ -41,15 +41,27 @@ from learnnest.note_providers import (
     DEFAULT_NOTE_SAFE_INPUT_TOKENS,
     MimoNoteProvider,
     MimoNoteReviewer,
+    MimoQualityNoteProvider,
     OpenAICompatibleChatConfig,
     OpenAICompatibleNoteProvider,
     OpenAICompatibleNoteReviewer,
+    OpenAICompatibleQualityNoteProvider,
 )
 from learnnest.note_templates import (
     load_template_file,
     resolve_note_template,
     template_snapshot_sha256,
 )
+from learnnest.quality_note_generation import (
+    create_quality_plan,
+    generate_quality_note_plan,
+    load_quality_plan,
+    load_quality_state,
+    organize_quality_plan,
+    recover_quality_plan,
+    review_quality_note_plan,
+)
+from learnnest.reader_templates import resolve_reader_template
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
 from learnnest.podcast_generation import (
     build_and_activate_external_podcast,
@@ -93,6 +105,7 @@ schedule_app = typer.Typer(no_args_is_help=True)
 template_app = typer.Typer(no_args_is_help=True)
 flow_app = typer.Typer(no_args_is_help=True)
 layout_app = typer.Typer(no_args_is_help=True)
+quality_note_app = typer.Typer(no_args_is_help=True)
 app.add_typer(
     index_app, name="index", help="Inspect or rebuild the Vault SQLite read model."
 )
@@ -121,6 +134,11 @@ app.add_typer(
     layout_app,
     name="layout",
     help="Preview or explicitly migrate artifact roots without copying files.",
+)
+app.add_typer(
+    quality_note_app,
+    name="quality-note",
+    help="Run the explicit quality-first Organizer/Writer/Reviewer workflow.",
 )
 
 
@@ -156,6 +174,14 @@ class NoteTypeOption(StrEnum):
 
 class ReviewModeOption(StrEnum):
     """Optional V4 semantic-audit policy for an explicit note command."""
+
+    NONE = "none"
+    REPORT = "report"
+    GATE = "gate"
+
+
+class QualityReviewModeOption(StrEnum):
+    """Quality-first review policy; separate from the legacy V4 command."""
 
     NONE = "none"
     REPORT = "report"
@@ -1280,6 +1306,192 @@ def validate_note(
     typer.echo(f"Valid generated note: {task_id}")
 
 
+@quality_note_app.command("plan")
+def quality_note_plan(
+    task_ids: Annotated[
+        list[str],
+        typer.Argument(help="One or more stable task IDs with content packs."),
+    ],
+    template: Annotated[
+        str,
+        typer.Option(
+            "--template", help="Reader template type or a constrained JSON file."
+        ),
+    ] = "mixed",
+    review_mode: Annotated[
+        QualityReviewModeOption,
+        typer.Option(
+            "--review-mode", help="Quality review policy: none, report, or gate."
+        ),
+    ] = QualityReviewModeOption.NONE,
+    shard_size: Annotated[
+        int,
+        typer.Option(
+            "--shard-size", min=1, help="Maximum source atoms per Organizer shard."
+        ),
+    ] = 80,
+    organizer_provider: Annotated[
+        str,
+        typer.Option("--organizer-provider", help="Persisted Organizer provider name."),
+    ] = "xiaomi-mimo",
+    organizer_model: Annotated[
+        str, typer.Option("--organizer-model", help="Persisted Organizer model name.")
+    ] = "mimo-v2.5",
+    writer_provider: Annotated[
+        str, typer.Option("--writer-provider", help="Persisted Writer provider name.")
+    ] = "xiaomi-mimo",
+    writer_model: Annotated[
+        str, typer.Option("--writer-model", help="Persisted Writer model name.")
+    ] = "mimo-v2.5",
+    reviewer_provider: Annotated[
+        str,
+        typer.Option("--reviewer-provider", help="Persisted Reviewer provider name."),
+    ] = "xiaomi-mimo",
+    reviewer_model: Annotated[
+        str, typer.Option("--reviewer-model", help="Persisted Reviewer model name.")
+    ] = "mimo-v2.5",
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Write an immutable quality-first execution plan without provider calls."""
+    root = _output_root(output_root)
+    try:
+        selected_template = resolve_reader_template(template, default_type="mixed")
+        plan_path = create_quality_plan(
+            root,
+            task_ids,
+            template=selected_template,
+            organizer_provider=organizer_provider,
+            organizer_model=organizer_model,
+            writer_provider=writer_provider,
+            writer_model=writer_model,
+            reviewer_provider=(
+                reviewer_provider
+                if review_mode is not QualityReviewModeOption.NONE
+                else None
+            ),
+            reviewer_model=(
+                reviewer_model
+                if review_mode is not QualityReviewModeOption.NONE
+                else None
+            ),
+            review_mode=review_mode.value,
+            shard_size=shard_size,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Quality plan: {plan_path}")
+
+
+@quality_note_app.command("organize")
+def quality_note_organize(
+    plan_path: Annotated[
+        Path, typer.Argument(exists=True, file_okay=True, dir_okay=True, readable=True)
+    ],
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Execute the planned Organizer calls exactly once per missing shard."""
+    root = _output_root(output_root)
+    secret: SecretStr | None = None
+    try:
+        provider, secret = _quality_note_provider(_runtime_environment())
+        with _resource_execution(root, "network", "llm"):
+            state = organize_quality_plan(plan_path, root, provider)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(_quality_state_summary(state))
+
+
+@quality_note_app.command("generate")
+def quality_note_generate(
+    plan_path: Annotated[
+        Path, typer.Argument(exists=True, file_okay=True, dir_okay=True, readable=True)
+    ],
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Execute the planned Writer calls after organization bundles are complete."""
+    root = _output_root(output_root)
+    secret: SecretStr | None = None
+    try:
+        provider, secret = _quality_note_provider(_runtime_environment())
+        with _resource_execution(root, "network", "llm"):
+            state = generate_quality_note_plan(plan_path, root, provider)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(_quality_state_summary(state))
+
+
+@quality_note_app.command("review")
+def quality_note_review(
+    plan_path: Annotated[
+        Path, typer.Argument(exists=True, file_okay=True, dir_okay=True, readable=True)
+    ],
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Run the planned Reviewer or local quality report and apply gate semantics."""
+    root = _output_root(output_root)
+    secret: SecretStr | None = None
+    try:
+        plan = load_quality_plan(plan_path)
+        needs_reviewer = any(item.review_mode != "none" for item in plan.tasks)
+        provider = None
+        if needs_reviewer:
+            provider, secret = _quality_note_provider(_runtime_environment())
+        if provider is None:
+            state = review_quality_note_plan(plan_path, root)
+        else:
+            with _resource_execution(root, "network", "llm"):
+                state = review_quality_note_plan(plan_path, root, provider)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(_quality_state_summary(state))
+
+
+@quality_note_app.command("status")
+def quality_note_status(
+    plan_path: Annotated[
+        Path, typer.Argument(exists=True, file_okay=True, dir_okay=True, readable=True)
+    ],
+) -> None:
+    """Show persisted quality-first status and actual role call counts."""
+    try:
+        state = load_quality_state(plan_path)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(_quality_state_summary(state))
+
+
+@quality_note_app.command("recover")
+def quality_note_recover(
+    plan_path: Annotated[
+        Path, typer.Argument(exists=True, file_okay=True, dir_okay=True, readable=True)
+    ],
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Recover only local quality bundle writes and publication, never provider calls."""
+    root = _output_root(output_root)
+    try:
+        state = recover_quality_plan(plan_path, root)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(_quality_state_summary(state))
+
+
 @app.command()
 def podcast(
     task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
@@ -1788,6 +2000,45 @@ def _note_provider_pair(
     )
 
 
+def _quality_note_provider(
+    environ: Mapping[str, str],
+) -> tuple[object, SecretStr]:
+    """Build the explicit quality-role provider from the same BYOK boundary."""
+    safe_input_tokens = _note_safe_input_tokens(environ)
+    generic_names = (
+        "LEARNNEST_NOTE_API_KEY",
+        "LEARNNEST_NOTE_BASE_URL",
+        "LEARNNEST_NOTE_MODEL",
+    )
+    if any(name in environ for name in generic_names):
+        values = {name: environ.get(name, "").strip() for name in generic_names}
+        if not all(values.values()):
+            raise ValueError(
+                "LEARNNEST_NOTE_API_KEY, LEARNNEST_NOTE_BASE_URL, and "
+                "LEARNNEST_NOTE_MODEL must be set together"
+            )
+        if environ.get("MIMO_API_KEY", "").strip():
+            raise ValueError(
+                "generic note provider configuration cannot be combined with "
+                "MIMO_API_KEY"
+            )
+        config = OpenAICompatibleChatConfig(
+            provider_name=environ.get("LEARNNEST_NOTE_PROVIDER", "").strip()
+            or "openai-compatible",
+            model=values["LEARNNEST_NOTE_MODEL"],
+            base_url=values["LEARNNEST_NOTE_BASE_URL"],
+            api_key=SecretStr(values["LEARNNEST_NOTE_API_KEY"]),
+            json_response_mode=environ.get(
+                "LEARNNEST_NOTE_JSON_MODE", "json_object"
+            ).strip()
+            or "json_object",
+            safe_input_tokens=safe_input_tokens,
+        )
+        return OpenAICompatibleQualityNoteProvider(config), config.api_key
+    secret = _mimo_api_key(environ)
+    return MimoQualityNoteProvider(secret, safe_input_tokens=safe_input_tokens), secret
+
+
 def _optional_note_auditor(
     environ: Mapping[str, str],
 ) -> tuple[object | None, SecretStr | None]:
@@ -1813,3 +2064,16 @@ def _safe_error(error: Exception, secret: SecretStr | None) -> str:
         if value:
             message = message.replace(value, "***")
     return message
+
+
+def _quality_state_summary(state: object) -> str:
+    rows: list[str] = []
+    for task in state.tasks:  # type: ignore[attr-defined]
+        rows.append(
+            f"{task.task_id}: {task.status} "
+            f"organizer={task.organizer.actual_call_count}/{task.organizer.max_calls} "
+            f"writer={task.writer.actual_call_count}/{task.writer.max_calls} "
+            f"reviewer={task.reviewer.actual_call_count}/{task.reviewer.max_calls} "
+            f"activation={task.activation_decision}"
+        )
+    return "\n".join(rows)

@@ -593,9 +593,12 @@ def test_validate_reports_an_invalid_task_json_when_its_raw_task_id_matches(
     assert "task not found" not in result.output
 
 
-def test_doctor_starts_each_provider_check_in_an_isolated_worker(monkeypatch) -> None:
+def test_doctor_starts_each_provider_check_in_an_isolated_worker(
+    monkeypatch, tmp_path: Path
+) -> None:
     import learnnest.cli as cli
 
+    monkeypatch.chdir(tmp_path)
     calls: list[list[str]] = []
 
     def fake_run_worker(args: list[str], **kwargs: object) -> CompletedProcess[str]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -14,6 +15,7 @@ from pydantic import (
 )
 
 from learnnest.note_templates import SemanticBlockKind
+from learnnest.reader_templates import ReaderSlot
 
 
 def _validate_plain_text(value: str) -> str:
@@ -55,6 +57,135 @@ class AiSupplement(_NoteModel):
     """Clearly separated model-generated context without evidence claims."""
 
     text: PlainText
+
+
+_READER_URL_PATTERN = re.compile(r"https?://", re.IGNORECASE)
+_READER_MARKUP_PATTERN = re.compile(
+    r"<!--.*?-->|</?[A-Za-z][^<>]*>", re.IGNORECASE | re.DOTALL
+)
+
+
+class ReaderDraftItem(_NoteModel):
+    """Provider-only reader content; it cannot carry program-owned fields."""
+
+    text: PlainText
+    evidence_unit_ids: list[NonEmptyString] = Field(default_factory=list)
+    ai_supplement: bool = False
+
+    @model_validator(mode="after")
+    def source_and_ai_are_separate(self) -> ReaderDraftItem:
+        if _READER_URL_PATTERN.search(self.text):
+            raise ValueError("ReaderDraft text must not contain URLs")
+        if _READER_MARKUP_PATTERN.search(self.text):
+            raise ValueError("ReaderDraft text must not contain markup")
+        if self.ai_supplement and self.evidence_unit_ids:
+            raise ValueError("ai_supplement items must not cite evidence units")
+        if len(self.evidence_unit_ids) != len(set(self.evidence_unit_ids)):
+            raise ValueError("evidence_unit_ids must be unique")
+        return self
+
+
+class ReaderDraftSection(_NoteModel):
+    """Provider-facing slot contents before program section IDs are injected."""
+
+    slot: ReaderSlot
+    items: list[ReaderDraftItem] = Field(default_factory=list)
+
+
+class ReaderDraft(_NoteModel):
+    """The quality-first Writer response without task or rendering metadata."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    title: PlainText
+    sections: list[ReaderDraftSection] = Field(default_factory=list)
+    ai_supplements: list[AiSupplement] = Field(default_factory=list)
+
+
+class QualityNoteLocator(_NoteModel):
+    """A program-derived URL locator, never supplied by the Writer."""
+
+    url: PlainText
+    evidence_ids: list[NonEmptyString] = Field(min_length=1)
+
+
+class QualityNoteItem(_NoteModel):
+    """Program-owned rendered item with expanded raw evidence IDs."""
+
+    order: int = Field(ge=1)
+    text: PlainText
+    evidence_unit_ids: list[NonEmptyString] = Field(default_factory=list)
+    evidence_ids: list[NonEmptyString] = Field(default_factory=list)
+    ai_supplement: bool = False
+    locator: QualityNoteLocator | None = None
+
+    @model_validator(mode="after")
+    def item_source_contract(self) -> QualityNoteItem:
+        if self.ai_supplement and (self.evidence_unit_ids or self.evidence_ids):
+            raise ValueError("ai_supplement items cannot contain source evidence")
+        if not self.ai_supplement and not self.evidence_unit_ids:
+            raise ValueError("source item requires evidence_unit_ids")
+        if not self.ai_supplement and not self.evidence_ids:
+            raise ValueError("source item requires expanded evidence_ids")
+        return self
+
+
+class QualityNoteSection(_NoteModel):
+    """Renderer-owned section with stable ID, purpose, and contiguous order."""
+
+    order: int = Field(ge=1)
+    section_id: NonEmptyString
+    slot: ReaderSlot
+    heading: PlainText
+    purpose: PlainText
+    required: bool
+    items: list[QualityNoteItem] = Field(default_factory=list)
+
+
+class QualityNoteEnvelope(_NoteModel):
+    """Formal program-owned quality-first note bundle envelope."""
+
+    schema_version: Literal["1.0"]
+    task_id: NonEmptyString
+    source_fingerprint: NonEmptyString
+    content_pack_sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+    template_id: NonEmptyString
+    template_sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+    title: PlainText
+    sections: list[QualityNoteSection] = Field(min_length=7)
+    ai_supplements: list[AiSupplement] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def sections_are_ordered(self) -> QualityNoteEnvelope:
+        orders = [section.order for section in self.sections]
+        if orders != list(range(1, len(self.sections) + 1)):
+            raise ValueError("quality note section order must be contiguous")
+        section_ids = [section.section_id for section in self.sections]
+        if len(section_ids) != len(set(section_ids)):
+            raise ValueError("quality note section IDs must be unique")
+        return self
+
+
+class QualityReviewIssue(_NoteModel):
+    """Provider-only advisory issue; the local quality report remains authoritative."""
+
+    code: NonEmptyString
+    severity: Literal["low", "medium", "high"]
+    message: PlainText
+    section_id: NonEmptyString | None = None
+
+
+class QualityReviewerResponse(_NoteModel):
+    """Strict response from the optional Reviewer role."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    status: Literal["passed", "flagged"]
+    issues: list[QualityReviewIssue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def flagged_response_has_an_issue(self) -> QualityReviewerResponse:
+        if self.status == "flagged" and not self.issues:
+            raise ValueError("flagged quality review requires issues")
+        return self
 
 
 class GeneratedNote(_NoteModel):
@@ -204,3 +335,11 @@ def generated_note_v3_json_schema() -> dict[str, object]:
 
 def generated_note_v4_json_schema() -> dict[str, object]:
     return TypeAdapter(GeneratedNoteV4).json_schema()
+
+
+def reader_draft_json_schema() -> dict[str, object]:
+    return TypeAdapter(ReaderDraft).json_schema()
+
+
+def quality_reviewer_json_schema() -> dict[str, object]:
+    return TypeAdapter(QualityReviewerResponse).json_schema()

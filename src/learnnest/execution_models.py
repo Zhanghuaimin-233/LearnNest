@@ -29,6 +29,29 @@ AttemptStatus = Literal[
     "skipped_duplicate",
 ]
 FailureDisposition = Literal["retryable", "manual", "terminal"]
+QualityFailurePhase = Literal[
+    "input",
+    "organization",
+    "writing",
+    "source_validation",
+    "quality",
+    "publication",
+    "recovery",
+]
+QualityFailureCode = Literal[
+    "input_missing",
+    "plan_mismatch",
+    "provider_error",
+    "invalid_response",
+    "unknown_evidence_id",
+    "cross_source_reference",
+    "call_budget_exhausted",
+    "source_validation_failed",
+    "quality_rejected",
+    "publication_recovery_failed",
+    "recovery_not_possible",
+]
+QualityRetryability = Literal["local_recovery", "requires_new_plan", "terminal"]
 
 _SENSITIVE_PATTERN = re.compile(
     r"(?i)(authorization\s*:|bearer\s+|api[_ -]?key\s*[:=]\s*\S+|cookie\s*:|sk-[a-z0-9_-]{8,})"

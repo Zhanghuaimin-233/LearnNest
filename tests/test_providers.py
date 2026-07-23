@@ -116,7 +116,36 @@ def test_run_worker_uses_current_interpreter_and_worker_module(
             "transcript.json",
         ],
     )
-    assert recorded["kwargs"] == {"capture_output": True, "text": True, "check": False}
+    options = recorded["kwargs"]
+    assert options["capture_output"] is True
+    assert options["text"] is True
+    assert options["check"] is False
+    assert options["env"]["HF_HUB_OFFLINE"] == "1"
+
+
+def test_run_worker_forwards_cached_models_in_offline_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from learnnest import providers
+
+    recorded: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        recorded["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args[0], 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(
+        providers,
+        "load_runtime_environment",
+        lambda _working_directory: {"HUGGINGFACE_HUB_CACHE": "E:/models"},
+    )
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+
+    providers.run_worker(["asr", "lesson.mp4", "transcript.json"])
+
+    environment = recorded["kwargs"]["env"]
+    assert environment["HUGGINGFACE_HUB_CACHE"] == "E:/models"
+    assert environment["HF_HUB_OFFLINE"] == "1"
 
 
 def test_parent_provider_module_does_not_import_asr_or_ocr_libraries() -> None:

@@ -4,8 +4,12 @@ import json
 
 import pytest
 
-from learnnest.evidence_organization import organize_evidence_units
-from learnnest.evidence_units import build_evidence_atoms
+from learnnest.evidence_organization import (
+    canonical_writer_organization_json,
+    organize_evidence_units,
+)
+from learnnest.evidence_unit_models import EvidenceUnitOrganization
+from learnnest.evidence_units import build_evidence_atoms, build_evidence_unit
 from learnnest.models import ContentPack, Evidence
 
 
@@ -70,17 +74,24 @@ class FakeOrganizer:
             if self.raw_ids is not None
             else (["tr_9999"] if self.invalid else atom_ids)
         )
+        visual_anchor = next(
+            (evidence_id for evidence_id in raw_ids if evidence_id.startswith("fr_")),
+            None,
+        )
         return json.dumps(
             {
-                "schema_version": "1.0",
+                "schema_version": "2.0",
                 "units": [
                     {
                         "raw_evidence_ids": raw_ids,
                         "unit_type": "concept",
                         "topic_labels": ["设置"],
                         "outline": "程序生成的组织纲要",
-                        "visual_role": "useful",
-                        "visual_reason": "帮助定位画面",
+                        "reader_relevance": "core",
+                        "citation_anchor_ids": raw_ids[:3],
+                        "visual_role": "useful" if visual_anchor else "none",
+                        "visual_reason": "帮助定位画面" if visual_anchor else None,
+                        "visual_anchor_id": visual_anchor,
                     }
                 ],
             },
@@ -171,9 +182,51 @@ def test_organizer_input_contains_only_deterministic_source_atoms() -> None:
     )
 
     payload = json.loads(organizer.calls[0])
-    assert payload["schema_version"] == "1.0"
+    assert payload["schema_version"] == "2.0"
     assert payload["shard"]["shard_id"] == "shard_0001"
     assert [atom["evidence_id"] for atom in payload["atoms"]] == [
         atom.evidence_id for atom in build_evidence_atoms(pack)
     ]
     assert "task_id" not in payload
+
+
+def test_writer_input_excludes_background_and_full_evidence_closure() -> None:
+    pack = _content_pack()
+    core = build_evidence_unit(
+        pack,
+        unit_id="eu_0001",
+        shard_id="shard_0001",
+        raw_evidence_ids=["tr_0001", "ocr_0001"],
+        unit_type="concept",
+        topic_labels=["设置"],
+        outline="打开设置",
+        reader_relevance="core",
+        citation_anchor_ids=["tr_0001"],
+        visual_role="none",
+    )
+    background = build_evidence_unit(
+        pack,
+        unit_id="eu_0002",
+        shard_id="shard_0001",
+        raw_evidence_ids=["tr_0002"],
+        unit_type="background",
+        topic_labels=["背景"],
+        outline="补充背景",
+        reader_relevance="background",
+        citation_anchor_ids=["tr_0002"],
+        visual_role="none",
+    )
+    organization = EvidenceUnitOrganization(
+        task_id=pack.task_id,
+        source_fingerprint=pack.source_fingerprint,
+        content_pack_sha256="a" * 64,
+        units=[core, background],
+        shard_ids=["shard_0001"],
+    )
+
+    payload = json.loads(canonical_writer_organization_json(organization))
+
+    assert [unit["unit_id"] for unit in payload["units"]] == ["eu_0001"]
+    assert payload["units"][0]["citation_anchor_ids"] == ["tr_0001"]
+    assert "evidence_ids" not in payload["units"][0]
+    assert "ocr_0001" not in json.dumps(payload, ensure_ascii=False)

@@ -10,7 +10,7 @@ LearnNest（语栖）是本地优先的 Windows CLI：本地视频或公开 URL 
 - `process`、`run`、`queue run`、`recover` 不得隐式调用付费 note、podcast 或 tts provider。
 - API Key、Cookie、原始 provider 请求、模型缓存和本地媒体不得写入 Git、任务、批次、日志或 SQLite。
 - `content_pack.json` 是 LLM / 外部 Agent 的标准输入；每个可引用事实必须保留稳定 `evidence_id`。
-- LLM 只能生成受约束结构化内容；程序负责验证 evidence、OCR 父 frame、URL、SHA 与最终 Markdown。
+- LLM 只能生成受约束结构化内容；质量优先 Writer 的正文位于 JSON `markdown` 字段中。程序负责验证 evidence、OCR 父 frame、URL、SHA、视觉预算与最终 Markdown。
 - 新版本的运行状态目录是 `.learnnest`。切换同一输出根目录前先停止旧版进程：新旧版本的锁目录不同，不能依靠锁来避免并发写入。
 
 ## 模块地图
@@ -21,6 +21,7 @@ LearnNest（语栖）是本地优先的 Windows CLI：本地视频或公开 URL 
 | 确定性管线 | `pipeline.py`、`stages.py`、`worker.py` | 字幕、帧、OCR、evidence、内容包与重跑。 |
 | 任务与批次事实 | `models.py`、`task_store.py`、`batch_*.py` | 稳定 task ID、JSON 事实、可恢复执行。 |
 | 笔记链路 | `note_*.py`、`rendering.py` | V4 模板、provider、证据验证、Markdown 渲染。 |
+| 读者优先笔记 | `evidence_*.py`、`quality_*.py` | 相关性蒸馏、Writer 合同、provenance、质量门禁与可恢复发布。 |
 | 播客与音频 | `podcast_*.py`、`tts_*.py` | 显式生成、SHA/ownership 校验、发布。 |
 | 来源与下载 | `sources.py`、`downloader.py`、`adapters/` | 本地输入、公开 URL、抖音发现与下载。 |
 | 调度与锁 | `scheduler.py`、`locks.py`、`schedule_*.py` | 前台 tick、资源 semaphore 与跨进程锁。 |
@@ -40,6 +41,10 @@ LearnNest（语栖）是本地优先的 Windows CLI：本地视频或公开 URL 
 ## 不可破坏的合同
 
 - V4 新笔记仅允许完整内容包 + 受限模板；默认一次模型调用，`report` 与 `gate` 的审验语义不得混淆 `source_valid` 与人工质量验收。
+- 质量优先链路必须将读者 Markdown 与完整证据闭包分离：Writer 只接收 `core/supporting` unit，读者侧每个实质正文块最多一个紧凑脚注，完整闭包写入 `note.provenance.json`。
+- 所有 `core/supporting` unit 必须至少在一个实质正文块中被引用；摘要、脉络、实践、注意事项和复习只有在不引入新事实时才能作为 `derived_from_cited_note` 省略重复引用。
+- 图片只能来自 Writer 显式选择且程序验证过的视觉 unit，单篇最多三张；候选、active 和交付 Markdown 必须按各自目录重新渲染相对路径。
+- Writer HTTP 成功响应必须在校验前本地落盘。只有同源 organization 的 SHA 复用和已落盘响应的本地 `recover` 可以避免重复付费调用；不得篡改失败计划、隐藏重试或修剪未知来源。
 - V2/V3 bundle 仅保留 validate / rerender / podcast / tts 的兼容消费，不自动迁移或重新分类。
 - `task_id` 是身份，标题和目录名不是；TaskRecord / BatchManifest JSON 是事实，SQLite 是可重建投影。
 - OCR、字幕、AI 补充内容的来源类型必须区分；URL 只能逐字来自被引用的 transcript 或 OCR。

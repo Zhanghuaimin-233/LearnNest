@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +17,7 @@ from pydantic import ValidationError
 from learnnest.evidence_organization import (
     build_organization_from_responses,
     canonical_organization_json,
+    canonical_writer_organization_json,
     organization_sha256,
 )
 from learnnest.evidence_unit_models import (
@@ -48,7 +48,11 @@ from learnnest.quality_execution_models import (
     QualityTaskPlan,
     QualityTaskState,
 )
-from learnnest.quality_note import build_quality_note, render_quality_note
+from learnnest.quality_note import (
+    build_quality_note,
+    build_quality_note_provenance,
+    render_quality_note,
+)
 from learnnest.reader_templates import (
     ReaderTemplateManifest,
     parse_reader_template,
@@ -108,6 +112,7 @@ def create_quality_plan(
     reviewer_model: str | None = None,
     review_mode: str = "none",
     shard_size: int = 80,
+    reuse_organization_path: str | Path | None = None,
     now: datetime | None = None,
 ) -> Path:
     """Create an immutable plan without constructing or calling a provider."""
@@ -118,11 +123,14 @@ def create_quality_plan(
         raise ValueError("quality review mode must be none, report, or gate")
     if shard_size < 1:
         raise ValueError("quality shard size must be at least 1")
+    if reuse_organization_path is not None and len(task_ids) != 1:
+        raise ValueError("organization reuse requires exactly one task")
     created_at = now or datetime.now(UTC)
     if created_at.tzinfo is None or created_at.utcoffset() is None:
         raise ValueError("quality plan time must be timezone-aware")
     template_sha = reader_template_snapshot_sha256(template)
     task_plans: list[QualityTaskPlan] = []
+    reused_organizations: dict[str, EvidenceUnitOrganization] = {}
 
     for task_id in task_ids:
         found = find_task_by_id(root, task_id)
@@ -147,6 +155,32 @@ def create_quality_plan(
             separators=(",", ":"),
         )
         relative_task_dir = task_dir.resolve().relative_to(root).as_posix()
+        reused_path: str | None = None
+        reused_sha: str | None = None
+        if reuse_organization_path is not None:
+            source_path = Path(reuse_organization_path).resolve()
+            if not source_path.is_relative_to(root) or not source_path.is_file():
+                raise ValueError(
+                    "reused organization must be a file inside output root"
+                )
+            try:
+                reused_organization = EvidenceUnitOrganization.model_validate_json(
+                    source_path.read_bytes()
+                )
+            except (OSError, UnicodeError, ValueError) as error:
+                raise ValueError("reused organization is invalid") from error
+            if (
+                reused_organization.task_id != task.task_id
+                or reused_organization.source_fingerprint != task.source_fingerprint
+                or reused_organization.content_pack_sha256
+                != _sha256_bytes(content_pack_bytes)
+            ):
+                raise ValueError(
+                    "reused organization is bound to different source data"
+                )
+            reused_path = source_path.relative_to(root).as_posix()
+            reused_sha = organization_sha256(reused_organization)
+            reused_organizations[task_id] = reused_organization
         task_plans.append(
             QualityTaskPlan(
                 task_id=task_id,
@@ -159,12 +193,18 @@ def create_quality_plan(
                 shards=shard_plans,
                 organizer_provider=organizer_provider,
                 organizer_model=organizer_model,
+                reused_organization_path=reused_path,
+                reused_organization_sha256=reused_sha,
                 writer_provider=writer_provider,
                 writer_model=writer_model,
                 reviewer_provider=reviewer_provider,
                 reviewer_model=reviewer_model,
                 review_mode=review_mode,
-                max_calls=len(shards) + 1 + (1 if review_mode != "none" else 0),
+                max_calls=(
+                    (0 if reused_sha is not None else len(shards))
+                    + 1
+                    + (1 if review_mode != "none" else 0)
+                ),
             )
         )
 
@@ -189,6 +229,25 @@ def create_quality_plan(
     plan_dir.mkdir(parents=True)
     plan_path = plan_dir / "plan.json"
     _write_json_atomic(plan_path, plan.model_dump(mode="json"))
+    for task_plan in plan.tasks:
+        reused_organization = reused_organizations.get(task_plan.task_id)
+        if reused_organization is None:
+            continue
+        task_bundle_dir = (
+            root / Path(task_plan.task_dir) / "quality-first" / plan.plan_id
+        )
+        _write_json_atomic(
+            task_bundle_dir / "organization.json",
+            reused_organization.model_dump(mode="json"),
+        )
+        _write_json_atomic(
+            task_bundle_dir / "organization-reuse.json",
+            {
+                "schema_version": "1.0",
+                "source_path": task_plan.reused_organization_path,
+                "organization_sha256": task_plan.reused_organization_sha256,
+            },
+        )
     _write_json_atomic(
         _state_path(plan_path), _initial_state(plan).model_dump(mode="json")
     )
@@ -389,7 +448,7 @@ def generate_quality_note_plan(
             continue
         try:
             raw_draft = provider.write(
-                canonical_organization_json(organization),
+                canonical_writer_organization_json(organization),
                 reader_template_snapshot_json(context.template),
             )
         except Exception as error:
@@ -405,22 +464,13 @@ def generate_quality_note_plan(
             )
             continue
         _increment_call(state, task_plan.task_id, "writer", plan_file)
-        normalized_draft, response_normalizations = _normalize_reader_draft_json(
-            raw_draft
+        writer_response_path = context.bundle_dir / "writer" / "response.json"
+        _write_text_atomic(
+            writer_response_path,
+            raw_draft if raw_draft.endswith("\n") else raw_draft + "\n",
         )
         try:
-            draft = ReaderDraft.model_validate_json(normalized_draft)
-            note = build_quality_note(
-                context.task,
-                context.content_pack,
-                organization,
-                draft,
-                template=context.template,
-                content_pack_sha256=task_plan.content_pack_sha256,
-            )
-            _persist_candidate(
-                context, note, response_normalizations=response_normalizations
-            )
+            _persist_writer_candidate_from_response(context, raw_draft)
         except (TypeError, ValueError, ValidationError) as error:
             _fail_role(
                 state,
@@ -430,7 +480,7 @@ def generate_quality_note_plan(
                 if isinstance(error, ValueError)
                 else "writing",
                 code=_source_failure_code(error),
-                retryability="requires_new_plan",
+                retryability="local_recovery",
                 error=error,
                 plan_path=plan_file,
             )
@@ -457,13 +507,43 @@ def generate_quality_note_plan(
             ),
             plan_path=plan_file,
         )
-        if task_plan.review_mode == "none":
-            _activate_for_task(state, context, task_plan, plan_file)
     return state
 
 
-def _normalize_reader_draft_json(raw_draft: str) -> tuple[str, list[str]]:
-    """Flatten provider line breaks while preserving the ReaderDraft contract."""
+def _persist_writer_candidate_from_response(
+    context: _TaskContext, raw_draft: str
+) -> None:
+    organization = _load_organization(context)
+    normalized_draft, response_normalizations = _normalize_reader_draft_json(
+        raw_draft,
+        visual_unit_aliases={
+            unit.visual_anchor_id: unit.unit_id
+            for unit in organization.units
+            if unit.visual_anchor_id is not None
+        },
+    )
+    draft = ReaderDraft.model_validate_json(normalized_draft)
+    note = build_quality_note(
+        context.task,
+        context.content_pack,
+        organization,
+        draft,
+        template=context.template,
+        content_pack_sha256=context.task_plan.content_pack_sha256,
+    )
+    _persist_candidate(
+        context,
+        note,
+        response_normalizations=response_normalizations,
+    )
+
+
+def _normalize_reader_draft_json(
+    raw_draft: str,
+    *,
+    visual_unit_aliases: dict[str, str] | None = None,
+) -> tuple[str, list[str]]:
+    """Apply narrow, recorded normalizations before strict ReaderDraft validation."""
     try:
         payload = json.loads(raw_draft)
     except (TypeError, json.JSONDecodeError):
@@ -484,6 +564,7 @@ def _normalize_reader_draft_json(raw_draft: str) -> tuple[str, list[str]]:
         normalizations.append(f"flattened ReaderDraft line breaks at {path}")
 
     normalize_field(payload, "title", "title")
+    selected_visual_unit_ids: set[str] = set()
     sections = payload.get("sections")
     if isinstance(sections, list):
         for section_index, section in enumerate(sections):
@@ -493,12 +574,53 @@ def _normalize_reader_draft_json(raw_draft: str) -> tuple[str, list[str]]:
             if not isinstance(items, list):
                 continue
             for item_index, item in enumerate(items):
-                if isinstance(item, dict):
-                    normalize_field(
-                        item,
-                        "text",
-                        f"sections[{section_index}].items[{item_index}].text",
+                if not isinstance(item, dict):
+                    continue
+                markdown = item.get("markdown")
+                if isinstance(markdown, str):
+                    normalized_markdown, replacements = re.subn(
+                        r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$",
+                        r"**\1**",
+                        markdown,
                     )
+                    if replacements:
+                        item["markdown"] = normalized_markdown
+                        normalizations.append(
+                            "demoted ReaderDraft headings at "
+                            f"sections[{section_index}].items[{item_index}].markdown"
+                        )
+                path = f"sections[{section_index}].items[{item_index}].visual_unit_id"
+                visual_unit_id = item.get("visual_unit_id")
+                evidence_unit_ids = item.get("evidence_unit_ids")
+                if (
+                    isinstance(visual_unit_id, str)
+                    and visual_unit_aliases
+                    and visual_unit_id in visual_unit_aliases
+                    and isinstance(evidence_unit_ids, list)
+                    and visual_unit_aliases[visual_unit_id] in evidence_unit_ids
+                ):
+                    normalized_unit_id = visual_unit_aliases[visual_unit_id]
+                    item["visual_unit_id"] = normalized_unit_id
+                    normalizations.append(
+                        f"normalized visual anchor {visual_unit_id} -> "
+                        f"{normalized_unit_id} at {path}"
+                    )
+                    visual_unit_id = normalized_unit_id
+                if not isinstance(visual_unit_id, str):
+                    continue
+                if visual_unit_id in selected_visual_unit_ids:
+                    item["visual_unit_id"] = None
+                    normalizations.append(
+                        f"removed duplicate visual selection {visual_unit_id} at {path}"
+                    )
+                    continue
+                if len(selected_visual_unit_ids) >= 3:
+                    item["visual_unit_id"] = None
+                    normalizations.append(
+                        f"removed over-budget visual selection {visual_unit_id} at {path}"
+                    )
+                    continue
+                selected_visual_unit_ids.add(visual_unit_id)
     supplements = payload.get("ai_supplements")
     if isinstance(supplements, list):
         for item_index, item in enumerate(supplements):
@@ -654,8 +776,17 @@ def review_quality_note_plan(
                     ),
                     plan_path=plan_file,
                 )
-        else:
+        elif task_plan.review_mode == "report" or report.status == "passed":
             _activate_for_task(state, context, task_plan, plan_file)
+        else:
+            _replace_task(
+                state,
+                task_plan.task_id,
+                task_state=current.model_copy(
+                    update={"activation_decision": "retain_previous_active"}
+                ),
+                plan_path=plan_file,
+            )
     return state
 
 
@@ -693,11 +824,81 @@ def recover_quality_plan(
                 plan_path=plan_file,
             )
             continue
+        writer_response_path = context.bundle_dir / "writer" / "response.json"
+        if (
+            task_state.writer.status == "failed"
+            and task_state.writer.retryability == "local_recovery"
+            and writer_response_path.is_file()
+        ):
+            try:
+                _persist_writer_candidate_from_response(
+                    context,
+                    writer_response_path.read_text(encoding="utf-8"),
+                )
+            except (OSError, UnicodeError, TypeError, ValueError, ValidationError):
+                continue
+            _complete_role(
+                state,
+                task_plan.task_id,
+                "writer",
+                output_path=_relative_to_task(
+                    context, context.bundle_dir / "candidate" / "note.json"
+                ),
+                plan_path=plan_file,
+            )
+            current = _task_state(state, task_plan.task_id)
+            _replace_task(
+                state,
+                task_plan.task_id,
+                task_state=current.model_copy(
+                    update={
+                        "status": "source_valid",
+                        "candidate_path": _relative_to_task(
+                            context,
+                            context.bundle_dir / "candidate" / "note.json",
+                        ),
+                        "failure_phase": None,
+                        "failure_code": None,
+                        "retryability": None,
+                        "safe_summary": None,
+                    }
+                ),
+                plan_path=plan_file,
+            )
+            task_state = _task_state(state, task_plan.task_id)
         candidate = context.bundle_dir / "candidate" / "note.json"
         if not candidate.is_file():
             continue
-        if task_plan.review_mode == "none" and task_state.status == "source_valid":
+        note = QualityNoteEnvelope.model_validate_json(candidate.read_bytes())
+        organization = _load_organization(context)
+        candidate_markdown_path = context.bundle_dir / "candidate" / "note.md"
+        candidate_provenance_path = (
+            context.bundle_dir / "candidate" / "note.provenance.json"
+        )
+        _write_text_atomic(
+            candidate_markdown_path,
+            render_quality_note(
+                context.task,
+                context.content_pack,
+                note,
+                organization,
+                asset_prefix=_asset_prefix_for_output(context, candidate_markdown_path),
+                provenance_path=candidate_provenance_path.name,
+            ),
+        )
+        _write_json_atomic(
+            candidate_provenance_path,
+            build_quality_note_provenance(note, organization),
+        )
+        if task_state.status == "active":
             _activate_for_task(state, context, task_plan, plan_file)
+            continue
+        if task_plan.review_mode == "none" and task_state.status == "quality_reported":
+            report_path = context.bundle_dir / "candidate" / "quality_report.json"
+            if report_path.is_file():
+                report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+                if report_payload.get("status") == "passed":
+                    _activate_for_task(state, context, task_plan, plan_file)
         if (
             task_plan.review_mode == "report"
             and task_state.status == "quality_reported"
@@ -770,7 +971,7 @@ def _persist_organization(
     _write_json_atomic(
         context.bundle_dir / "evidence_units.json",
         {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "task_id": organization.task_id,
             "source_fingerprint": organization.source_fingerprint,
             "content_pack_sha256": organization.content_pack_sha256,
@@ -795,6 +996,12 @@ def _load_organization(context: _TaskContext) -> EvidenceUnitOrganization:
         raise ValueError("organization bundle is missing or invalid") from error
     if organization.content_pack_sha256 != context.task_plan.content_pack_sha256:
         raise ValueError("organization bundle is bound to a different content pack")
+    if (
+        context.task_plan.reused_organization_sha256 is not None
+        and organization_sha256(organization)
+        != context.task_plan.reused_organization_sha256
+    ):
+        raise ValueError("reused organization changed after plan creation")
     return organization
 
 
@@ -813,14 +1020,23 @@ def _persist_candidate(
 ) -> None:
     candidate_dir = context.bundle_dir / "candidate"
     candidate_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = candidate_dir / "note.md"
+    provenance_path = candidate_dir / "note.provenance.json"
+    organization = _load_organization(context)
     markdown = render_quality_note(
         context.task,
         context.content_pack,
         note,
-        asset_prefix=context.task_dir.relative_to(context.root).as_posix(),
+        organization,
+        asset_prefix=_asset_prefix_for_output(context, markdown_path),
+        provenance_path=provenance_path.name,
     )
     _write_json_atomic(candidate_dir / "note.json", note.model_dump(mode="json"))
-    _write_text_atomic(candidate_dir / "note.md", markdown)
+    _write_json_atomic(
+        provenance_path,
+        build_quality_note_provenance(note, organization),
+    )
+    _write_text_atomic(markdown_path, markdown)
     _write_json_atomic(
         candidate_dir / "quality-generation.json",
         {
@@ -851,15 +1067,15 @@ def _activate_for_task(
     task_plan: QualityTaskPlan,
     plan_path: Path,
 ) -> None:
-    source = context.bundle_dir / "candidate" / "note.md"
-    if not source.is_file():
+    candidate_path = context.bundle_dir / "candidate" / "note.json"
+    if not candidate_path.is_file():
         _fail_task(
             state,
             task_plan.task_id,
             phase="publication",
             code="publication_recovery_failed",
             retryability="local_recovery",
-            summary="source-valid candidate Markdown is missing",
+            summary="source-valid candidate note is missing",
             plan_path=plan_path,
         )
         return
@@ -867,11 +1083,38 @@ def _activate_for_task(
     active_dir = plan_path.parent / "active"
     active_dir.mkdir(parents=True, exist_ok=True)
     active_path = active_dir / f"{safe_task_id}.md"
-    shutil.copyfile(source, active_path)
+    active_provenance_path = active_dir / f"{safe_task_id}.provenance.json"
     delivery_dir = context.root / "视频学习笔记" / "quality-first"
     delivery_dir.mkdir(parents=True, exist_ok=True)
     delivery_path = delivery_dir / f"{safe_task_id}--{context.plan.plan_id}.md"
-    shutil.copyfile(source, delivery_path)
+    delivery_provenance_path = delivery_path.with_suffix(".provenance.json")
+    note = QualityNoteEnvelope.model_validate_json(candidate_path.read_bytes())
+    organization = _load_organization(context)
+    provenance = build_quality_note_provenance(note, organization)
+    _write_text_atomic(
+        active_path,
+        render_quality_note(
+            context.task,
+            context.content_pack,
+            note,
+            organization,
+            asset_prefix=_asset_prefix_for_output(context, active_path),
+            provenance_path=active_provenance_path.name,
+        ),
+    )
+    _write_json_atomic(active_provenance_path, provenance)
+    _write_text_atomic(
+        delivery_path,
+        render_quality_note(
+            context.task,
+            context.content_pack,
+            note,
+            organization,
+            asset_prefix=_asset_prefix_for_output(context, delivery_path),
+            provenance_path=delivery_provenance_path.name,
+        ),
+    )
+    _write_json_atomic(delivery_provenance_path, provenance)
     _write_json_atomic(
         context.bundle_dir / "candidate" / "active.json",
         {
@@ -898,15 +1141,21 @@ def _activate_for_task(
 def _initial_state(plan: QualityExecutionPlan) -> QualityPlanState:
     tasks: list[QualityTaskState] = []
     for task in plan.tasks:
+        reused = task.reused_organization_sha256 is not None
         tasks.append(
             QualityTaskState(
                 task_id=task.task_id,
-                status="planned",
+                status="organized" if reused else "planned",
                 organizer=QualityRoleState(
                     role="organizer",
-                    max_calls=len(task.shards),
+                    max_calls=0 if reused else len(task.shards),
                     actual_call_count=0,
-                    status="pending",
+                    status="completed" if reused else "pending",
+                    output_path=(
+                        f"quality-first/{plan.plan_id}/organization.json"
+                        if reused
+                        else None
+                    ),
                 ),
                 writer=QualityRoleState(
                     role="writer",
@@ -1053,7 +1302,14 @@ def _complete_role(
         task_id,
         role,
         role_state=current.model_copy(
-            update={"status": "completed", "output_path": output_path}
+            update={
+                "status": "completed",
+                "output_path": output_path,
+                "failure_phase": None,
+                "failure_code": None,
+                "retryability": None,
+                "safe_summary": None,
+            }
         ),
         plan_path=plan_path,
     )
@@ -1167,6 +1423,12 @@ def _load_organizer_response(path: Path) -> EvidenceUnitOrganizationResponse:
 
 def _relative_to_task(context: _TaskContext, path: Path) -> str:
     return path.resolve().relative_to(context.task_dir.resolve()).as_posix()
+
+
+def _asset_prefix_for_output(context: _TaskContext, output_path: Path) -> str:
+    return Path(
+        os.path.relpath(context.task_dir.resolve(), output_path.parent.resolve())
+    ).as_posix()
 
 
 def _plan_json_path(path: str | Path) -> Path:

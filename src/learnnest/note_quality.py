@@ -22,6 +22,8 @@ class QualityMetric(BaseModel):
         "practical_value",
         "review_value",
         "uncertainty",
+        "citation_density",
+        "visual_balance",
     ]
     score: float = Field(ge=0, le=5)
     explanation: str = Field(min_length=1, max_length=500)
@@ -38,6 +40,7 @@ class QualityIssue(BaseModel):
         "review_missing",
         "uncertainty_missing",
         "unused_evidence_unit",
+        "too_many_visuals",
         "reviewer_flagged",
     ]
     severity: Literal["low", "medium", "high"]
@@ -71,24 +74,52 @@ def analyze_quality(
         for item in section.items
         for unit_id in item.evidence_unit_ids
     }
-    units_by_id = {unit.unit_id: unit for unit in organization.units}
+    reader_units = {
+        unit.unit_id: unit
+        for unit in organization.units
+        if unit.reader_relevance in {"core", "supporting"}
+    }
+    core_unit_ids = {
+        unit.unit_id for unit in organization.units if unit.reader_relevance == "core"
+    }
     issues: list[QualityIssue] = []
     required_visual_units = {
         unit.unit_id
         for unit in organization.units
-        if unit.visual_role == "required_for_understanding" and unit.frame_ids
+        if unit.reader_relevance in {"core", "supporting"}
+        and unit.visual_role == "required_for_understanding"
+        and unit.frame_ids
     }
-    missing_visual = sorted(required_visual_units - used_unit_ids)
-    if missing_visual:
+    used_visual_unit_ids = {
+        item.visual_unit_id
+        for section in note.sections
+        for item in section.items
+        if item.visual_unit_id is not None
+    }
+    cited_required_visual_units = required_visual_units & used_unit_ids
+    required_visual_target = (
+        min(3, (len(cited_required_visual_units) + 3) // 4)
+        if cited_required_visual_units
+        else 0
+    )
+    used_required_visual_units = cited_required_visual_units & used_visual_unit_ids
+    missing_visual_count = max(
+        required_visual_target - len(used_required_visual_units), 0
+    )
+    if missing_visual_count:
         issues.append(
             QualityIssue(
                 code="required_visual_missing",
                 severity="high",
-                message="关键视觉证据单元未进入最终笔记：" + ", ".join(missing_visual),
+                message=(
+                    f"正文引用了 {len(cited_required_visual_units)} 个强视觉单元，"
+                    f"至少需要 {required_visual_target} 张精选图片，"
+                    f"当前仅使用 {len(used_required_visual_units)} 张。"
+                ),
             )
         )
 
-    unused_units = sorted(set(units_by_id) - used_unit_ids)
+    unused_units = sorted(core_unit_ids - used_unit_ids)
     if unused_units:
         issues.append(
             QualityIssue(
@@ -99,7 +130,7 @@ def analyze_quality(
         )
 
     texts = [
-        item.text.strip().lower()
+        item.markdown.strip().lower()
         for section in note.sections
         for item in section.items
         if not item.ai_supplement
@@ -117,14 +148,14 @@ def analyze_quality(
         (section.section_id, item.order)
         for section in note.sections
         for item in section.items
-        if len(item.text) > 500
+        if len(item.markdown) > 800
     ]
     if long_items:
         issues.append(
             QualityIssue(
                 code="long_paragraph",
                 severity="medium",
-                message="存在超过 500 字的单段正文。",
+                message="存在超过 800 字的正文块。",
             )
         )
 
@@ -168,20 +199,41 @@ def analyze_quality(
             for issue in reviewer.issues
         )
 
-    total_units = max(len(organization.units), 1)
-    referenced_evidence_ids = {
-        evidence_id
+    total_units = max(len(reader_units), 1)
+    used_frame_ids = {
+        item.visual_evidence_id
         for section in note.sections
         for item in section.items
-        for evidence_id in item.evidence_ids
+        if item.visual_evidence_id is not None
     }
-    frame_ids = {item.id for item in content_pack.evidence if item.kind == "frame"}
-    used_frames = referenced_evidence_ids & frame_ids
+    source_items = [
+        item
+        for section in note.sections
+        for item in section.items
+        if not item.ai_supplement and not item.derived_from_cited_note
+    ]
+    average_unit_refs = (
+        sum(len(item.evidence_unit_ids) for item in source_items) / len(source_items)
+        if source_items
+        else 0.0
+    )
+    maximum_visuals = max(1, len(note.sections) // 2)
+    if len(used_frame_ids) > maximum_visuals:
+        issues.append(
+            QualityIssue(
+                code="too_many_visuals",
+                severity="medium",
+                message=(
+                    f"显式图片达到 {len(used_frame_ids)} 张，超过当前正文建议上限 "
+                    f"{maximum_visuals} 张。"
+                ),
+            )
+        )
     visual_score = 5.0
-    if required_visual_units:
+    if required_visual_target:
         visual_score = 5.0 * (
-            len(required_visual_units - set(missing_visual))
-            / len(required_visual_units)
+            min(len(used_required_visual_units), required_visual_target)
+            / required_visual_target
         )
     metrics = [
         QualityMetric(
@@ -199,7 +251,7 @@ def analyze_quality(
         QualityMetric(
             name="visual_utilization",
             score=visual_score,
-            explanation=f"引用了 {len(used_frames)} 个画面证据。",
+            explanation=f"显式使用了 {len(used_frame_ids)} 个画面证据。",
         ),
         QualityMetric(
             name="repetition",
@@ -228,6 +280,21 @@ def analyze_quality(
             explanation="已提供注意事项或局限。"
             if slot_items.get("cautions")
             else "未单独提供局限说明。",
+        ),
+        QualityMetric(
+            name="citation_density",
+            score=max(0.0, 5.0 - max(average_unit_refs - 1.0, 0.0) * 2.0),
+            explanation=f"每个正文块平均引用 {average_unit_refs:.2f} 个证据单元。",
+        ),
+        QualityMetric(
+            name="visual_balance",
+            score=5.0
+            if len(used_frame_ids) <= maximum_visuals
+            else max(0.0, 5.0 - (len(used_frame_ids) - maximum_visuals)),
+            explanation=(
+                f"正文显式使用 {len(used_frame_ids)} 张图片，"
+                f"建议上限为 {maximum_visuals} 张。"
+            ),
         ),
     ]
     status = (

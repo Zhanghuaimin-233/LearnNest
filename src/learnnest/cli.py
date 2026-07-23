@@ -1330,6 +1330,13 @@ def quality_note_plan(
             "--shard-size", min=1, help="Maximum source atoms per Organizer shard."
         ),
     ] = 80,
+    reuse_organization: Annotated[
+        Path | None,
+        typer.Option(
+            "--reuse-organization",
+            help="Validated organization.json to reuse for one matching task.",
+        ),
+    ] = None,
     organizer_provider: Annotated[
         str,
         typer.Option("--organizer-provider", help="Persisted Organizer provider name."),
@@ -1378,6 +1385,7 @@ def quality_note_plan(
             ),
             review_mode=review_mode.value,
             shard_size=shard_size,
+            reuse_organization_path=reuse_organization,
         )
     except (OSError, RuntimeError, ValueError) as error:
         typer.echo(f"ERROR: {error}", err=True)

@@ -72,13 +72,15 @@ def _provider(
 
 def test_quality_provider_uses_one_bounded_call_per_explicit_role() -> None:
     organizer_response = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "units": [
             {
                 "raw_evidence_ids": ["tr_0001"],
                 "unit_type": "concept",
                 "topic_labels": ["概念"],
                 "outline": "组织",
+                "reader_relevance": "core",
+                "citation_anchor_ids": ["tr_0001"],
                 "visual_role": "none",
             }
         ],
@@ -95,7 +97,7 @@ def test_quality_provider_uses_one_bounded_call_per_explicit_role() -> None:
     provider = _provider([], calls)
     shard_json = json.dumps(
         {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "shard": {
                 "shard_id": "shard_0001",
                 "atom_ids": ["tr_0001"],
@@ -118,7 +120,7 @@ def test_quality_provider_uses_one_bounded_call_per_explicit_role() -> None:
     )
     organization_json = json.dumps(
         {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "task_id": "task-1",
             "source_fingerprint": "source-1",
             "content_pack_sha256": "a" * 64,
@@ -147,6 +149,8 @@ def test_quality_provider_uses_one_bounded_call_per_explicit_role() -> None:
                             "related_evidence_ids": [],
                         }
                     ],
+                    "reader_relevance": "core",
+                    "citation_anchor_ids": ["tr_0001"],
                     "visual_role": "none",
                 }
             ],
@@ -155,8 +159,38 @@ def test_quality_provider_uses_one_bounded_call_per_explicit_role() -> None:
         },
         ensure_ascii=False,
     )
+    writer_organization_json = json.dumps(
+        {
+            "schema_version": "2.0",
+            "units": [
+                {
+                    "unit_id": "eu_0001",
+                    "unit_type": "concept",
+                    "reader_relevance": "core",
+                    "start_ms": 0,
+                    "end_ms": 1_000,
+                    "topic_labels": ["概念"],
+                    "outline": "组织",
+                    "citation_anchor_ids": ["tr_0001"],
+                    "citation_anchors": [
+                        {
+                            "evidence_id": "tr_0001",
+                            "kind": "transcript",
+                            "start_ms": 0,
+                            "end_ms": 1_000,
+                            "text": "概念",
+                            "artifact_path": "content_pack.json",
+                            "related_evidence_ids": [],
+                        }
+                    ],
+                    "visual_role": "none",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
     note_json = QualityNoteEnvelope(
-        schema_version="1.0",
+        schema_version="2.0",
         task_id="task-1",
         source_fingerprint="source-1",
         content_pack_sha256="a" * 64,
@@ -180,7 +214,7 @@ def test_quality_provider_uses_one_bounded_call_per_explicit_role() -> None:
 
     assert provider.organize(shard_json).startswith("{")
     assert provider.write(
-        organization_json,
+        writer_organization_json,
         reader_template_snapshot_json(builtin_reader_template("concept")),
     ).startswith("{")
     assert provider.review(note_json, organization_json).startswith("{")
@@ -204,7 +238,7 @@ def test_quality_provider_rejects_over_budget_input_before_transport_call() -> N
     atom_text = "x" * 3_000
     shard_json = json.dumps(
         {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "shard": {
                 "shard_id": "shard_0001",
                 "atom_ids": ["tr_0001"],

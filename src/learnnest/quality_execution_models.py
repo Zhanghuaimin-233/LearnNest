@@ -55,6 +55,10 @@ class QualityTaskPlan(_QualityModel):
     shards: list[QualityShardPlan] = Field(min_length=1)
     organizer_provider: str = Field(min_length=1)
     organizer_model: str = Field(min_length=1)
+    reused_organization_path: str | None = Field(default=None, min_length=1)
+    reused_organization_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
     writer_provider: str = Field(min_length=1)
     writer_model: str = Field(min_length=1)
     reviewer_provider: str | None = Field(default=None, min_length=1)
@@ -64,7 +68,11 @@ class QualityTaskPlan(_QualityModel):
 
     @model_validator(mode="after")
     def call_budget_is_explicit(self) -> QualityTaskPlan:
-        expected = len(self.shards) + 1 + (1 if self.review_mode != "none" else 0)
+        reused = self.reused_organization_sha256 is not None
+        if reused != (self.reused_organization_path is not None):
+            raise ValueError("reused organization path and SHA must be set together")
+        organizer_calls = 0 if reused else len(self.shards)
+        expected = organizer_calls + 1 + (1 if self.review_mode != "none" else 0)
         if self.max_calls != expected:
             raise ValueError("quality task max_calls must match its role plan")
         if self.review_mode == "none" and (

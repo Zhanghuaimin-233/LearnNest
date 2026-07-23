@@ -52,7 +52,7 @@ def test_reader_draft_allows_empty_optional_sections_but_marks_ai_supplement() -
                     "slot": "summary",
                     "items": [
                         {
-                            "text": "先打开设置页面。",
+                            "markdown": "先打开设置页面。",
                             "evidence_unit_ids": ["eu_0001"],
                         }
                     ],

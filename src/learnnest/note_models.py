@@ -63,25 +63,56 @@ _READER_URL_PATTERN = re.compile(r"https?://", re.IGNORECASE)
 _READER_MARKUP_PATTERN = re.compile(
     r"<!--.*?-->|</?[A-Za-z][^<>]*>", re.IGNORECASE | re.DOTALL
 )
+_READER_FORBIDDEN_MARKDOWN_PATTERN = re.compile(
+    r"(?m)^\s{0,3}#{1,6}\s|"
+    r"!\[\[|!\[[^\]]*\]\(|"
+    r"\[[^\]]+\]\([^)]+\)|"
+    r"\[\^[^\]]+\]"
+)
+
+
+def _validate_reader_markdown(value: str) -> str:
+    if _READER_URL_PATTERN.search(value):
+        raise ValueError("ReaderDraft Markdown must not contain URLs")
+    if _READER_MARKUP_PATTERN.search(value):
+        raise ValueError("ReaderDraft Markdown must not contain HTML")
+    if _READER_FORBIDDEN_MARKDOWN_PATTERN.search(value):
+        raise ValueError(
+            "ReaderDraft Markdown must not contain headings, links, images, or citations"
+        )
+    return value
+
+
+ReaderMarkdown = Annotated[
+    str,
+    Field(min_length=1),
+    AfterValidator(_validate_reader_markdown),
+]
 
 
 class ReaderDraftItem(_NoteModel):
     """Provider-only reader content; it cannot carry program-owned fields."""
 
-    text: PlainText
-    evidence_unit_ids: list[NonEmptyString] = Field(default_factory=list)
+    markdown: ReaderMarkdown
+    evidence_unit_ids: list[NonEmptyString] = Field(default_factory=list, max_length=8)
+    visual_unit_id: NonEmptyString | None = None
     ai_supplement: bool = False
 
     @model_validator(mode="after")
     def source_and_ai_are_separate(self) -> ReaderDraftItem:
-        if _READER_URL_PATTERN.search(self.text):
-            raise ValueError("ReaderDraft text must not contain URLs")
-        if _READER_MARKUP_PATTERN.search(self.text):
-            raise ValueError("ReaderDraft text must not contain markup")
-        if self.ai_supplement and self.evidence_unit_ids:
-            raise ValueError("ai_supplement items must not cite evidence units")
+        if self.ai_supplement and (
+            self.evidence_unit_ids or self.visual_unit_id is not None
+        ):
+            raise ValueError(
+                "ai_supplement items must not cite evidence or select a visual"
+            )
         if len(self.evidence_unit_ids) != len(set(self.evidence_unit_ids)):
             raise ValueError("evidence_unit_ids must be unique")
+        if (
+            self.visual_unit_id is not None
+            and self.visual_unit_id not in self.evidence_unit_ids
+        ):
+            raise ValueError("visual_unit_id must be one of evidence_unit_ids")
         return self
 
 
@@ -95,10 +126,24 @@ class ReaderDraftSection(_NoteModel):
 class ReaderDraft(_NoteModel):
     """The quality-first Writer response without task or rendering metadata."""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     title: PlainText
     sections: list[ReaderDraftSection] = Field(default_factory=list)
     ai_supplements: list[AiSupplement] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def visual_budget_is_bounded(self) -> ReaderDraft:
+        visual_unit_ids = [
+            item.visual_unit_id
+            for section in self.sections
+            for item in section.items
+            if item.visual_unit_id is not None
+        ]
+        if len(visual_unit_ids) > 3:
+            raise ValueError("ReaderDraft may select at most three visuals")
+        if len(visual_unit_ids) != len(set(visual_unit_ids)):
+            raise ValueError("ReaderDraft visual selections must be unique")
+        return self
 
 
 class QualityNoteLocator(_NoteModel):
@@ -112,20 +157,58 @@ class QualityNoteItem(_NoteModel):
     """Program-owned rendered item with expanded raw evidence IDs."""
 
     order: int = Field(ge=1)
-    text: PlainText
+    markdown: ReaderMarkdown
     evidence_unit_ids: list[NonEmptyString] = Field(default_factory=list)
+    citation_evidence_ids: list[NonEmptyString] = Field(default_factory=list)
     evidence_ids: list[NonEmptyString] = Field(default_factory=list)
+    visual_unit_id: NonEmptyString | None = None
+    visual_evidence_id: NonEmptyString | None = None
     ai_supplement: bool = False
+    derived_from_cited_note: bool = False
     locator: QualityNoteLocator | None = None
 
     @model_validator(mode="after")
     def item_source_contract(self) -> QualityNoteItem:
-        if self.ai_supplement and (self.evidence_unit_ids or self.evidence_ids):
+        if self.ai_supplement and (
+            self.evidence_unit_ids
+            or self.citation_evidence_ids
+            or self.evidence_ids
+            or self.visual_unit_id is not None
+            or self.visual_evidence_id is not None
+            or self.derived_from_cited_note
+        ):
             raise ValueError("ai_supplement items cannot contain source evidence")
+        if self.derived_from_cited_note and (
+            self.evidence_unit_ids
+            or self.citation_evidence_ids
+            or self.evidence_ids
+            or self.visual_unit_id is not None
+            or self.visual_evidence_id is not None
+            or self.locator is not None
+        ):
+            raise ValueError("derived reader aids cannot contain direct source fields")
+        if self.derived_from_cited_note:
+            return self
         if not self.ai_supplement and not self.evidence_unit_ids:
             raise ValueError("source item requires evidence_unit_ids")
+        if not self.ai_supplement and not self.citation_evidence_ids:
+            raise ValueError("source item requires citation_evidence_ids")
         if not self.ai_supplement and not self.evidence_ids:
             raise ValueError("source item requires expanded evidence_ids")
+        if set(self.citation_evidence_ids) - set(self.evidence_ids):
+            raise ValueError("citation evidence must be included in full evidence")
+        if (self.visual_unit_id is None) != (self.visual_evidence_id is None):
+            raise ValueError("visual unit and evidence must be selected together")
+        if (
+            self.visual_unit_id is not None
+            and self.visual_unit_id not in self.evidence_unit_ids
+        ):
+            raise ValueError("visual_unit_id must be one of evidence_unit_ids")
+        if (
+            self.visual_evidence_id is not None
+            and self.visual_evidence_id not in self.evidence_ids
+        ):
+            raise ValueError("visual evidence must be included in full evidence")
         return self
 
 
@@ -144,7 +227,7 @@ class QualityNoteSection(_NoteModel):
 class QualityNoteEnvelope(_NoteModel):
     """Formal program-owned quality-first note bundle envelope."""
 
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     task_id: NonEmptyString
     source_fingerprint: NonEmptyString
     content_pack_sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]

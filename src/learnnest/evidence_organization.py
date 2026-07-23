@@ -123,12 +123,14 @@ def build_organization_from_responses(
             if trimmed_ids != proposal.raw_evidence_ids:
                 normalizations.append("deduplicated or trimmed organizer raw IDs")
             raw_ids: list[str] = []
+            normalized_by_raw_id: dict[str, str] = {}
             for evidence_id in trimmed_ids:
                 normalized = _normalize_zero_padded_id_alias(
                     evidence_id,
                     shard.atom_ids,
                     normalizations,
                 )
+                normalized_by_raw_id[evidence_id] = normalized
                 if normalized in raw_ids:
                     normalizations.append("deduplicated or trimmed organizer raw IDs")
                     continue
@@ -150,6 +152,15 @@ def build_organization_from_responses(
                     if evidence_id not in shard.atom_ids
                 )
                 raise ValueError(f"evidence id is outside the shard: {outside}")
+            citation_anchor_ids = [
+                normalized_by_raw_id[evidence_id]
+                for evidence_id in proposal.citation_anchor_ids
+            ]
+            visual_anchor_id = (
+                normalized_by_raw_id[proposal.visual_anchor_id]
+                if proposal.visual_anchor_id is not None
+                else None
+            )
             unit = build_evidence_unit(
                 content_pack,
                 unit_id=f"eu_{len(units) + len(shard_units) + 1:04d}",
@@ -158,8 +169,11 @@ def build_organization_from_responses(
                 unit_type=proposal.unit_type,
                 topic_labels=proposal.topic_labels,
                 outline=proposal.outline,
+                reader_relevance=proposal.reader_relevance,
+                citation_anchor_ids=citation_anchor_ids,
                 visual_role=proposal.visual_role,
                 visual_reason=proposal.visual_reason,
+                visual_anchor_id=visual_anchor_id,
                 allowed_evidence_ids=set(shard.atom_ids),
             )
             shard_units.append(unit)
@@ -176,8 +190,6 @@ def build_organization_from_responses(
             )
         units.extend(shard_units)
 
-    if not units:
-        raise ValueError("organizer returned no evidence units")
     if not units:
         raise ValueError("organizer returned no evidence units")
     return EvidenceUnitOrganization(
@@ -198,6 +210,44 @@ def organization_response_json_schema() -> dict[str, object]:
 def canonical_organization_json(organization: EvidenceUnitOrganization) -> str:
     return json.dumps(
         organization.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def canonical_writer_organization_json(
+    organization: EvidenceUnitOrganization,
+) -> str:
+    """Return the distilled core/supporting view used by the Writer."""
+    units = []
+    for unit in organization.units:
+        if unit.reader_relevance not in {"core", "supporting"}:
+            continue
+        atoms_by_id = {atom.evidence_id: atom for atom in unit.evidence}
+        units.append(
+            {
+                "unit_id": unit.unit_id,
+                "unit_type": unit.unit_type,
+                "reader_relevance": unit.reader_relevance,
+                "start_ms": unit.start_ms,
+                "end_ms": unit.end_ms,
+                "topic_labels": unit.topic_labels,
+                "outline": unit.outline,
+                "citation_anchor_ids": unit.citation_anchor_ids,
+                "citation_anchors": [
+                    atoms_by_id[evidence_id].model_dump(mode="json")
+                    for evidence_id in unit.citation_anchor_ids
+                ],
+                "visual_role": unit.visual_role,
+                "visual_reason": unit.visual_reason,
+                "visual_anchor_id": unit.visual_anchor_id,
+            }
+        )
+    if not units:
+        raise ValueError("organization has no reader-relevant evidence units")
+    return json.dumps(
+        {"schema_version": "2.0", "units": units},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

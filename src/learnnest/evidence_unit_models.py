@@ -18,6 +18,7 @@ EvidenceUnitType = Literal[
     "practice_mapping",
 ]
 VisualRole = Literal["required_for_understanding", "useful", "none"]
+ReaderRelevance = Literal["core", "supporting", "background", "noise"]
 
 
 class _EvidenceUnitModel(BaseModel):
@@ -93,8 +94,11 @@ class EvidenceUnit(_EvidenceUnitModel):
     frame_ids: list[str] = Field(default_factory=list)
     ocr_ids: list[str] = Field(default_factory=list)
     evidence: list[EvidenceAtom] = Field(min_length=1)
+    reader_relevance: ReaderRelevance
+    citation_anchor_ids: list[str] = Field(min_length=1, max_length=3)
     visual_role: VisualRole
     visual_reason: str | None = Field(default=None, max_length=300)
+    visual_anchor_id: str | None = None
 
     @model_validator(mode="after")
     def unit_is_coherent(self) -> EvidenceUnit:
@@ -106,6 +110,7 @@ class EvidenceUnit(_EvidenceUnitModel):
             "transcript_ids",
             "frame_ids",
             "ocr_ids",
+            "citation_anchor_ids",
         ):
             values = getattr(self, field_name)
             if len(values) != len(set(values)):
@@ -117,6 +122,8 @@ class EvidenceUnit(_EvidenceUnitModel):
             raise ValueError("evidence_ids must match evidence atoms")
         if set(self.raw_evidence_ids) - set(self.evidence_ids):
             raise ValueError("raw_evidence_ids must be included in evidence_ids")
+        if set(self.citation_anchor_ids) - set(self.evidence_ids):
+            raise ValueError("citation anchors must be included in evidence_ids")
         if set(self.transcript_ids) | set(self.frame_ids) | set(self.ocr_ids) != set(
             self.evidence_ids
         ):
@@ -132,13 +139,22 @@ class EvidenceUnit(_EvidenceUnitModel):
             raise ValueError("visual_reason is only valid for a visual role")
         if self.visual_role != "none" and not self.visual_reason:
             raise ValueError("visual role requires visual_reason")
+        if self.visual_role == "none" and self.visual_anchor_id is not None:
+            raise ValueError("visual_anchor_id is only valid for a visual role")
+        if self.visual_role != "none" and self.visual_anchor_id is None:
+            raise ValueError("visual role requires visual_anchor_id")
+        if (
+            self.visual_anchor_id is not None
+            and self.visual_anchor_id not in self.frame_ids
+        ):
+            raise ValueError("visual_anchor_id must be a frame in the unit closure")
         return self
 
 
 class EvidenceUnitOrganization(_EvidenceUnitModel):
     """The persisted, source-bound result of all Organizer calls for one task."""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     task_id: str = Field(min_length=1)
     source_fingerprint: str = Field(min_length=1)
     content_pack_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -165,12 +181,79 @@ class EvidenceUnitProposal(_EvidenceUnitModel):
     unit_type: EvidenceUnitType
     topic_labels: list[str] = Field(default_factory=list, max_length=12)
     outline: str = Field(min_length=1, max_length=1_000)
+    reader_relevance: ReaderRelevance
+    citation_anchor_ids: list[str] = Field(min_length=1, max_length=3)
     visual_role: VisualRole
     visual_reason: str | None = Field(default=None, max_length=300)
+    visual_anchor_id: str | None = None
+
+    @model_validator(mode="after")
+    def proposal_is_coherent(self) -> EvidenceUnitProposal:
+        if len(self.raw_evidence_ids) != len(set(self.raw_evidence_ids)):
+            raise ValueError("raw_evidence_ids must be unique")
+        if len(self.citation_anchor_ids) != len(set(self.citation_anchor_ids)):
+            raise ValueError("citation_anchor_ids must be unique")
+        if set(self.citation_anchor_ids) - set(self.raw_evidence_ids):
+            raise ValueError("citation anchors must be selected from raw evidence")
+        if self.visual_role == "none" and (
+            self.visual_reason is not None or self.visual_anchor_id is not None
+        ):
+            raise ValueError("non-visual proposal cannot contain visual fields")
+        if self.visual_role != "none" and (
+            not self.visual_reason or self.visual_anchor_id is None
+        ):
+            raise ValueError("visual proposal requires reason and frame anchor")
+        if (
+            self.visual_anchor_id is not None
+            and self.visual_anchor_id not in self.raw_evidence_ids
+        ):
+            raise ValueError("visual anchor must be selected from raw evidence")
+        return self
 
 
 class EvidenceUnitOrganizationResponse(_EvidenceUnitModel):
     """Strict JSON boundary returned by an Organizer provider."""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     units: list[EvidenceUnitProposal] = Field(min_length=1)
+
+
+class WriterEvidenceUnit(_EvidenceUnitModel):
+    """Distilled evidence-unit view exposed to the Writer."""
+
+    unit_id: str = Field(min_length=1)
+    unit_type: EvidenceUnitType
+    reader_relevance: Literal["core", "supporting"]
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    topic_labels: list[str] = Field(default_factory=list, max_length=12)
+    outline: str = Field(min_length=1, max_length=1_000)
+    citation_anchor_ids: list[str] = Field(min_length=1, max_length=3)
+    citation_anchors: list[EvidenceAtom] = Field(min_length=1, max_length=3)
+    visual_role: VisualRole
+    visual_reason: str | None = Field(default=None, max_length=300)
+    visual_anchor_id: str | None = None
+
+    @model_validator(mode="after")
+    def writer_view_is_coherent(self) -> WriterEvidenceUnit:
+        if self.end_ms < self.start_ms:
+            raise ValueError("writer evidence unit end_ms must be >= start_ms")
+        atom_ids = [atom.evidence_id for atom in self.citation_anchors]
+        if atom_ids != self.citation_anchor_ids:
+            raise ValueError("writer citation anchors must match citation_anchor_ids")
+        if self.visual_role == "none" and (
+            self.visual_reason is not None or self.visual_anchor_id is not None
+        ):
+            raise ValueError("non-visual writer unit cannot contain visual fields")
+        if self.visual_role != "none" and (
+            not self.visual_reason or self.visual_anchor_id is None
+        ):
+            raise ValueError("visual writer unit requires reason and frame anchor")
+        return self
+
+
+class WriterEvidenceOrganization(_EvidenceUnitModel):
+    """Strict distilled organization accepted at the Writer provider boundary."""
+
+    schema_version: Literal["2.0"] = "2.0"
+    units: list[WriterEvidenceUnit] = Field(min_length=1)

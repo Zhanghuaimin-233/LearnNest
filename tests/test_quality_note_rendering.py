@@ -104,8 +104,9 @@ def _draft() -> ReaderDraft:
                     "slot": "summary",
                     "items": [
                         {
-                            "text": "先定位设置入口，再保存修改。",
+                            "markdown": "先定位设置入口，再保存修改。",
                             "evidence_unit_ids": ["eu_0001", "eu_0002"],
+                            "visual_unit_id": "eu_0001",
                         }
                     ],
                 },
@@ -113,7 +114,7 @@ def _draft() -> ReaderDraft:
                     "slot": "why_learn",
                     "items": [
                         {
-                            "text": "这能让修改流程可复现。",
+                            "markdown": "这能让修改流程可复现。",
                             "evidence_unit_ids": ["eu_0001"],
                         }
                     ],
@@ -122,7 +123,7 @@ def _draft() -> ReaderDraft:
                     "slot": "narrative",
                     "items": [
                         {
-                            "text": "内容先展示入口，再说明保存。",
+                            "markdown": "内容先展示入口，再说明保存。",
                             "evidence_unit_ids": ["eu_0001", "eu_0002"],
                         }
                     ],
@@ -131,7 +132,7 @@ def _draft() -> ReaderDraft:
                     "slot": "core",
                     "items": [
                         {
-                            "text": "设置入口和保存动作是两个连续环节。",
+                            "markdown": "设置入口和保存动作是两个连续环节。",
                             "evidence_unit_ids": ["eu_0001", "eu_0002"],
                         }
                     ],
@@ -140,7 +141,7 @@ def _draft() -> ReaderDraft:
                     "slot": "practice",
                     "items": [
                         {
-                            "text": "按顺序打开设置并保存。",
+                            "markdown": "按顺序打开设置并保存。",
                             "evidence_unit_ids": ["eu_0001", "eu_0002"],
                         }
                     ],
@@ -179,6 +180,11 @@ def test_program_injects_template_identity_and_expands_units_to_source_evidence(
         "fr_0001",
         "tr_0002",
     ]
+    assert summary.items[0].citation_evidence_ids == [
+        "tr_0001",
+        "ocr_0001",
+        "tr_0002",
+    ]
     assert summary.items[0].ai_supplement is False
 
 
@@ -195,12 +201,21 @@ def test_quality_renderer_keeps_trace_and_first_use_visual_embed() -> None:
     )
 
     markdown = render_quality_note(
-        _task(), pack, note, asset_prefix="视频学习素材/quality--render"
+        _task(),
+        pack,
+        note,
+        _organization(pack),
+        asset_prefix="视频学习素材/quality--render",
     )
 
     assert "# 设置与保存" in markdown
-    assert "<!-- evidence: tr_0001, ocr_0001, fr_0001, tr_0002 -->" in markdown
-    assert "![[视频学习素材/quality--render/frames/selected/fr_0001.png]]" in markdown
+    assert "<!-- evidence:" not in markdown
+    assert (
+        "![关键画面](<视频学习素材/quality--render/frames/selected/fr_0001.png>)"
+        in markdown
+    )
+    assert "先定位设置入口，再保存修改。[^1]" in markdown
+    assert "[^1]:" in markdown
     assert "## 来源与追溯" in markdown
     assert "AI 补充，不属于视频事实" in markdown
 
@@ -229,7 +244,7 @@ def test_quality_report_flags_missing_required_visual_without_deleting_candidate
     draft = _draft().model_copy(deep=True)
     for section in draft.sections:
         for item in section.items:
-            item.evidence_unit_ids = ["eu_0002"]
+            item.visual_unit_id = None
     note = build_quality_note(
         _task(),
         pack,

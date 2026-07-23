@@ -11,6 +11,7 @@ from learnnest.evidence_unit_models import (
     EvidenceUnit,
     EvidenceUnitShard,
     EvidenceUnitType,
+    ReaderRelevance,
     VisualRole,
 )
 from learnnest.models import ContentPack, Evidence
@@ -76,6 +77,9 @@ def build_evidence_unit(
     outline: str,
     visual_role: VisualRole,
     visual_reason: str | None = None,
+    reader_relevance: ReaderRelevance = "core",
+    citation_anchor_ids: Sequence[str] | None = None,
+    visual_anchor_id: str | None = None,
     allowed_evidence_ids: Set[str] | None = None,
     start_ms: int | None = None,
     end_ms: int | None = None,
@@ -102,6 +106,13 @@ def build_evidence_unit(
         "frame_ids": [item.evidence_id for item in atoms if item.kind == "frame"],
         "ocr_ids": [item.evidence_id for item in atoms if item.kind == "ocr"],
     }
+    evidence_ids = [item.evidence_id for item in atoms]
+    anchors = _unique_nonempty(citation_anchor_ids or raw_evidence_ids[:3])
+    if set(anchors) - set(evidence_ids):
+        raise ValueError("citation anchors must be included in the evidence closure")
+    selected_visual_anchor = visual_anchor_id
+    if selected_visual_anchor is None and visual_role != "none":
+        selected_visual_anchor = next(iter(typed_ids["frame_ids"]), None)
     return EvidenceUnit(
         unit_id=unit_id,
         shard_id=shard_id,
@@ -111,10 +122,13 @@ def build_evidence_unit(
         topic_labels=_unique_nonempty(topic_labels),
         outline=outline,
         raw_evidence_ids=_unique_nonempty(raw_evidence_ids),
-        evidence_ids=[item.evidence_id for item in atoms],
+        evidence_ids=evidence_ids,
         evidence=atoms,
+        reader_relevance=reader_relevance,
+        citation_anchor_ids=anchors,
         visual_role=visual_role,
         visual_reason=visual_reason,
+        visual_anchor_id=selected_visual_anchor,
         **typed_ids,
     )
 
@@ -183,7 +197,7 @@ def canonical_shard_json(
     atoms_by_id = {atom.evidence_id: atom for atom in atoms}
     selected = [atoms_by_id[atom_id] for atom_id in shard.atom_ids]
     payload = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "shard": shard.model_dump(mode="json"),
         "atoms": [atom.model_dump(mode="json") for atom in selected],
     }
@@ -194,7 +208,7 @@ def canonical_shard_json(
 
 def canonical_evidence_units_json(units: Sequence[EvidenceUnit]) -> str:
     payload = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "units": [unit.model_dump(mode="json") for unit in units],
     }
     return json.dumps(

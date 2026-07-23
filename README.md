@@ -205,7 +205,13 @@ uv run learnnest note `
 
 ### 质量优先学习笔记
 
-质量优先链路是独立的显式工作流，不改变旧 `learnnest note` 的默认行为。它先组织语义证据单元，再生成读者草稿，最后按需生成质量报告或执行 gate；每个计划会保存输入 SHA、分片、角色模型和最大调用数。
+质量优先链路是独立的显式工作流，不改变旧 `learnnest note` 的默认行为。它将“来源审计”和“读者正文”分开处理：
+
+1. Organizer 覆盖完整内容包，把证据归为 `core`、`supporting`、`background` 或 `noise`，并选择少量引用与视觉锚点。
+2. Writer 只看到 `core` 和 `supporting`，在受限 JSON 中返回可读 CommonMark；摘要、脉络和复习等纯重组内容不必重复堆叠脚注。
+3. 程序验证 task、SHA、unit、evidence、OCR 父 frame 和视觉预算，渲染紧凑脚注与最多三张显式图片；完整证据闭包写入独立的 `note.provenance.json`。
+
+每个计划都会保存输入 SHA、分片、角色模型和最大调用数。候选、active 和交付 Markdown 会针对各自目录重新渲染，避免复制文件后图片相对路径失效。
 
 ```powershell
 uv run learnnest quality-note plan `
@@ -220,7 +226,20 @@ uv run learnnest quality-note review <plan.json> --output-root .\learnnest-outpu
 uv run learnnest quality-note status <plan.json>
 ```
 
-`plan`、`status` 和 `recover` 不调用 provider；恢复只处理已经落盘的本地候选和发布。质量报告不等同于人工阅读、图片或音频验收，`gate` 被拒绝时旧 active note 保持不变。
+如果 Writer 失败但已经存在同一 task、source fingerprint、内容包 SHA 和 organization SHA 绑定的 `organization.json`，可以创建只包含一次 Writer 预算的新计划：
+
+```powershell
+uv run learnnest quality-note plan `
+  <task_id> `
+  --template mixed `
+  --review-mode none `
+  --reuse-organization <organization.json> `
+  --output-root .\learnnest-output
+```
+
+`plan`、`status` 和 `recover` 不调用 provider。Writer HTTP 成功响应会先落盘，再做本地结构与来源校验；可恢复的渲染或格式规则变化由 `recover` 重新校验，不增加调用数。未知来源、核心证据漏覆盖和跨源引用仍会硬失败。
+
+质量报告不等同于人工阅读、图片或音频验收，`gate` 被拒绝时旧 active note 保持不变。
 
 继续生成播客稿和音频：
 
@@ -250,7 +269,7 @@ uv run learnnest tts `
 * AI 补充内容
 * 最终渲染产物
 
-重要结论和操作步骤通过稳定的 `evidence_id` 关联原始材料。Markdown 链接、任务状态、上游 SHA 和发布文件也会经过校验。
+重要结论和操作步骤通过稳定的 `evidence_id` 关联原始材料。读者 Markdown 只显示紧凑脚注，完整 unit 与 evidence 闭包保存在 provenance 侧车；Markdown 链接、任务状态、上游 SHA 和发布文件也会经过校验。
 
 因此，语栖输出的不只是“答案”，还有答案从哪里来的路径。
 
@@ -284,6 +303,7 @@ Bilibili 收藏夹、YouTube 播放列表或频道订阅等专用发现能力尚
 ├─ 抖音图文素材/       # 抖音图文下载内容（按需产生）
 └─ .learnnest/
    ├─ index.sqlite3    # 可重建 SQLite 查询投影
+   ├─ quality-first/   # 不可变质量计划、状态与 active 笔记
    └─ locks/           # 跨进程锁
 ```
 
@@ -313,6 +333,8 @@ src/learnnest/
 ├─ task_store.py      JSON 事实存储
 ├─ batch_*.py         批次、队列与恢复
 ├─ note_*.py          受约束笔记生成与校验
+├─ evidence_*.py      语义证据单元、降噪、锚点与 Writer 输入
+├─ quality_*.py       读者优先笔记计划、质量报告、恢复与发布
 ├─ podcast_*.py       播客稿生成与校验
 ├─ tts_*.py           音频生成与发布对账
 ├─ rendering.py       确定性 Markdown 渲染

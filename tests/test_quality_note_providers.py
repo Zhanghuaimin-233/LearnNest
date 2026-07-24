@@ -10,7 +10,12 @@ from learnnest.note_providers import (
     OpenAICompatibleChatConfig,
     OpenAICompatibleQualityNoteProvider,
     NoteProviderError,
+    WriterCapabilityProfile,
+    _apply_writer_output_strategy,
+    _extract_writer_response,
+    _select_writer_capability,
     build_quality_organizer_system_prompt,
+    build_quality_writer_system_prompt,
 )
 from learnnest.reader_templates import (
     builtin_reader_template,
@@ -24,6 +29,14 @@ def test_quality_organizer_prompt_treats_evidence_ids_as_opaque() -> None:
     assert "opaque" in prompt
     assert "ocr_0022" in prompt
     assert "ocr_022" in prompt
+
+
+def test_quality_writer_prompt_matches_the_dominant_source_language() -> None:
+    prompt = build_quality_writer_system_prompt()
+
+    assert "dominant natural language" in prompt
+    assert "Simplified Chinese" in prompt
+    assert "Every template section marked required" in prompt
 
 
 class _Message:
@@ -221,6 +234,96 @@ def test_quality_provider_uses_one_bounded_call_per_explicit_role() -> None:
     assert len(calls.calls) == 3
     assert all(call["model"] == "fake-model" for call in calls.calls)
     assert all(call["stream"] is False for call in calls.calls)
+    assert "response_format" not in calls.calls[1]
+
+
+def test_unknown_writer_capability_stays_conservatively_prompted() -> None:
+    profile = _select_writer_capability(
+        OpenAICompatibleChatConfig(
+            provider_name="fake-quality",
+            model="unverified-model",
+            base_url="https://example.test/v1",
+            api_key=SecretStr("test-key"),
+        )
+    )
+
+    assert profile.profile_id == "unknown-conservative-prompted-json"
+    assert profile.strategy == "prompted_json"
+    assert profile.extractor == "message_content"
+
+
+def test_explicit_writer_strategy_overrides_capability_profile() -> None:
+    profile = _select_writer_capability(
+        OpenAICompatibleChatConfig(
+            provider_name="fake-quality",
+            model="unverified-model",
+            base_url="https://example.test/v1",
+            api_key=SecretStr("test-key"),
+            writer_strategy_override="native_json_schema",
+        )
+    )
+
+    assert profile.profile_id == "operator-override-native_json_schema"
+    assert profile.strategy == "native_json_schema"
+
+
+def test_tool_call_writer_strategy_uses_function_arguments() -> None:
+    capability = WriterCapabilityProfile(
+        profile_id="test-tool-call",
+        provider_name="fake-quality",
+        base_url="https://example.test/v1",
+        model="fake-model",
+        strategy="tool_call",
+        extractor="tool_call_arguments",
+    )
+    request: dict[str, object] = {}
+
+    _apply_writer_output_strategy(
+        request,
+        capability,
+        response_schema={"type": "object"},
+        schema_name="reader_draft",
+    )
+    response = type(
+        "Response",
+        (),
+        {
+            "choices": [
+                type(
+                    "Choice",
+                    (),
+                    {
+                        "message": type(
+                            "Message",
+                            (),
+                            {
+                                "content": None,
+                                "tool_calls": [
+                                    type(
+                                        "ToolCall",
+                                        (),
+                                        {
+                                            "function": type(
+                                                "Function",
+                                                (),
+                                                {"arguments": '{"title":"标题"}'},
+                                            )()
+                                        },
+                                    )()
+                                ],
+                            },
+                        )()
+                    },
+                )()
+            ]
+        },
+    )()
+
+    assert request["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "reader_draft"},
+    }
+    assert _extract_writer_response(response, capability) == '{"title":"标题"}'
 
 
 def test_quality_provider_rejects_over_budget_input_before_transport_call() -> None:

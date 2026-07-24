@@ -899,6 +899,33 @@ def test_note_command_uses_complete_openai_compatible_configuration(
     assert recorded["template"].template_id == "concept-explanation"
 
 
+def test_quality_note_provider_maps_legacy_json_mode_to_writer_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import learnnest.cli as cli
+
+    recorded: dict[str, object] = {}
+
+    def fake_provider(config: object) -> object:
+        recorded["config"] = config
+        return object()
+
+    monkeypatch.setattr(cli, "OpenAICompatibleQualityNoteProvider", fake_provider)
+
+    cli._quality_note_provider(
+        {
+            "LEARNNEST_NOTE_API_KEY": "test-compatible-secret",
+            "LEARNNEST_NOTE_BASE_URL": "https://example.invalid/v1",
+            "LEARNNEST_NOTE_MODEL": "test-compatible-model",
+            "LEARNNEST_NOTE_JSON_MODE": "json_schema",
+        }
+    )
+
+    config = recorded["config"]
+    assert config.json_response_mode == "json_schema"
+    assert config.writer_strategy_override == "native_json_schema"
+
+
 @pytest.mark.parametrize(
     ("environment", "expected"),
     [
@@ -934,6 +961,7 @@ def test_note_command_rejects_incomplete_or_mixed_openai_compatible_configuratio
         "LEARNNEST_NOTE_MODEL",
         "LEARNNEST_NOTE_PROVIDER",
         "LEARNNEST_NOTE_JSON_MODE",
+        "LEARNNEST_NOTE_WRITER_STRATEGY",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in environment.items():

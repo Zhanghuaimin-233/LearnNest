@@ -30,5 +30,5 @@ def test_quality_note_plan_is_dry_run_with_no_provider_configuration(
     )
 
     assert result.exit_code != 0
-    assert "task not found" in result.output
+    assert "no provider connection is configured" in result.output
     assert "API key" not in result.output

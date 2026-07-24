@@ -190,6 +190,16 @@ uv run learnnest flow run `
 | 抖音收藏夹扫描与下载             | `DOUYIN_COOKIE`                                                           |
 | MiMo 笔记、播客与 TTS        | `MIMO_API_KEY`                                                            |
 | OpenAI-compatible 笔记服务 | `LEARNNEST_NOTE_API_KEY`、`LEARNNEST_NOTE_BASE_URL`、`LEARNNEST_NOTE_MODEL` |
+
+Writer 连接通过本地 BYOK 管理。`provider connect mimo|openai|anthropic|gemini|deepseek`
+只会询问 API Key；聚合服务使用 `openai-compatible` 并显式提供 endpoint、model 和
+secret env 名。连接和能力档案保存在输出根 `.learnnest/providers/`，不保存 Key、请求或
+响应。默认 `local_only`，必须显式运行 `provider check`；一次性执行
+`provider authorize automatic` 后，后续连接变更会触发最多四次、单独计费且可见的
+ReaderDraft 兼容性检查。`quality-note plan` 只读取已经验证的档案并固定 snapshot，
+`status` 和 `recover` 永不触发检查或 provider 调用。
+当前执行 adapter 覆盖 OpenAI-compatible 家族；Anthropic 和 Gemini 预设已登记，但其
+原生请求 adapter 尚未实现，不能用于 quality-note 的真实调用。
 | 本地 ASR 模型缓存            | `HUGGINGFACE_HUB_CACHE`                                                   |
 
 生成一篇受约束、可校验的学习笔记：

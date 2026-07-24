@@ -34,6 +34,18 @@ def test_runtime_environment_prefers_process_values_and_accepts_raw_cookie(
     }
 
 
+def test_runtime_environment_allows_coding_plan_secret_reference(
+    tmp_path: Path,
+) -> None:
+    from learnnest.runtime_config import load_runtime_environment
+
+    (tmp_path / ".env").write_text("CODING_PLAN_KEY=local-key\n", encoding="utf-8")
+
+    assert load_runtime_environment(tmp_path, environ={}) == {
+        "CODING_PLAN_KEY": "local-key"
+    }
+
+
 def test_runtime_environment_reads_a_raw_cookie_file(tmp_path: Path) -> None:
     from learnnest.runtime_config import load_runtime_environment
 

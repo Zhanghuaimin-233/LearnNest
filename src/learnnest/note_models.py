@@ -94,7 +94,7 @@ class ReaderDraftItem(_NoteModel):
     """Provider-only reader content; it cannot carry program-owned fields."""
 
     markdown: ReaderMarkdown
-    evidence_unit_ids: list[NonEmptyString] = Field(default_factory=list, max_length=8)
+    evidence_unit_ids: list[NonEmptyString] = Field(default_factory=list, max_length=32)
     visual_unit_id: NonEmptyString | None = None
     ai_supplement: bool = False
 

@@ -104,6 +104,45 @@ def test_quality_writer_demotes_item_headings_without_rewriting_body() -> None:
     assert actions == ["demoted ReaderDraft headings at sections[0].items[0].markdown"]
 
 
+def test_quality_writer_unwraps_one_valid_json_code_fence() -> None:
+    payload = {
+        "title": "读取策略",
+        "sections": [
+            {
+                "slot": "core",
+                "items": [
+                    {
+                        "markdown": "保留正文。",
+                        "evidence_unit_ids": ["eu_0001"],
+                    }
+                ],
+            }
+        ],
+    }
+    raw = f"```json\n{json.dumps(payload, ensure_ascii=False)}\n```"
+
+    normalized, actions = _normalize_reader_draft_json(raw)
+    draft = ReaderDraft.model_validate_json(normalized)
+
+    assert draft.title == "读取策略"
+    assert actions == ["removed single ReaderDraft JSON code fence"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "前言\n```json\n{}\n```",
+        '```json\n{"title":\n```',
+        "```json\n{}\n```\n```json\n{}\n```",
+    ],
+)
+def test_quality_writer_does_not_unwrap_ambiguous_or_invalid_fences(raw: str) -> None:
+    normalized, actions = _normalize_reader_draft_json(raw)
+
+    assert normalized == raw
+    assert actions == []
+
+
 def test_reader_draft_item_cannot_mark_source_ids_as_ai_supplement() -> None:
     with pytest.raises(ValidationError, match="ai_supplement"):
         ReaderDraft.model_validate(
@@ -123,6 +162,29 @@ def test_reader_draft_item_cannot_mark_source_ids_as_ai_supplement() -> None:
                 ],
             }
         )
+
+
+def test_reader_draft_keeps_large_valid_citation_sets_for_quality_review() -> None:
+    draft = ReaderDraft.model_validate(
+        {
+            "title": "标题",
+            "sections": [
+                {
+                    "slot": "summary",
+                    "items": [
+                        {
+                            "markdown": "连续内容的高层摘要。",
+                            "evidence_unit_ids": [
+                                f"eu_{index:04d}" for index in range(1, 10)
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert len(draft.sections[0].items[0].evidence_unit_ids) == 9
 
 
 def test_reader_draft_limits_distinct_visuals_across_the_note() -> None:

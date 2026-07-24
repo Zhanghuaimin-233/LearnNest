@@ -47,6 +47,7 @@ from learnnest.quality_execution_models import (
     QualityRoleState,
     QualityTaskPlan,
     QualityTaskState,
+    WriterCapabilitySnapshot,
 )
 from learnnest.quality_note import (
     build_quality_note,
@@ -108,6 +109,7 @@ def create_quality_plan(
     organizer_model: str,
     writer_provider: str,
     writer_model: str,
+    writer_capability: WriterCapabilitySnapshot | None = None,
     reviewer_provider: str | None = None,
     reviewer_model: str | None = None,
     review_mode: str = "none",
@@ -197,6 +199,7 @@ def create_quality_plan(
                 reused_organization_sha256=reused_sha,
                 writer_provider=writer_provider,
                 writer_model=writer_model,
+                writer_capability=writer_capability,
                 reviewer_provider=reviewer_provider,
                 reviewer_model=reviewer_model,
                 review_mode=review_mode,
@@ -444,6 +447,12 @@ def generate_quality_note_plan(
             provider, task_plan.writer_provider, task_plan.writer_model
         ):
             raise ValueError("writer provider does not match the immutable plan")
+        if task_plan.writer_capability is not None and not _writer_capability_matches(
+            provider, task_plan.writer_capability
+        ):
+            raise ValueError(
+                "writer capability profile does not match the immutable plan"
+            )
         if not _reserve_call(state, task_plan.task_id, "writer", plan_file):
             continue
         try:
@@ -544,14 +553,30 @@ def _normalize_reader_draft_json(
     visual_unit_aliases: dict[str, str] | None = None,
 ) -> tuple[str, list[str]]:
     """Apply narrow, recorded normalizations before strict ReaderDraft validation."""
+    candidate = raw_draft.strip()
+    fence_match = re.fullmatch(
+        r"```(?:json)?[ \t]*\r?\n(?P<body>.*?)\r?\n```",
+        candidate,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    response_normalizations: list[str] = []
+    if fence_match is not None:
+        candidate = fence_match.group("body")
+        try:
+            fenced_payload = json.loads(candidate)
+        except (TypeError, json.JSONDecodeError):
+            return raw_draft, []
+        if not isinstance(fenced_payload, dict):
+            return raw_draft, []
+        response_normalizations.append("removed single ReaderDraft JSON code fence")
     try:
-        payload = json.loads(raw_draft)
+        payload = json.loads(candidate)
     except (TypeError, json.JSONDecodeError):
         return raw_draft, []
     if not isinstance(payload, dict):
         return raw_draft, []
 
-    normalizations: list[str] = []
+    normalizations = response_normalizations
 
     def normalize_field(container: dict[str, object], key: str, path: str) -> None:
         value = container.get(key)
@@ -1050,6 +1075,11 @@ def _persist_candidate(
                 "writer": {
                     "provider": context.task_plan.writer_provider,
                     "model": context.task_plan.writer_model,
+                    "capability": (
+                        context.task_plan.writer_capability.model_dump(mode="json")
+                        if context.task_plan.writer_capability is not None
+                        else None
+                    ),
                 },
                 "organizer": {
                     "provider": context.task_plan.organizer_provider,
@@ -1379,6 +1409,20 @@ def _provider_matches(
     provider: QualityNoteProvider, expected_name: str, expected_model: str
 ) -> bool:
     return provider.name == expected_name and provider.model == expected_model
+
+
+def _writer_capability_matches(
+    provider: QualityNoteProvider, expected: WriterCapabilitySnapshot
+) -> bool:
+    actual = getattr(provider, "writer_capability", None)
+    if actual is None:
+        return False
+    return (
+        getattr(actual, "profile_id", None) == expected.profile_id
+        and getattr(actual, "profile_sha256", None) == expected.profile_sha256
+        and getattr(actual, "strategy", None) == expected.strategy
+        and getattr(actual, "extractor", None) == expected.extractor
+    )
 
 
 def _content_pack_path(task_dir: Path, task: TaskRecord) -> Path:

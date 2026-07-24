@@ -30,6 +30,10 @@ QualityActivationDecision = Literal[
     "activate_quality_note",
     "retain_previous_active",
 ]
+WriterStrategy = Literal[
+    "native_json_schema", "tool_call", "json_object", "prompted_json"
+]
+WriterExtractor = Literal["message_content", "tool_call_arguments"]
 
 
 class _QualityModel(BaseModel):
@@ -42,6 +46,19 @@ class QualityShardPlan(_QualityModel):
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=0)
     input_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class WriterCapabilitySnapshot(_QualityModel):
+    """Immutable local capability evidence selected before a Writer call."""
+
+    profile_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    profile_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    provider: str = Field(min_length=1)
+    endpoint_identity: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    adapter_revision: str = Field(min_length=1)
+    strategy: WriterStrategy
+    extractor: WriterExtractor
 
 
 class QualityTaskPlan(_QualityModel):
@@ -61,6 +78,7 @@ class QualityTaskPlan(_QualityModel):
     )
     writer_provider: str = Field(min_length=1)
     writer_model: str = Field(min_length=1)
+    writer_capability: WriterCapabilitySnapshot | None = None
     reviewer_provider: str | None = Field(default=None, min_length=1)
     reviewer_model: str | None = Field(default=None, min_length=1)
     review_mode: QualityReviewMode

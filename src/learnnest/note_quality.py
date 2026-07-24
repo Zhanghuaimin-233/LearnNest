@@ -24,6 +24,7 @@ class QualityMetric(BaseModel):
         "uncertainty",
         "citation_density",
         "visual_balance",
+        "language_consistency",
     ]
     score: float = Field(ge=0, le=5)
     explanation: str = Field(min_length=1, max_length=500)
@@ -42,6 +43,8 @@ class QualityIssue(BaseModel):
         "unused_evidence_unit",
         "too_many_visuals",
         "reviewer_flagged",
+        "output_language_mismatch",
+        "citation_overload",
     ]
     severity: Literal["low", "medium", "high"]
     message: str = Field(min_length=1, max_length=500)
@@ -83,6 +86,28 @@ def analyze_quality(
         unit.unit_id for unit in organization.units if unit.reader_relevance == "core"
     }
     issues: list[QualityIssue] = []
+    source_language_ratio = _source_cjk_ratio(organization, content_pack)
+    note_language_ratio = _note_cjk_ratio(note)
+    language_mismatch = (
+        source_language_ratio is not None
+        and note_language_ratio is not None
+        and (
+            (source_language_ratio >= 0.45 and note_language_ratio <= 0.20)
+            or (source_language_ratio <= 0.20 and note_language_ratio >= 0.45)
+        )
+    )
+    if language_mismatch:
+        issues.append(
+            QualityIssue(
+                code="output_language_mismatch",
+                severity="medium",
+                message=(
+                    "正文主要语言与来源证据的主要语言不一致："
+                    f"来源 CJK 比例 {source_language_ratio:.0%}，"
+                    f"正文 CJK 比例 {note_language_ratio:.0%}。"
+                ),
+            )
+        )
     required_visual_units = {
         unit.unit_id
         for unit in organization.units
@@ -158,17 +183,44 @@ def analyze_quality(
                 message="存在超过 800 字的正文块。",
             )
         )
+    overloaded_items = [
+        (section.section_id, item.order, len(item.evidence_unit_ids))
+        for section in note.sections
+        for item in section.items
+        if len(item.evidence_unit_ids) > 8
+    ]
+    for section_id, _order, unit_count in overloaded_items:
+        issues.append(
+            QualityIssue(
+                code="citation_overload",
+                severity="medium",
+                message=(
+                    f"单个正文块引用了 {unit_count} 个语义证据单元；"
+                    "来源闭包有效，但应拆分内容以避免证据倾倒。"
+                ),
+                section_id=section_id,
+            )
+        )
 
     slot_items = {
         section.slot: [item for item in section.items if not item.ai_supplement]
         for section in note.sections
     }
     if not slot_items.get("practice") and not slot_items.get("concept_practice"):
+        practice_is_required = any(
+            section.required
+            for section in note.sections
+            if section.slot in {"practice", "concept_practice"}
+        )
         issues.append(
             QualityIssue(
                 code="practice_missing",
-                severity="medium",
-                message="笔记没有明确的实践或应用内容。",
+                severity="medium" if practice_is_required else "low",
+                message=(
+                    "笔记缺少模板要求的实践或应用内容。"
+                    if practice_is_required
+                    else "笔记没有单独呈现实践或应用内容。"
+                ),
             )
         )
     if not slot_items.get("review"):
@@ -296,6 +348,15 @@ def analyze_quality(
                 f"建议上限为 {maximum_visuals} 张。"
             ),
         ),
+        QualityMetric(
+            name="language_consistency",
+            score=1.0 if language_mismatch else 5.0,
+            explanation=(
+                "正文主要语言与来源证据不一致。"
+                if language_mismatch
+                else "正文主要语言与来源证据一致或来源语言不具备明确主导性。"
+            ),
+        ),
     ]
     status = (
         "flagged"
@@ -312,6 +373,48 @@ def analyze_quality(
         issues=issues,
         reviewer=reviewer,
     )
+
+
+def _source_cjk_ratio(
+    organization: EvidenceUnitOrganization,
+    content_pack: ContentPack,
+) -> float | None:
+    reader_evidence_ids = {
+        evidence_id
+        for unit in organization.units
+        if unit.reader_relevance in {"core", "supporting"}
+        for evidence_id in unit.evidence_ids
+    }
+    texts = [
+        evidence.text
+        for evidence in content_pack.evidence
+        if evidence.id in reader_evidence_ids
+        and evidence.kind in {"transcript", "ocr"}
+        and evidence.text
+    ]
+    return _cjk_ratio("\n".join(texts))
+
+
+def _note_cjk_ratio(note: QualityNoteEnvelope) -> float | None:
+    texts = [note.title]
+    texts.extend(
+        item.markdown
+        for section in note.sections
+        for item in section.items
+        if not item.ai_supplement
+    )
+    return _cjk_ratio("\n".join(texts))
+
+
+def _cjk_ratio(text: str) -> float | None:
+    cjk_count = sum("\u4e00" <= character <= "\u9fff" for character in text)
+    latin_count = sum(
+        ("a" <= character <= "z") or ("A" <= character <= "Z") for character in text
+    )
+    measured_count = cjk_count + latin_count
+    if measured_count < 8:
+        return None
+    return cjk_count / measured_count
 
 
 def quality_report_json_schema() -> dict[str, object]:

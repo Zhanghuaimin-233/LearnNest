@@ -46,7 +46,18 @@ from learnnest.note_providers import (
     OpenAICompatibleNoteProvider,
     OpenAICompatibleNoteReviewer,
     OpenAICompatibleQualityNoteProvider,
+    probe_openai_compatible_writer,
 )
+from learnnest.provider_profiles import (
+    PRESETS,
+    check_capability,
+    connect as connect_provider,
+    get_connection,
+    load_settings as load_provider_settings,
+    profile_for_connection,
+    set_authorization,
+)
+from learnnest.quality_execution_models import WriterCapabilitySnapshot
 from learnnest.note_templates import (
     load_template_file,
     resolve_note_template,
@@ -106,8 +117,14 @@ template_app = typer.Typer(no_args_is_help=True)
 flow_app = typer.Typer(no_args_is_help=True)
 layout_app = typer.Typer(no_args_is_help=True)
 quality_note_app = typer.Typer(no_args_is_help=True)
+provider_app = typer.Typer(no_args_is_help=True)
 app.add_typer(
     index_app, name="index", help="Inspect or rebuild the Vault SQLite read model."
+)
+app.add_typer(
+    provider_app,
+    name="provider",
+    help="Manage local BYOK connections and Writer capability profiles.",
 )
 app.add_typer(
     template_app, name="template", help="Validate constrained V4 note templates."
@@ -191,6 +208,185 @@ class QualityReviewModeOption(StrEnum):
 @app.callback()
 def main() -> None:
     """Convert local learning videos into traceable evidence packs."""
+
+
+@provider_app.command("connect")
+def provider_connect(
+    preset: Annotated[
+        str,
+        typer.Argument(
+            help="mimo, openai, anthropic, gemini, deepseek, or openai-compatible"
+        ),
+    ],
+    name: Annotated[
+        str, typer.Option("--name", help="Stable local connection name.")
+    ] = "default",
+    endpoint: Annotated[
+        str | None, typer.Option("--endpoint", help="Required for openai-compatible.")
+    ] = None,
+    model: Annotated[
+        str | None, typer.Option("--model", help="Optional advanced model override.")
+    ] = None,
+    secret_env: Annotated[
+        str | None,
+        typer.Option(
+            "--secret-env", help="Secret environment variable for openai-compatible."
+        ),
+    ] = None,
+    provider_name: Annotated[
+        str | None,
+        typer.Option(
+            "--provider-name",
+            help="Optional stable name for an OpenAI-compatible connection.",
+        ),
+    ] = None,
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Save a secret-free connection; preset connections prompt only for their key."""
+    root = _output_root(output_root)
+    if preset != "openai-compatible" and preset not in PRESETS:
+        typer.echo("ERROR: unknown provider preset", err=True)
+        raise typer.Exit(code=1)
+    if preset == "openai-compatible" and (not endpoint or not model or not secret_env):
+        typer.echo(
+            "ERROR: openai-compatible requires --endpoint, --model, and --secret-env",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    key = typer.prompt("API key", hide_input=True)
+    if not key.strip():
+        typer.echo("ERROR: API key is required", err=True)
+        raise typer.Exit(code=1)
+    try:
+        connection = connect_provider(
+            root,
+            name=name,
+            preset=preset,
+            endpoint=endpoint,
+            model=model,
+            secret_env=secret_env,
+            provider_name=provider_name,
+        )
+        _write_local_env_value(Path.cwd() / ".env", connection.secret_env, key)
+        if load_provider_settings(root).authorization == "automatic":
+            if connection.api_family != "openai_chat":
+                raise ValueError(
+                    "native provider capability adapters are not available in this build"
+                )
+            config = OpenAICompatibleChatConfig(
+                provider_name=connection.provider,
+                model=connection.model,
+                base_url=connection.endpoint,
+                api_key=SecretStr(key),
+            )
+            profile = check_capability(
+                root,
+                connection,
+                lambda strategy: probe_openai_compatible_writer(config, strategy),
+            )
+            typer.echo(
+                f"Capability profile: {profile.profile_id} / {profile.status} / {len(profile.attempts)} calls"
+            )
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Connected {connection.name}: {connection.provider} / {connection.model}"
+    )
+
+
+@provider_app.command("status")
+def provider_status(
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Show local connections and profile state without provider calls."""
+    root = _output_root(output_root)
+    try:
+        settings = load_provider_settings(root)
+        typer.echo(f"Authorization: {settings.authorization}")
+        for name, connection in sorted(settings.connections.items()):
+            profile = profile_for_connection(root, connection)
+            state = profile.status if profile is not None else "unchecked"
+            marker = " (default)" if settings.default_connection == name else ""
+            typer.echo(
+                f"{name}{marker}: {connection.provider} / {connection.model} / {state}"
+            )
+    except ValueError as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+
+
+@provider_app.command("authorize")
+def provider_authorize(
+    mode: Annotated[str, typer.Argument(help="automatic or local-only")],
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Set whether connection changes may run the separately counted check."""
+    value = "local_only" if mode == "local-only" else mode
+    if value not in {"local_only", "automatic"}:
+        typer.echo("ERROR: authorization must be automatic or local-only", err=True)
+        raise typer.Exit(code=1)
+    settings = set_authorization(_output_root(output_root), value)  # type: ignore[arg-type]
+    typer.echo(f"Authorization: {settings.authorization}")
+
+
+@provider_app.command("check")
+def provider_check(
+    connection_name: Annotated[
+        str | None,
+        typer.Option(
+            "--connection", help="Connection name; defaults to the configured default."
+        ),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option(
+            "--refresh", help="Run again even when a verified profile exists."
+        ),
+    ] = False,
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Run at most four separately counted synthetic Writer contract calls."""
+    root = _output_root(output_root)
+    try:
+        connection = get_connection(root, connection_name)
+        current = profile_for_connection(root, connection)
+        if current is not None and current.status == "verified" and not refresh:
+            typer.echo(f"Capability profile: {current.profile_id} ({current.strategy})")
+            return
+        if connection.api_family != "openai_chat":
+            raise ValueError(
+                "native provider capability adapters are not available in this build"
+            )
+        environment = _runtime_environment()
+        secret = environment.get(connection.secret_env, "").strip()
+        if not secret:
+            raise ValueError(f"{connection.secret_env} is missing")
+        config = OpenAICompatibleChatConfig(
+            provider_name=connection.provider,
+            model=connection.model,
+            base_url=connection.endpoint,
+            api_key=SecretStr(secret),
+        )
+        profile = check_capability(
+            root,
+            connection,
+            lambda strategy: probe_openai_compatible_writer(config, strategy),
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Capability profile: {profile.profile_id} / {profile.status} / {profile.strategy or 'none'} / {len(profile.attempts)} calls"
+    )
 
 
 @app.command()
@@ -1337,6 +1533,13 @@ def quality_note_plan(
             help="Validated organization.json to reuse for one matching task.",
         ),
     ] = None,
+    connection: Annotated[
+        str | None,
+        typer.Option(
+            "--connection",
+            help="Verified provider connection; defaults to the configured default.",
+        ),
+    ] = None,
     organizer_provider: Annotated[
         str,
         typer.Option("--organizer-provider", help="Persisted Organizer provider name."),
@@ -1364,6 +1567,49 @@ def quality_note_plan(
     """Write an immutable quality-first execution plan without provider calls."""
     root = _output_root(output_root)
     try:
+        selected_connection = get_connection(root, connection)
+        profile = profile_for_connection(root, selected_connection)
+        if (
+            profile is None
+            or profile.status != "verified"
+            or profile.strategy is None
+            or profile.extractor is None
+        ):
+            raise ValueError(
+                "Writer capability is unchecked; run provider check explicitly"
+            )
+        snapshot = WriterCapabilitySnapshot(
+            profile_id=profile.profile_id,
+            profile_sha256=profile.profile_sha256,
+            provider=profile.provider,
+            endpoint_identity=profile.endpoint_identity,
+            model=profile.model,
+            adapter_revision=profile.adapter_revision,
+            strategy=profile.strategy,
+            extractor=profile.extractor,
+        )
+        if writer_provider == "xiaomi-mimo" and writer_model == "mimo-v2.5":
+            writer_provider, writer_model = (
+                selected_connection.provider,
+                selected_connection.model,
+            )
+        if organizer_provider == "xiaomi-mimo" and organizer_model == "mimo-v2.5":
+            organizer_provider, organizer_model = (
+                selected_connection.provider,
+                selected_connection.model,
+            )
+        if reviewer_provider == "xiaomi-mimo" and reviewer_model == "mimo-v2.5":
+            reviewer_provider, reviewer_model = (
+                selected_connection.provider,
+                selected_connection.model,
+            )
+        if (
+            writer_provider != selected_connection.provider
+            or writer_model != selected_connection.model
+        ):
+            raise ValueError(
+                "quality plan Writer provider/model must match the selected connection"
+            )
         selected_template = resolve_reader_template(template, default_type="mixed")
         plan_path = create_quality_plan(
             root,
@@ -1373,6 +1619,7 @@ def quality_note_plan(
             organizer_model=organizer_model,
             writer_provider=writer_provider,
             writer_model=writer_model,
+            writer_capability=snapshot,
             reviewer_provider=(
                 reviewer_provider
                 if review_mode is not QualityReviewModeOption.NONE
@@ -1406,7 +1653,9 @@ def quality_note_organize(
     root = _output_root(output_root)
     secret: SecretStr | None = None
     try:
-        provider, secret = _quality_note_provider(_runtime_environment())
+        provider, secret = _quality_note_provider(
+            _runtime_environment(), output_root=root
+        )
         with _resource_execution(root, "network", "llm"):
             state = organize_quality_plan(plan_path, root, provider)
     except (OSError, RuntimeError, ValueError) as error:
@@ -1428,7 +1677,9 @@ def quality_note_generate(
     root = _output_root(output_root)
     secret: SecretStr | None = None
     try:
-        provider, secret = _quality_note_provider(_runtime_environment())
+        provider, secret = _quality_note_provider(
+            _runtime_environment(), output_root=root
+        )
         with _resource_execution(root, "network", "llm"):
             state = generate_quality_note_plan(plan_path, root, provider)
     except (OSError, RuntimeError, ValueError) as error:
@@ -1454,7 +1705,9 @@ def quality_note_review(
         needs_reviewer = any(item.review_mode != "none" for item in plan.tasks)
         provider = None
         if needs_reviewer:
-            provider, secret = _quality_note_provider(_runtime_environment())
+            provider, secret = _quality_note_provider(
+                _runtime_environment(), output_root=root
+            )
         if provider is None:
             state = review_quality_note_plan(plan_path, root)
         else:
@@ -2010,9 +2263,38 @@ def _note_provider_pair(
 
 def _quality_note_provider(
     environ: Mapping[str, str],
+    *,
+    output_root: Path | None = None,
 ) -> tuple[object, SecretStr]:
     """Build the explicit quality-role provider from the same BYOK boundary."""
     safe_input_tokens = _note_safe_input_tokens(environ)
+    if output_root is not None:
+        try:
+            connection = get_connection(output_root)
+        except ValueError:
+            connection = None
+        if connection is not None:
+            if connection.api_family != "openai_chat":
+                raise ValueError(
+                    "native provider quality adapters are not available in this build"
+                )
+            profile = profile_for_connection(output_root, connection)
+            if profile is None or profile.status != "verified":
+                raise ValueError(
+                    "Writer capability is unchecked; run provider check explicitly"
+                )
+            secret_value = environ.get(connection.secret_env, "").strip()
+            if not secret_value:
+                raise ValueError(f"{connection.secret_env} is missing")
+            config = OpenAICompatibleChatConfig(
+                provider_name=connection.provider,
+                model=connection.model,
+                base_url=connection.endpoint,
+                api_key=SecretStr(secret_value),
+                writer_capability=profile,
+                safe_input_tokens=safe_input_tokens,
+            )
+            return OpenAICompatibleQualityNoteProvider(config), config.api_key
     generic_names = (
         "LEARNNEST_NOTE_API_KEY",
         "LEARNNEST_NOTE_BASE_URL",
@@ -2040,11 +2322,45 @@ def _quality_note_provider(
                 "LEARNNEST_NOTE_JSON_MODE", "json_object"
             ).strip()
             or "json_object",
+            writer_strategy_override=_writer_strategy_override(environ),
             safe_input_tokens=safe_input_tokens,
         )
         return OpenAICompatibleQualityNoteProvider(config), config.api_key
     secret = _mimo_api_key(environ)
     return MimoQualityNoteProvider(secret, safe_input_tokens=safe_input_tokens), secret
+
+
+def _writer_strategy_override(
+    environ: Mapping[str, str],
+) -> str | None:
+    explicit_strategy = environ.get("LEARNNEST_NOTE_WRITER_STRATEGY", "").strip()
+    if explicit_strategy:
+        return explicit_strategy
+    legacy_mode = environ.get("LEARNNEST_NOTE_JSON_MODE", "").strip()
+    return {
+        "json_schema": "native_json_schema",
+        "json_object": "json_object",
+        "prompt_only": "prompted_json",
+    }.get(legacy_mode)
+
+
+def _write_local_env_value(path: Path, key: str, value: str) -> None:
+    """Replace one local .env value without printing or persisting it elsewhere."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    replaced = False
+    result: list[str] = []
+    for line in lines:
+        if line.split("=", 1)[0].strip().removeprefix("export ").strip() == key:
+            result.append(f"{key}={value}")
+            replaced = True
+        else:
+            result.append(line)
+    if not replaced:
+        result.append(f"{key}={value}")
+    path.write_text("\n".join(result) + "\n", encoding="utf-8")
 
 
 def _optional_note_auditor(

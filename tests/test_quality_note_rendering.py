@@ -259,3 +259,85 @@ def test_quality_report_flags_missing_required_visual_without_deleting_candidate
     assert report.status == "flagged"
     assert any(issue.code == "required_visual_missing" for issue in report.issues)
     assert note.task_id == pack.task_id
+
+
+def test_quality_report_flags_output_language_mismatch() -> None:
+    pack = _pack()
+    draft = _draft().model_copy(deep=True)
+    draft.title = "Settings and Saving"
+    for section in draft.sections:
+        for item in section.items:
+            item.markdown = (
+                "Open the settings interface, apply the intended change, "
+                "and save the result for a repeatable workflow."
+            )
+    note = build_quality_note(
+        _task(),
+        pack,
+        _organization(pack),
+        draft,
+        template=builtin_reader_template("concept"),
+        content_pack_sha256="a" * 64,
+    )
+
+    report = analyze_quality(note, _organization(pack), pack)
+
+    assert report.status == "flagged"
+    assert any(issue.code == "output_language_mismatch" for issue in report.issues)
+    language_metric = next(
+        metric for metric in report.metrics if metric.name == "language_consistency"
+    )
+    assert language_metric.score == 1.0
+
+
+def test_quality_report_flags_citation_overload_without_rejecting_source() -> None:
+    pack = _pack()
+    note = build_quality_note(
+        _task(),
+        pack,
+        _organization(pack),
+        _draft(),
+        template=builtin_reader_template("concept"),
+        content_pack_sha256="a" * 64,
+    )
+    summary = next(section for section in note.sections if section.slot == "summary")
+    summary.items[0].evidence_unit_ids = [
+        "eu_0001",
+        "eu_0002",
+        "eu_0001",
+        "eu_0002",
+        "eu_0001",
+        "eu_0002",
+        "eu_0001",
+        "eu_0002",
+        "eu_0001",
+    ]
+
+    report = analyze_quality(note, _organization(pack), pack)
+
+    assert report.status == "flagged"
+    assert any(issue.code == "citation_overload" for issue in report.issues)
+
+
+def test_quality_report_keeps_optional_practice_as_an_advisory() -> None:
+    pack = _pack()
+    draft = _draft().model_copy(deep=True)
+    draft.sections = [
+        section for section in draft.sections if section.slot != "practice"
+    ]
+    note = build_quality_note(
+        _task(),
+        pack,
+        _organization(pack),
+        draft,
+        template=builtin_reader_template("concept"),
+        content_pack_sha256="a" * 64,
+    )
+
+    report = analyze_quality(note, _organization(pack), pack)
+
+    practice_issue = next(
+        issue for issue in report.issues if issue.code == "practice_missing"
+    )
+    assert practice_issue.severity == "low"
+    assert report.status == "passed"

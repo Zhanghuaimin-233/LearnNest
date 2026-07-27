@@ -8,6 +8,7 @@ from pydantic import SecretStr
 from learnnest.note_models import QualityNoteEnvelope, ReaderDraft
 from learnnest.note_providers import (
     OpenAICompatibleChatConfig,
+    OpenAICompatibleAssistedNoteProvider,
     OpenAICompatibleQualityNoteProvider,
     NoteProviderError,
     WriterCapabilityProfile,
@@ -81,6 +82,30 @@ def _provider(
         ),
         client_factory=lambda **_kwargs: _Client(calls),
     )
+
+
+def test_assisted_provider_requests_plain_markdown_without_structured_strategy() -> (
+    None
+):
+    calls = _Completions(["# 初稿", "# 二审稿"])
+    provider = OpenAICompatibleAssistedNoteProvider(
+        OpenAICompatibleChatConfig(
+            provider_name="fake-quality",
+            model="fake-model",
+            base_url="https://example.test/v1/",
+            api_key=SecretStr("test-key"),
+        ),
+        client_factory=lambda **_kwargs: _Client(calls),
+    )
+
+    draft = provider.write_markdown('{"source_material":[{"content":"设置"}]}')
+    reviewed = provider.review_markdown('{"source_material":[]}', draft)
+
+    assert draft == "# 初稿"
+    assert reviewed == "# 二审稿"
+    assert provider.endpoint_identity == "https://example.test/v1"
+    assert all("response_format" not in request for request in calls.calls)
+    assert all("tools" not in request for request in calls.calls)
 
 
 def test_quality_provider_uses_one_bounded_call_per_explicit_role() -> None:

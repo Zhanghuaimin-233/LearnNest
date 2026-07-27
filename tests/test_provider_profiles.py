@@ -120,3 +120,19 @@ def test_generic_connection_can_keep_a_stable_provider_name(tmp_path: Path) -> N
     )
 
     assert connection.provider == "volcengine-coding-plan"
+
+
+def test_coding_plan_preset_uses_the_plan_endpoint_and_secret_reference(
+    tmp_path: Path,
+) -> None:
+    connection = connect(
+        tmp_path,
+        name="coding-plan",
+        preset="coding-plan",
+        now=datetime(2026, 7, 27, tzinfo=UTC),
+    )
+
+    assert connection.provider == "volcengine-coding-plan"
+    assert connection.endpoint == "https://ark.cn-beijing.volces.com/api/coding/v3"
+    assert connection.model == "doubao-seed-2.1-turbo"
+    assert connection.secret_env == "CODING_PLAN_KEY"

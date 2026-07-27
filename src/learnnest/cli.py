@@ -14,6 +14,15 @@ import typer
 from pydantic import SecretStr
 
 from learnnest import providers
+from learnnest.assisted_note_generation import (
+    create_assisted_plan,
+    generate_assisted_plan,
+    load_assisted_plan,
+    load_assisted_state,
+    recover_assisted_plan,
+    review_assisted_plan,
+)
+from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.artifact_layout import migrate_artifact_layout, plan_artifact_layout
 from learnnest.adapters.douyin import DouyinFavoritesAdapter
 from learnnest.adapters.douyin_http import DouyinHttpTransport
@@ -42,6 +51,7 @@ from learnnest.note_providers import (
     MimoNoteProvider,
     MimoNoteReviewer,
     MimoQualityNoteProvider,
+    OpenAICompatibleAssistedNoteProvider,
     OpenAICompatibleChatConfig,
     OpenAICompatibleNoteProvider,
     OpenAICompatibleNoteReviewer,
@@ -50,6 +60,7 @@ from learnnest.note_providers import (
 )
 from learnnest.provider_profiles import (
     PRESETS,
+    ProviderConnection,
     check_capability,
     connect as connect_provider,
     get_connection,
@@ -117,9 +128,15 @@ template_app = typer.Typer(no_args_is_help=True)
 flow_app = typer.Typer(no_args_is_help=True)
 layout_app = typer.Typer(no_args_is_help=True)
 quality_note_app = typer.Typer(no_args_is_help=True)
+assisted_note_app = typer.Typer(no_args_is_help=True)
 provider_app = typer.Typer(no_args_is_help=True)
 app.add_typer(
     index_app, name="index", help="Inspect or rebuild the Vault SQLite read model."
+)
+app.add_typer(
+    assisted_note_app,
+    name="assisted-note",
+    help="Run the isolated Markdown Writer and Reviewer workflow.",
 )
 app.add_typer(
     provider_app,
@@ -215,7 +232,10 @@ def provider_connect(
     preset: Annotated[
         str,
         typer.Argument(
-            help="mimo, openai, anthropic, gemini, deepseek, or openai-compatible"
+            help=(
+                "mimo, openai, anthropic, gemini, deepseek, coding-plan, "
+                "or openai-compatible"
+            )
         ),
     ],
     name: Annotated[
@@ -1753,6 +1773,128 @@ def quality_note_recover(
     typer.echo(_quality_state_summary(state))
 
 
+@assisted_note_app.command("plan")
+def assisted_note_plan(
+    task_ids: Annotated[
+        list[str],
+        typer.Argument(help="One or more stable task IDs with content packs."),
+    ],
+    connection: Annotated[
+        str | None,
+        typer.Option(
+            "--connection", help="Writer connection; defaults to configured default."
+        ),
+    ] = None,
+    reviewer_connection: Annotated[
+        str | None,
+        typer.Option(
+            "--reviewer-connection", help="Optional distinct Reviewer connection."
+        ),
+    ] = None,
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Write an immutable assisted-draft plan without provider calls or checks."""
+    root = _output_root(output_root)
+    try:
+        writer = _assisted_connection_snapshot(get_connection(root, connection))
+        reviewer = _assisted_connection_snapshot(
+            get_connection(root, reviewer_connection or connection)
+        )
+        plan_path = create_assisted_plan(
+            root, task_ids, writer=writer, reviewer=reviewer
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Assisted plan: {plan_path}")
+
+
+@assisted_note_app.command("generate")
+def assisted_note_generate(
+    plan_path: Annotated[
+        Path, typer.Argument(exists=True, file_okay=True, dir_okay=True, readable=True)
+    ],
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Execute each planned Markdown Writer once; no retry is implicit."""
+    root = _output_root(output_root)
+    secret: SecretStr | None = None
+    try:
+        plan = load_assisted_plan(plan_path)
+        provider, secret = _assisted_note_provider(
+            _runtime_environment(), root, plan.writer
+        )
+        with _resource_execution(root, "network", "llm"):
+            state = generate_assisted_plan(plan_path, root, provider)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(_assisted_state_summary(state))
+
+
+@assisted_note_app.command("review")
+def assisted_note_review(
+    plan_path: Annotated[
+        Path, typer.Argument(exists=True, file_okay=True, dir_okay=True, readable=True)
+    ],
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Execute each planned Markdown Reviewer once after a saved candidate exists."""
+    root = _output_root(output_root)
+    secret: SecretStr | None = None
+    try:
+        plan = load_assisted_plan(plan_path)
+        provider, secret = _assisted_note_provider(
+            _runtime_environment(), root, plan.reviewer
+        )
+        with _resource_execution(root, "network", "llm"):
+            state = review_assisted_plan(plan_path, root, provider)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(_assisted_state_summary(state))
+
+
+@assisted_note_app.command("status")
+def assisted_note_status(
+    plan_path: Annotated[
+        Path, typer.Argument(exists=True, file_okay=True, dir_okay=True, readable=True)
+    ],
+) -> None:
+    """Show assisted-draft status and explicit Writer/Reviewer call counts."""
+    try:
+        state = load_assisted_state(plan_path)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(_assisted_state_summary(state))
+
+
+@assisted_note_app.command("recover")
+def assisted_note_recover(
+    plan_path: Annotated[
+        Path, typer.Argument(exists=True, file_okay=True, dir_okay=True, readable=True)
+    ],
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Repair only persisted assisted-draft files; never call a provider."""
+    root = _output_root(output_root)
+    try:
+        state = recover_assisted_plan(plan_path, root)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(_assisted_state_summary(state))
+
+
 @app.command()
 def podcast(
     task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
@@ -2390,6 +2532,46 @@ def _safe_error(error: Exception, secret: SecretStr | None) -> str:
     return message
 
 
+def _assisted_connection_snapshot(
+    connection: ProviderConnection,
+) -> AssistedConnectionSnapshot:
+    if connection.api_family != "openai_chat":
+        raise ValueError(
+            "native provider assisted adapters are not available in this build"
+        )
+    return AssistedConnectionSnapshot(
+        connection_name=connection.name,
+        provider=connection.provider,
+        endpoint_identity=connection.endpoint.strip().rstrip("/").lower(),
+        model=connection.model,
+        adapter_revision=connection.adapter_revision,
+    )
+
+
+def _assisted_note_provider(
+    environ: Mapping[str, str],
+    output_root: Path,
+    snapshot: AssistedConnectionSnapshot,
+) -> tuple[OpenAICompatibleAssistedNoteProvider, SecretStr]:
+    connection = get_connection(output_root, snapshot.connection_name)
+    current = _assisted_connection_snapshot(connection)
+    if current != snapshot:
+        raise ValueError(
+            "assisted provider connection no longer matches the immutable plan"
+        )
+    secret_value = environ.get(connection.secret_env, "").strip()
+    if not secret_value:
+        raise ValueError(f"{connection.secret_env} is missing")
+    config = OpenAICompatibleChatConfig(
+        provider_name=connection.provider,
+        model=connection.model,
+        base_url=connection.endpoint,
+        api_key=SecretStr(secret_value),
+        safe_input_tokens=_note_safe_input_tokens(environ),
+    )
+    return OpenAICompatibleAssistedNoteProvider(config), config.api_key
+
+
 def _quality_state_summary(state: object) -> str:
     rows: list[str] = []
     for task in state.tasks:  # type: ignore[attr-defined]
@@ -2399,5 +2581,16 @@ def _quality_state_summary(state: object) -> str:
             f"writer={task.writer.actual_call_count}/{task.writer.max_calls} "
             f"reviewer={task.reviewer.actual_call_count}/{task.reviewer.max_calls} "
             f"activation={task.activation_decision}"
+        )
+    return "\n".join(rows)
+
+
+def _assisted_state_summary(state: object) -> str:
+    rows: list[str] = []
+    for task in state.tasks:  # type: ignore[attr-defined]
+        rows.append(
+            f"{task.task_id}: {task.status} "
+            f"writer={task.writer.actual_call_count}/{task.writer.max_calls} "
+            f"reviewer={task.reviewer.actual_call_count}/{task.reviewer.max_calls}"
         )
     return "\n".join(rows)

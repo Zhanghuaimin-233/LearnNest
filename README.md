@@ -191,15 +191,35 @@ uv run learnnest flow run `
 | MiMo 笔记、播客与 TTS        | `MIMO_API_KEY`                                                            |
 | OpenAI-compatible 笔记服务 | `LEARNNEST_NOTE_API_KEY`、`LEARNNEST_NOTE_BASE_URL`、`LEARNNEST_NOTE_MODEL` |
 
-Writer 连接通过本地 BYOK 管理。`provider connect mimo|openai|anthropic|gemini|deepseek`
+Writer 连接通过本地 BYOK 管理。`provider connect mimo|openai|anthropic|gemini|deepseek|coding-plan`
 只会询问 API Key；聚合服务使用 `openai-compatible` 并显式提供 endpoint、model 和
 secret env 名。连接和能力档案保存在输出根 `.learnnest/providers/`，不保存 Key、请求或
 响应。默认 `local_only`，必须显式运行 `provider check`；一次性执行
 `provider authorize automatic` 后，后续连接变更会触发最多四次、单独计费且可见的
 ReaderDraft 兼容性检查。`quality-note plan` 只读取已经验证的档案并固定 snapshot，
 `status` 和 `recover` 永不触发检查或 provider 调用。
+`assisted-note plan` 只冻结 OpenAI-compatible connection 身份和材料包 SHA，不依赖
+ReaderDraft 能力档案；它的 `generate` 与 `review` 才分别执行一次显式 Markdown 调用。
 当前执行 adapter 覆盖 OpenAI-compatible 家族；Anthropic 和 Gemini 预设已登记，但其
-原生请求 adapter 尚未实现，不能用于 quality-note 的真实调用。
+原生请求 adapter 尚未实现，不能用于 quality-note 或 assisted-note 的真实调用。
+
+### 火山方舟 Coding Plan
+
+使用套餐时通过 `coding-plan` 预设建立本地连接；它固定 OpenAI-compatible 套餐端点
+`https://ark.cn-beijing.volces.com/api/coding/v3` 和本机 `CODING_PLAN_KEY` 引用，**不得**改用
+通用 `https://ark.cn-beijing.volces.com/api/v3`，后者不消耗 Coding Plan 额度而会另行计费。
+
+```powershell
+uv run learnnest provider connect coding-plan --name coding-plan `
+  --model deepseek-v4-pro `
+  --output-root .\learnnest-output
+```
+
+截至 2026-07-27，官方列出的套餐模型为 `doubao-seed-2.1-turbo`、`doubao-seed-2.0-lite`、
+`minimax-m2.7`、`minimax-m3`、`glm-5.2`、`deepseek-v4-flash`、`deepseek-v4-pro`、`kimi-k2.6` 和
+`kimi-k2.7-code`。效率模式当前推荐基线排除 `glm-5.2`（本地实测两次 Reviewer 空正文）；历史
+`doubao-seed-code` 不受套餐支持。其余八个模型，包括两个 DeepSeek 模型，均应以新的显式 plan
+分别验收；官方模型清单可能变化，使用前应回查火山方舟文档。
 | 本地 ASR 模型缓存            | `HUGGINGFACE_HUB_CACHE`                                                   |
 
 生成一篇受约束、可校验的学习笔记：
@@ -250,6 +270,30 @@ uv run learnnest quality-note plan `
 `plan`、`status` 和 `recover` 不调用 provider。Writer HTTP 成功响应会先落盘，再做本地结构与来源校验；可恢复的渲染或格式规则变化由 `recover` 重新校验，不增加调用数。未知来源、核心证据漏覆盖和跨源引用仍会硬失败。
 
 质量报告不等同于人工阅读、图片或音频验收，`gate` 被拒绝时旧 active note 保持不变。
+
+### 效率模式学习笔记
+
+`assisted-note` 是与 `quality-note` 完全隔离的效率路线。程序从同一
+`content_pack.json` 投影出确定性 reader dossier：ASR transcript 与按帧归组的 OCR 保持
+独立，模型不得把冲突来源拼接为事实；Writer 与 Reviewer 分别只调用一次，
+都返回完整 CommonMark。它交付的状态是 `model_reviewed`，**不等同于** `source_valid`、
+人工事实复核或现实世界时效证明；不会更新严格路线 active note，也不能作为 podcast 或
+TTS 的输入。
+
+```powershell
+uv run learnnest assisted-note plan `
+  <task_id> `
+  --connection <writer-connection> `
+  --reviewer-connection <optional-reviewer-connection> `
+  --output-root .\learnnest-output
+
+uv run learnnest assisted-note generate <plan.json> --output-root .\learnnest-output
+uv run learnnest assisted-note review <plan.json> --output-root .\learnnest-output
+uv run learnnest assisted-note status <plan.json>
+```
+
+`recover` 只从已落盘的响应重建本地 Markdown，不会重试或再次调用 provider；二审失败时，
+第一稿候选会保留，但不会成为 `model_reviewed` 成品。
 
 继续生成播客稿和音频：
 

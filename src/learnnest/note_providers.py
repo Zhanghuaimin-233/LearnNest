@@ -733,6 +733,7 @@ class _OpenAICompatibleChatTransport:
         self.name = config.provider_name
         self.model = config.model
         self._api_key = config.api_key
+        self.endpoint_identity = config.base_url.strip().rstrip("/").lower()
         self._json_response_mode = config.json_response_mode
         self._writer_capability = _select_writer_capability(config)
         self.safe_input_tokens = config.safe_input_tokens
@@ -781,6 +782,27 @@ class _OpenAICompatibleChatTransport:
         try:
             response = self._client.chat.completions.create(**request)
             content = _extract_writer_response(response, writer_capability)
+        except Exception as error:
+            raise NoteProviderError(
+                f"{self.name} {operation} failed: "
+                f"{safe_provider_diagnostic(error, self._api_key)}"
+            ) from error
+        if not isinstance(content, str) or not content.strip():
+            raise NoteProviderError(
+                f"{self.name} {operation} returned no message content"
+            )
+        return content
+
+    def _complete_text(self, messages: list[dict[str, str]], *, operation: str) -> str:
+        """Request one non-structured text completion without JSON capability handling."""
+        request: dict[str, object] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+        }
+        try:
+            response = self._client.chat.completions.create(**request)
+            content = response.choices[0].message.content
         except Exception as error:
             raise NoteProviderError(
                 f"{self.name} {operation} failed: "
@@ -1521,6 +1543,65 @@ class MimoQualityNoteProvider(OpenAICompatibleQualityNoteProvider):
         )
 
 
+class OpenAICompatibleAssistedNoteProvider(_OpenAICompatibleChatTransport):
+    """OpenAI-compatible Markdown transport for the isolated assisted route."""
+
+    def write_markdown(self, dossier_json: str) -> str:
+        _assert_assisted_input_budget(self, dossier_json)
+        return self._complete_text(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Write one complete, readable CommonMark learning note. "
+                        "Use only the supplied dossier; do not add outside facts, "
+                        "citations, JSON, an audit table, or prompt commentary. "
+                        "Treat transcript and frame OCR as separate sources: never "
+                        "merge conflicting statements into a fact. When support is "
+                        "incomplete, state that limitation plainly."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"BEGIN_READER_DOSSIER\n{dossier_json}\nEND_READER_DOSSIER"
+                    ),
+                },
+            ],
+            operation="assisted Writer",
+        )
+
+    def review_markdown(self, dossier_json: str, candidate_markdown: str) -> str:
+        _assert_assisted_input_budget(self, dossier_json, candidate_markdown)
+        return self._complete_text(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Return a complete revised CommonMark learning note only. "
+                        "Compare the candidate with the dossier. Remove unsupported "
+                        "claims, make uncertainty conditional, correct contradictions, "
+                        "and keep useful material. Treat transcript and frame OCR as "
+                        "separate sources; do not resolve a conflict by combining them. "
+                        "Do not return JSON, an audit, or commentary."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "BEGIN_READER_DOSSIER\n"
+                        f"{dossier_json}\n"
+                        "END_READER_DOSSIER\n\n"
+                        "BEGIN_CANDIDATE_NOTE\n"
+                        f"{candidate_markdown}\n"
+                        "END_CANDIDATE_NOTE"
+                    ),
+                },
+            ],
+            operation="assisted Reviewer",
+        )
+
+
 def _assert_quality_input_budget(
     provider: OpenAICompatibleQualityNoteProvider, *payloads: str
 ) -> None:
@@ -1531,6 +1612,18 @@ def _assert_quality_input_budget(
     if estimated_tokens > provider.safe_input_tokens:
         raise NoteProviderError(
             f"quality input exceeds safe token budget before {provider.name} call"
+        )
+
+
+def _assert_assisted_input_budget(
+    provider: OpenAICompatibleAssistedNoteProvider, *payloads: str
+) -> None:
+    estimated_tokens = (
+        sum(len(payload.encode("utf-8")) for payload in payloads) + 2_048 + 1
+    ) // 2
+    if estimated_tokens > provider.safe_input_tokens:
+        raise NoteProviderError(
+            f"assisted input exceeds safe token budget before {provider.name} call"
         )
 
 

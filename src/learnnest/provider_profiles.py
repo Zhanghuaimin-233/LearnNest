@@ -89,6 +89,14 @@ PRESETS: dict[str, ProviderPreset] = {
         default_model="deepseek-v4-pro",
         secret_env="DEEPSEEK_API_KEY",
     ),
+    "coding-plan": ProviderPreset(
+        preset="coding-plan",
+        provider="volcengine-coding-plan",
+        api_family="openai_chat",
+        endpoint="https://ark.cn-beijing.volces.com/api/coding/v3",
+        default_model="doubao-seed-2.1-turbo",
+        secret_env="CODING_PLAN_KEY",
+    ),
 }
 
 

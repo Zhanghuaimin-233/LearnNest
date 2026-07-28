@@ -56,12 +56,15 @@ def create_assisted_plan(
     *,
     writer: AssistedConnectionSnapshot,
     reviewer: AssistedConnectionSnapshot,
+    max_role_calls: int = 1,
     now: datetime | None = None,
 ) -> Path:
     """Freeze task input and connection identities without a provider call."""
     root = Path(output_root).resolve()
     if not task_ids:
         raise ValueError("assisted plan requires at least one task ID")
+    if not 1 <= max_role_calls <= 4:
+        raise ValueError("assisted max_role_calls must be between 1 and 4")
     created_at = now or datetime.now(UTC)
     if created_at.tzinfo is None or created_at.utcoffset() is None:
         raise ValueError("assisted plan time must be timezone-aware")
@@ -85,6 +88,7 @@ def create_assisted_plan(
                 source_fingerprint=task.source_fingerprint,
                 content_pack_sha256=_sha256_bytes(content_pack_bytes),
                 dossier_sha256=_sha256_text(dossier_json),
+                max_calls=2 * max_role_calls,
             )
         )
         dossiers[task.task_id] = dossier_json
@@ -108,7 +112,7 @@ def create_assisted_plan(
         writer=writer,
         reviewer=reviewer,
         tasks=task_plans,
-        total_max_calls=2 * len(task_plans),
+        total_max_calls=2 * max_role_calls * len(task_plans),
     )
     plan_dir = _plan_dir(root, plan.plan_id)
     if plan_dir.exists():
@@ -224,7 +228,11 @@ def load_assisted_state(path: str | Path) -> AssistedPlanState:
 
 
 def generate_assisted_plan(
-    plan_path: str | Path, output_root: str | Path, provider: AssistedNoteProvider
+    plan_path: str | Path,
+    output_root: str | Path,
+    provider: AssistedNoteProvider,
+    *,
+    retry_failed: bool = False,
 ) -> AssistedPlanState:
     """Perform at most one explicit Markdown Writer call per planned task."""
     plan_file = _plan_json_path(plan_path)
@@ -234,8 +242,21 @@ def generate_assisted_plan(
     root = Path(output_root).resolve()
     for task_plan in plan.tasks:
         current = _task_state(state, task_plan.task_id)
-        if current.writer.status in {"completed", "failed"}:
+        if current.writer.status == "completed":
             continue
+        if current.writer.status == "failed":
+            if (
+                not retry_failed
+                or current.writer.actual_call_count >= current.writer.max_calls
+            ):
+                continue
+            _set_role(
+                state,
+                task_plan.task_id,
+                "writer",
+                status="pending",
+                plan_path=plan_file,
+            )
         if current.writer.status == "running":
             _fail_writer(
                 state, task_plan.task_id, "Writer call was interrupted", plan_file
@@ -249,15 +270,15 @@ def generate_assisted_plan(
         _set_role(
             state, task_plan.task_id, "writer", status="running", plan_path=plan_file
         )
+        _increment_role_call(state, task_plan.task_id, "writer", plan_file)
         try:
             response = provider.write_markdown(context.dossier_json)
         except Exception as error:
             _fail_writer(state, task_plan.task_id, _safe_summary(error), plan_file)
             continue
-        _increment_role_call(state, task_plan.task_id, "writer", plan_file)
         _write_text_atomic(
             context.bundle_dir / "writer" / "response.md",
-            _normalized_markdown(response),
+            response,
         )
         try:
             candidate_path = _persist_note(
@@ -293,7 +314,11 @@ def generate_assisted_plan(
 
 
 def review_assisted_plan(
-    plan_path: str | Path, output_root: str | Path, provider: AssistedNoteProvider
+    plan_path: str | Path,
+    output_root: str | Path,
+    provider: AssistedNoteProvider,
+    *,
+    retry_failed: bool = False,
 ) -> AssistedPlanState:
     """Perform at most one explicit Markdown Reviewer call per draft-ready task."""
     plan_file = _plan_json_path(plan_path)
@@ -303,8 +328,21 @@ def review_assisted_plan(
     root = Path(output_root).resolve()
     for task_plan in plan.tasks:
         current = _task_state(state, task_plan.task_id)
-        if current.reviewer.status in {"completed", "failed"}:
+        if current.reviewer.status == "completed":
             continue
+        if current.reviewer.status == "failed":
+            if (
+                not retry_failed
+                or current.reviewer.actual_call_count >= current.reviewer.max_calls
+            ):
+                continue
+            _set_role(
+                state,
+                task_plan.task_id,
+                "reviewer",
+                status="pending",
+                plan_path=plan_file,
+            )
         if current.writer.status != "completed" or current.status != "draft_ready":
             continue
         if current.reviewer.status == "running":
@@ -324,15 +362,15 @@ def review_assisted_plan(
         _set_role(
             state, task_plan.task_id, "reviewer", status="running", plan_path=plan_file
         )
+        _increment_role_call(state, task_plan.task_id, "reviewer", plan_file)
         try:
             response = provider.review_markdown(context.dossier_json, candidate_raw)
         except Exception as error:
             _fail_reviewer(state, task_plan.task_id, _safe_summary(error), plan_file)
             continue
-        _increment_role_call(state, task_plan.task_id, "reviewer", plan_file)
         _write_text_atomic(
             context.bundle_dir / "reviewer" / "response.md",
-            _normalized_markdown(response),
+            response,
         )
         try:
             reviewed_path = _persist_note(
@@ -476,7 +514,7 @@ def _recover_writer_response(
 ) -> None:
     current = _task_state(state, context.task_plan.task_id)
     response_path = context.bundle_dir / "writer" / "response.md"
-    if current.writer.actual_call_count != 1 or not response_path.is_file():
+    if current.writer.actual_call_count < 1 or not response_path.is_file():
         _fail_writer(
             state,
             context.task_plan.task_id,
@@ -517,7 +555,7 @@ def _recover_reviewer_response(
 ) -> None:
     current = _task_state(state, context.task_plan.task_id)
     response_path = context.bundle_dir / "reviewer" / "response.md"
-    if current.reviewer.actual_call_count != 1 or not response_path.is_file():
+    if current.reviewer.actual_call_count < 1 or not response_path.is_file():
         _fail_reviewer(
             state,
             context.task_plan.task_id,
@@ -559,8 +597,10 @@ def _initial_state(plan: AssistedExecutionPlan) -> AssistedPlanState:
         tasks=[
             AssistedTaskState(
                 task_id=item.task_id,
-                writer=AssistedRoleState(role="writer"),
-                reviewer=AssistedRoleState(role="reviewer"),
+                writer=AssistedRoleState(role="writer", max_calls=item.max_calls // 2),
+                reviewer=AssistedRoleState(
+                    role="reviewer", max_calls=item.max_calls // 2
+                ),
             )
             for item in plan.tasks
         ],

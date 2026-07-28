@@ -130,6 +130,16 @@ uv run learnnest process `
 
 `dry-run` 会校验输入、输出路径、所需命令（FFmpeg、FFprobe，以及公开链接所需的 `yt-dlp`），并预览任务身份与重复风险；它不会下载视频、调用模型或写入正式任务结果。运行时 Cookie/API Key 与 ASR/OCR provider 可用性请通过 `readiness` 或 `doctor` 检查。
 
+### 在本机浏览器学习
+
+WebUI 是普通学习者的本地入口：添加一个本地视频或公开链接后，默认会生成可读学习笔记；页面会自动读取同一输出根的变化，并在笔记可用时提供“打开笔记”。也可以选择“只整理材料”。
+
+```powershell
+uv run learnnest web serve --output-root .\learnnest-output
+```
+
+然后打开 `http://127.0.0.1:8765`。服务固定监听本机回环地址，不提供局域网访问、账号或云端托管。本轮是免费的本地模式：在线生成、付费 provider、自动化、Windows 调度和高级诊断尚未接入人用页面。
+
 ## 从抖音收藏夹开始
 
 语栖当前已经支持抖音默认视频收藏夹的前台扫描、增量发现、去重和待下载队列。
@@ -294,6 +304,35 @@ uv run learnnest assisted-note status <plan.json>
 
 `recover` 只从已落盘的响应重建本地 Markdown，不会重试或再次调用 provider；二审失败时，
 第一稿候选会保留，但不会成为 `model_reviewed` 成品。
+
+### 自动交付（实验性）
+
+自动交付只覆盖默认抖音视频收藏夹中的视频：它会在已授权后执行监测、下载、确定性提取、
+`assisted-note` Writer/Reviewer，并将成功的 `model_reviewed` Markdown 交给带
+`assisted_draft` route 标签的播客与音频链路。它不改变严格 `note`、`quality-note`、
+`schedule tick`、`queue run` 或 `recover` 的语义。
+
+先建立 Douyin schedule 与 Writer connection，再写入默认关闭的 policy。`--paid-retry-limit 1`
+表示每个付费阶段最多额外重试一次；设为 `0` 可关闭自动重试，最多可设为 `3`。每次尝试都计入
+每日预算，超时后的重试可能产生额外计费。
+
+```powershell
+uv run learnnest automation configure douyin-favorites `
+  --writer-connection coding-plan `
+  --paid-retry-limit 1 `
+  --max-items 1 `
+  --output-root .\learnnest-output
+
+uv run learnnest automation authorize --confirm-paid `
+  --output-root .\learnnest-output
+
+uv run learnnest automation install --every-minutes 30 `
+  --output-root .\learnnest-output
+```
+
+`automation tick` 可用于诊断；`status` 显示授权、预算、重试上限与计划任务状态，`disable` 会立即
+停止新的自动付费调用，`uninstall` 只移除本程序在该 output root 下创建的 Windows Task Scheduler
+任务。首次真实 tick 前仍应使用新的独立 output root，并单独完成人工阅读、图片和听音检查。
 
 继续生成播客稿和音频：
 

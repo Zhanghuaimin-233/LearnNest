@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>语栖 · 学习收件箱</title>
+    <link rel="stylesheet" href="/static/workspace.css" />
+    <script src="/static/workspace.js" defer></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="bookmarks" aria-label="学习导航">
+        <a class="wordmark" href="#inbox" aria-label="语栖学习收件箱">语栖<span>LearnNest</span></a>
+        <nav>
+          <a class="bookmark active" href="#inbox">收件箱</a>
+          <a class="bookmark" href="#library">学习库</a>
+          <a class="bookmark" href="#processing">处理中</a>
+          <a class="bookmark" href="#settings">设置</a>
+        </nav>
+        <p class="local-mark">内容留在这台设备上。</p>
+      </aside>
+
+      <section class="reading-room" aria-label="学习收件箱">
+        <header class="page-head">
+          <p class="eyebrow">你的学习收件箱</p>
+          <h1>把想学的内容，<em>放进今天。</em></h1>
+          <p class="intro">添加一项内容，语栖会整理成可以打开阅读的学习笔记。</p>
+        </header>
+
+        <section id="inbox" class="chapter intake" aria-labelledby="add-title">
+          <div class="chapter-heading">
+            <p class="chapter-label">新内容</p>
+            <h2 id="add-title">添加内容</h2>
+          </div>
+          <form id="add-form">
+            <label for="source">本地视频或公开链接</label>
+            <div class="source-entry">
+              <input id="source" name="source" required autocomplete="off" placeholder="选择一个本地视频，或粘贴公开链接" />
+              <button type="submit">添加并生成笔记</button>
+            </div>
+            <label class="option-row" for="desired-output">
+              <span>这次想得到什么</span>
+              <select id="desired-output" name="desired-output">
+                <option value="readable_note" selected>可读学习笔记</option>
+                <option value="materials_only">只整理材料</option>
+              </select>
+            </label>
+          </form>
+          <p id="notice" class="notice" aria-live="polite">准备好后，从这里添加第一项内容。</p>
+        </section>
+
+        <section id="library" class="chapter" aria-labelledby="library-title">
+          <div class="chapter-heading">
+            <p class="chapter-label">可阅读</p>
+            <h2 id="library-title">学习库</h2>
+          </div>
+          <div id="library-list" class="book-list"></div>
+        </section>
+
+        <section id="processing" class="chapter split-chapter" aria-labelledby="processing-title">
+          <div>
+            <div class="chapter-heading">
+              <p class="chapter-label">正在发生</p>
+              <h2 id="processing-title">处理中</h2>
+            </div>
+            <div id="processing-list" class="book-list"></div>
+          </div>
+          <div>
+            <div class="chapter-heading">
+              <p class="chapter-label">等待你选</p>
+              <h2>收件箱</h2>
+            </div>
+            <div id="inbox-list" class="book-list"></div>
+          </div>
+        </section>
+
+        <section id="settings" class="chapter settings" aria-labelledby="settings-title">
+          <div class="chapter-heading">
+            <p class="chapter-label">使用方式</p>
+            <h2 id="settings-title">设置</h2>
+          </div>
+          <p><strong>本地模式</strong>；在线生成稍后接入。</p>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

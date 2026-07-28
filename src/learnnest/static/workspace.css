@@ -1,0 +1,58 @@
+:root {
+  --indigo: #17324D;
+  --lake: #2F718C;
+  --mist: #EAF2F5;
+  --bookmark: #E6C35C;
+  --warning: #B94A3D;
+  --paper: #fcfdfe;
+  --ink-soft: #526675;
+  --line: #c8d9e1;
+  --display: KaiTi, STKaiti, "Kaiti SC", serif;
+  --body: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --data: "Cascadia Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; overflow-x: hidden; color: var(--indigo); background: var(--mist); font-family: var(--body); }
+button, input, select { font: inherit; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid var(--bookmark); outline-offset: 3px; }
+.app-shell { display: grid; grid-template-columns: 254px minmax(0, 1fr); min-height: 100vh; }
+.bookmarks { position: sticky; top: 0; display: flex; flex-direction: column; height: 100vh; padding: 34px 22px; color: white; background: var(--indigo); }
+.wordmark { color: white; font: 700 2rem/1 var(--display); letter-spacing: .08em; text-decoration: none; }
+.wordmark span { display: block; margin-top: 7px; color: #b7d3df; font: .62rem var(--data); letter-spacing: .14em; }
+nav { display: grid; gap: 11px; margin-top: 72px; }
+.bookmark { position: relative; padding: 13px 13px 13px 19px; color: #d5e4ea; font-weight: 700; text-decoration: none; }
+.bookmark::before { position: absolute; top: 0; bottom: 0; left: 0; width: 7px; content: ""; background: transparent; }
+.bookmark:hover, .bookmark.active { color: white; background: rgba(255, 255, 255, .08); }
+.bookmark.active::before { background: var(--bookmark); }
+.local-mark { margin-top: auto; color: #b7d3df; font-size: .82rem; line-height: 1.8; }
+.reading-room { width: min(100%, 1040px); margin: 0 auto; padding: 74px 72px 96px; }
+.page-head { max-width: 650px; margin-bottom: 56px; }
+.eyebrow, .chapter-label { margin: 0 0 10px; color: var(--lake); font: .72rem var(--data); letter-spacing: .1em; }
+h1, h2, h3, p { margin-top: 0; }
+h1 { margin-bottom: 17px; font: 700 clamp(2.6rem, 6vw, 4.8rem)/1.08 var(--display); letter-spacing: .03em; }
+h1 em { color: var(--lake); font-style: normal; }
+.intro { max-width: 40rem; color: var(--ink-soft); line-height: 1.9; }
+.chapter { padding: 30px 0; border-top: 1px solid var(--line); }
+.chapter-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; }
+.chapter h2 { margin-bottom: 22px; font: 700 1.72rem var(--display); letter-spacing: .04em; }
+.intake { padding: 32px; background: var(--paper); border-left: 8px solid var(--bookmark); box-shadow: 0 12px 30px rgba(23, 50, 77, .08); }
+label { display: block; margin-bottom: 8px; font-weight: 700; }
+.source-entry { display: flex; gap: 10px; }
+input, select { min-width: 0; padding: 12px 13px; color: var(--indigo); background: white; border: 1px solid var(--line); }
+input { flex: 1; }
+button { padding: 11px 15px; color: white; background: var(--lake); border: 1px solid var(--lake); cursor: pointer; font-weight: 700; }
+button:hover { background: var(--indigo); border-color: var(--indigo); }
+.option-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 18px 0 0; color: var(--ink-soft); font-size: .9rem; }
+.notice { min-height: 1.5em; margin: 18px 0 0; color: var(--lake); font-size: .88rem; }
+.book-list { border-top: 1px solid var(--line); }
+.learning-row { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 18px 4px; border-bottom: 1px solid var(--line); }
+.status-bookmark { align-self: stretch; min-height: 45px; background: #a3bdc8; }
+.status-bookmark.ready { background: var(--lake); }.status-bookmark.needs_action { background: var(--warning); }.status-bookmark.materials_ready { background: var(--bookmark); }.status-bookmark.organizing { background: var(--lake); }.status-bookmark.queued { background: #a3bdc8; }
+.learning-copy h3 { margin-bottom: 5px; font-size: 1rem; }.learning-copy p { margin-bottom: 0; overflow: hidden; color: var(--ink-soft); font-size: .86rem; text-overflow: ellipsis; white-space: nowrap; }
+.learning-row button { padding: 8px 12px; font-size: .88rem; }
+.empty { margin: 0; padding: 26px 0; color: var(--ink-soft); }
+.split-chapter { display: grid; grid-template-columns: 1fr 1fr; gap: 52px; }.settings p { color: var(--ink-soft); }
+@media (max-width: 760px) { .app-shell { display: block; }.bookmarks { position: static; height: auto; padding: 22px; }.wordmark { font-size: 1.55rem; } nav { display: flex; gap: 0; margin-top: 24px; overflow-x: auto; }.bookmark { flex: 0 0 auto; padding: 10px 12px; }.bookmark::before { top: auto; right: 0; width: auto; height: 4px; }.local-mark { display: none; }.reading-room { width: 100%; max-width: 390px; margin: 0; overflow: hidden; padding: 42px 22px 64px; }.page-head h1 { max-width: 7.25em; font-size: clamp(2.35rem, 13vw, 3.1rem); word-break: break-word; }.intro { max-width: 22rem; overflow-wrap: anywhere; }.chapter-heading { display: block; }.intake { padding: 24px 18px; }.source-entry, .option-row, .split-chapter { display: grid; grid-template-columns: 1fr; }.learning-row { grid-template-columns: 9px minmax(0, 1fr); }.learning-row button { grid-column: 2; justify-self: start; } }
+@media (prefers-reduced-motion: no-preference) { .learning-row { transition: background .18s ease, padding-left .18s ease; }.learning-row:hover { padding-left: 11px; background: rgba(255, 255, 255, .62); } }

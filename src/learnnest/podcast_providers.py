@@ -21,7 +21,9 @@ _PODCAST_SCHEMA = json.dumps(
 )
 _SYSTEM_PROMPT = f"""Return exactly one JSON object matching this PodcastScript schema 1.0:
 {_PODCAST_SCHEMA}
-Use only the supplied content_pack and validated active note. Make the script natural spoken
+Use only the supplied content_pack and source note. The source note may be a validated active
+note or a route-labeled model-reviewed Markdown note; never upgrade its stated review status.
+Make the script natural spoken
 Chinese for one narrator. Describe visual information in words. Never put evidence IDs,
 Markdown, URLs, paths, code fences, or Obsidian links inside segment text. Every segment must
 cite real evidence_ids outside its text. Put non-video context only in ai_supplements."""

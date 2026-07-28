@@ -100,6 +100,11 @@ def rebuild_lock(output_root: str | Path, *, timeout: float = 0.0) -> Iterator[N
     return _named_lock(output_root, "index", "rebuild", timeout=timeout)
 
 
+def automation_lock(output_root: str | Path, *, timeout: float = 0.0) -> Iterator[None]:
+    """Return the Vault-wide ownership lock for a single automation tick."""
+    return _named_lock(output_root, "automation", "tick", timeout=timeout)
+
+
 @contextmanager
 def resource_slot(
     output_root: str | Path,

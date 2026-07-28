@@ -22,6 +22,14 @@ def test_parse_source_normalizes_http_url_without_reordering_query() -> None:
     assert source.input == "https://example.com/watch?b=2&a=1"
 
 
+def test_parse_source_preserves_ipv6_url_brackets() -> None:
+    from learnnest.sources import parse_source
+
+    source = parse_source("HTTP://[2001:4860:4860::8888]:8080/watch")
+
+    assert source.input == "http://[2001:4860:4860::8888]:8080/watch"
+
+
 def test_parse_source_resolves_local_path_against_explicit_base(tmp_path: Path) -> None:
     from learnnest.sources import parse_source
 

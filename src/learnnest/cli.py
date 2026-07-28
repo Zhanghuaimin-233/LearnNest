@@ -14,6 +14,20 @@ import typer
 from pydantic import SecretStr
 
 from learnnest import providers
+from learnnest.automation_models import AutomationBudget, AutomationPolicy
+from learnnest.automation_store import (
+    authorize as authorize_automation,
+    disable as disable_automation,
+    list_incomplete_task_ids,
+    load_status as load_automation_status,
+    save_policy as save_automation_policy,
+)
+from learnnest.automation_runner import AutomationProviders, run_automation_tasks
+from learnnest.automation_scheduler import (
+    install as install_automation_scheduler,
+    status as automation_scheduler_status,
+    uninstall as uninstall_automation_scheduler,
+)
 from learnnest.assisted_note_generation import (
     create_assisted_plan,
     generate_assisted_plan,
@@ -115,6 +129,7 @@ from learnnest.tts_generation import (
     generate_and_activate_tts,
 )
 from learnnest.tts_providers import MimoTtsProvider
+from learnnest.web_app import serve_web_app
 from learnnest.validation import validate_task
 
 app = typer.Typer(no_args_is_help=True)
@@ -130,6 +145,8 @@ layout_app = typer.Typer(no_args_is_help=True)
 quality_note_app = typer.Typer(no_args_is_help=True)
 assisted_note_app = typer.Typer(no_args_is_help=True)
 provider_app = typer.Typer(no_args_is_help=True)
+automation_app = typer.Typer(no_args_is_help=True)
+web_app = typer.Typer(no_args_is_help=True)
 app.add_typer(
     index_app, name="index", help="Inspect or rebuild the Vault SQLite read model."
 )
@@ -143,6 +160,12 @@ app.add_typer(
     name="provider",
     help="Manage local BYOK connections and Writer capability profiles.",
 )
+app.add_typer(
+    automation_app,
+    name="automation",
+    help="Configure and inspect explicitly authorized local paid delivery.",
+)
+app.add_typer(web_app, name="web", help="Run the local task workspace in a browser.")
 app.add_typer(
     template_app, name="template", help="Validate constrained V4 note templates."
 )
@@ -634,6 +657,288 @@ def flow_run(
     )
 
 
+@automation_app.command("configure")
+def automation_configure(
+    schedule_id: Annotated[
+        str, typer.Argument(help="Default Douyin monitor schedule ID.")
+    ],
+    writer_connection: Annotated[
+        str | None,
+        typer.Option(
+            "--writer-connection",
+            help="Writer connection; defaults to configured default.",
+        ),
+    ] = None,
+    reviewer_connection: Annotated[
+        str | None,
+        typer.Option(
+            "--reviewer-connection", help="Reviewer connection; defaults to Writer."
+        ),
+    ] = None,
+    max_items: Annotated[
+        int, typer.Option("--max-items", min=1, max=20, help="Maximum videos per tick.")
+    ] = 1,
+    paid_retry_limit: Annotated[
+        int,
+        typer.Option(
+            "--paid-retry-limit",
+            min=0,
+            max=3,
+            help="Automatic retries per paid stage; 0 disables retries, default 1.",
+        ),
+    ] = 1,
+    writer_per_day: Annotated[
+        int, typer.Option("--writer-per-day", min=0, max=200)
+    ] = 20,
+    reviewer_per_day: Annotated[
+        int, typer.Option("--reviewer-per-day", min=0, max=200)
+    ] = 20,
+    podcast_per_day: Annotated[
+        int, typer.Option("--podcast-per-day", min=0, max=200)
+    ] = 20,
+    tts_per_day: Annotated[int, typer.Option("--tts-per-day", min=0, max=200)] = 20,
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Persist a disabled, secret-free automatic-delivery policy without calls."""
+    root = _output_root(output_root)
+    try:
+        schedule = load_schedule(schedule_path(root, schedule_id))
+        if schedule.source.kind != "douyin":
+            raise ValueError("automation currently supports only a Douyin schedule")
+        writer = _assisted_connection_snapshot(get_connection(root, writer_connection))
+        reviewer = _assisted_connection_snapshot(
+            get_connection(root, reviewer_connection or writer_connection)
+        )
+        policy = AutomationPolicy(
+            schedule_id=schedule_id,
+            writer=writer,
+            reviewer=reviewer,
+            max_items_per_tick=max_items,
+            paid_retry_limit=paid_retry_limit,
+            budget=AutomationBudget(
+                writer_per_day=writer_per_day,
+                reviewer_per_day=reviewer_per_day,
+                podcast_per_day=podcast_per_day,
+                tts_per_day=tts_per_day,
+            ),
+        )
+        status = save_automation_policy(root, policy)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        "Automation configured: disabled "
+        f"schedule={status.policy.schedule_id} retries={status.policy.paid_retry_limit} "
+        f"policy={status.policy_sha256[:12]}"
+    )
+
+
+@automation_app.command("authorize")
+def automation_authorize(
+    confirm_paid: Annotated[
+        bool,
+        typer.Option(
+            "--confirm-paid",
+            help="Acknowledge that automatic Writer, Reviewer, podcast, and TTS calls may be billed.",
+        ),
+    ] = False,
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Enable a configured automatic-delivery policy only with an explicit acknowledgement."""
+    if not confirm_paid:
+        typer.echo("ERROR: automation authorization requires --confirm-paid", err=True)
+        raise typer.Exit(code=1)
+    try:
+        status = authorize_automation(_output_root(output_root))
+    except ValueError as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        "Automation authorized: "
+        f"retries={status.policy.paid_retry_limit} policy={status.policy_sha256[:12]}"
+    )
+
+
+@automation_app.command("disable")
+def automation_disable(
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Disable automatic paid delivery without deleting its local facts."""
+    try:
+        status = disable_automation(_output_root(output_root))
+    except ValueError as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Automation disabled: policy={status.policy_sha256[:12]}")
+
+
+@automation_app.command("status")
+def automation_status(
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Show secret-free authorization, limits, and the latest tick summary."""
+    root = _output_root(output_root)
+    try:
+        status = load_automation_status(root)
+    except ValueError as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    if status is None:
+        typer.echo("Automation: not configured")
+        return
+    policy = status.policy
+    typer.echo(
+        f"Automation: {'enabled' if policy.enabled else 'disabled'} "
+        f"schedule={policy.schedule_id} retries={policy.paid_retry_limit} "
+        f"max_items={policy.max_items_per_tick} policy={status.policy_sha256[:12]}"
+    )
+    typer.echo(
+        "Daily budget: "
+        f"writer={policy.budget.writer_per_day} reviewer={policy.budget.reviewer_per_day} "
+        f"podcast={policy.budget.podcast_per_day} tts={policy.budget.tts_per_day}"
+    )
+    if status.last_tick_at is not None:
+        typer.echo(
+            f"Last tick: {status.last_tick_at.isoformat()} {status.last_tick_summary or ''}"
+        )
+    installation, exists = automation_scheduler_status(root)
+    if installation is not None:
+        typer.echo(
+            f"Scheduler: {'installed' if exists else 'missing'} "
+            f"task={installation.task_name} every={installation.interval_minutes}m"
+        )
+
+
+@automation_app.command("install")
+def automation_install(
+    every_minutes: Annotated[
+        int,
+        typer.Option("--every-minutes", min=1, max=1440, help="Wake-up interval."),
+    ] = 30,
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Install or update the single Windows task that wakes `automation tick`."""
+    root = _output_root(output_root)
+    try:
+        status = load_automation_status(root)
+        if status is None:
+            raise ValueError("automation is not configured")
+        installation = install_automation_scheduler(
+            root,
+            policy_sha256=status.policy_sha256,
+            interval_minutes=every_minutes,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Automation scheduler installed: {installation.task_name} "
+        f"every={installation.interval_minutes}m"
+    )
+
+
+@automation_app.command("uninstall")
+def automation_uninstall(
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Remove only the Windows task recorded for this automatic-delivery policy."""
+    try:
+        removed = uninstall_automation_scheduler(_output_root(output_root))
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        "Automation scheduler removed"
+        if removed
+        else "Automation scheduler not installed"
+    )
+
+
+@automation_app.command("tick")
+def automation_tick(
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Run one authorized monitor-to-audio tick; never changes foreground commands."""
+    root = _output_root(output_root)
+    secret: SecretStr | None = None
+    try:
+        status = load_automation_status(root)
+        if status is None:
+            raise ValueError("automation is not configured")
+        if not status.policy.enabled or status.policy.authorized_at is None:
+            raise ValueError("automation paid delivery is not authorized")
+        runtime_environ = _runtime_environment()
+        writer, secret = _assisted_note_provider(
+            runtime_environ, root, status.policy.writer
+        )
+        reviewer, secret = _assisted_note_provider(
+            runtime_environ, root, status.policy.reviewer
+        )
+        mimo_secret = _mimo_api_key(runtime_environ)
+        _verify_provider_workers(runtime_environ)
+        schedule = load_schedule(schedule_path(root, status.policy.schedule_id))
+        if schedule.source.kind != "douyin":
+            raise ValueError("automation policy schedule is not a Douyin monitor")
+        outcome = run_schedule_once(
+            root,
+            schedule.schedule_id,
+            adapter_factory=_schedule_adapter,
+            runtime_credentials=_load_douyin_cookie(),
+        )
+        if outcome.status not in {"completed", "partial"}:
+            raise RuntimeError(f"monitor did not complete: {outcome.status}")
+        downloads = run_pending_downloads(
+            root,
+            max_items=status.policy.max_items_per_tick,
+            profile=schedule.profile,
+            schedule_id=schedule.schedule_id,
+            selection="oldest",
+            douyin_cookie=_load_douyin_cookie(),
+        )
+        task_ids = tuple(
+            dict.fromkeys(
+                [
+                    *list_incomplete_task_ids(root, status.policy_sha256),
+                    *downloads.task_ids,
+                ]
+            )
+        )
+        result = run_automation_tasks(
+            root,
+            task_ids,
+            AutomationProviders(
+                writer=writer,
+                reviewer=reviewer,
+                podcast=MimoPodcastProvider(mimo_secret),
+                tts=MimoTtsProvider(mimo_secret),
+            ),
+        )
+    except LockUnavailable as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    except (OSError, PipelineError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Automation tick: claimed={downloads.claimed_count} tasks={len(result.task_ids)} "
+        f"completed={len(result.completed_task_ids)} failed={len(result.failed_task_ids)}"
+    )
+
+
 def _verify_provider_workers(runtime_environ: Mapping[str, str]) -> list[str]:
     """Check installed ASR/OCR assets without forwarding any credentials."""
     provider_environment = {"HF_HUB_OFFLINE": "1"}
@@ -832,6 +1137,23 @@ def recover(
         typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(code=1) from error
     typer.echo(f"Recovered task: {task.task_id}")
+
+
+@web_app.command("serve")
+def web_serve(
+    output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-root", help="Vault root; defaults to the current directory."
+        ),
+    ] = None,
+    port: Annotated[
+        int,
+        typer.Option(min=1, max=65535, help="Local loopback port."),
+    ] = 8765,
+) -> None:
+    """Run the local, deterministic task workspace at 127.0.0.1."""
+    serve_web_app(_output_root(output_root), port=port)
 
 
 @app.command()

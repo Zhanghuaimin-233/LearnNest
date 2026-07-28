@@ -28,7 +28,7 @@ class AssistedTaskPlan(_Model):
     source_fingerprint: str = Field(min_length=1)
     content_pack_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     dossier_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    max_calls: Literal[2] = 2
+    max_calls: int = Field(default=2, ge=2, le=8)
 
 
 class AssistedExecutionPlan(_Model):
@@ -38,7 +38,7 @@ class AssistedExecutionPlan(_Model):
     writer: AssistedConnectionSnapshot
     reviewer: AssistedConnectionSnapshot
     tasks: list[AssistedTaskPlan] = Field(min_length=1)
-    total_max_calls: int = Field(ge=2)
+    total_max_calls: int = Field(ge=2, le=800)
 
 
 AssistedRoleStatus = Literal["pending", "running", "completed", "failed"]
@@ -54,8 +54,8 @@ AssistedTaskStatus = Literal[
 
 class AssistedRoleState(_Model):
     role: Literal["writer", "reviewer"]
-    max_calls: Literal[1] = 1
-    actual_call_count: int = Field(default=0, ge=0, le=1)
+    max_calls: int = Field(default=1, ge=1, le=4)
+    actual_call_count: int = Field(default=0, ge=0, le=4)
     status: AssistedRoleStatus = "pending"
     output_path: str | None = None
     safe_summary: str | None = None

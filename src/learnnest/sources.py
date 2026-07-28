@@ -182,6 +182,8 @@ def _normalize_url(parsed: SplitResult) -> str:
         raise SourceParseError("source URL must not contain credentials")
     scheme = parsed.scheme.lower()
     host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
     try:
         port = parsed.port
     except ValueError as error:

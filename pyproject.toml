@@ -5,12 +5,15 @@ requires-python = "==3.12.*"
 dependencies = [
     "faster-whisper>=1.2.1",
     "filelock>=3.29.7",
+    "fastapi>=0.116.0",
+    "markdown-it-py>=4.2.0",
     "openai>=2.45.0",
     "paddleocr",
     "paddlepaddle==3.3.0",
     "pillow>=12.3.0",
     "pydantic>=2.13.4",
     "typer>=0.26.8",
+    "uvicorn>=0.35.0",
     "yt-dlp>=2026.7.4",
 ]
 

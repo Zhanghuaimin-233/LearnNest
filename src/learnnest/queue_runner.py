@@ -27,6 +27,7 @@ def run_failure_queue(
     *,
     workers: int = 2,
     max_items: int = 10,
+    max_stage_attempts: int = 4,
     now: datetime | None = None,
     recoverer: Callable[..., Any] | None = None,
 ) -> list[QueueRunResult]:
@@ -37,16 +38,26 @@ def run_failure_queue(
         raise ValueError("max_items must be positive")
     root = Path(output_root).resolve()
     rebuild_index(root)
-    rows = query_failure_queue(root, now=now)[:max_items]
+    rows = query_failure_queue(
+        root,
+        now=now,
+        max_stage_attempts=max_stage_attempts,
+    )[:max_items]
     selected_recoverer = recoverer or recover_task
 
     def execute(row: dict[str, Any]) -> QueueRunResult:
         task_id = str(row["task_id"])
+        if row.get("failure_disposition") not in {None, "retryable"}:
+            return QueueRunResult(task_id, "blocked", "non-retryable failure")
         linked = find_task_by_id(root, task_id)
         if linked is None:
             return QueueRunResult(task_id, "failed", "task fact is missing")
         try:
-            selected_recoverer(linked[0], reason="retry")
+            selected_recoverer(
+                linked[0],
+                reason="retry",
+                max_stage_attempts=max_stage_attempts,
+            )
         except Exception as error:
             return QueueRunResult(task_id, "failed", _safe_error(error))
         return QueueRunResult(task_id, "completed")

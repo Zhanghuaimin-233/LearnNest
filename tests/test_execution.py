@@ -76,6 +76,31 @@ def test_retryable_failures_use_bounded_one_five_thirty_minute_backoff() -> None
     )
 
 
+def test_retry_backoff_is_independent_for_each_failed_stage() -> None:
+    now = datetime(2026, 7, 12, 10, 0, tzinfo=UTC)
+    failure = classify_failure(RuntimeError("HTTP 503 unavailable"))
+    task = _task()
+    for ordinal in range(1, 4):
+        running = begin_attempt(
+            task,
+            reason="initial" if ordinal == 1 else "retry",
+            from_stage="transcript",
+            now=now,
+        )
+        task = finish_attempt(
+            running,
+            status="failed",
+            now=now,
+            failed_stage="transcript",
+            failure=failure,
+        )
+
+    assert next_retry_time(task, failure, now=now, stage="ocr") == now + timedelta(
+        minutes=1
+    )
+    assert next_retry_time(task, failure, now=now, stage="transcript") is None
+
+
 def test_attempt_lifecycle_appends_without_rewriting_previous_attempt() -> None:
     started = begin_attempt(
         _task(),

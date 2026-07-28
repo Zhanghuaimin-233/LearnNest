@@ -336,8 +336,16 @@ def query_failure_queue(
     output_root: str | Path,
     *,
     now: datetime | None = None,
+    max_stage_attempts: int = 4,
 ) -> list[dict[str, Any]]:
-    database = _require_fresh_database(output_root)
+    from learnnest.execution import MAX_STAGE_ATTEMPTS, stage_attempt_count
+
+    if not 1 <= max_stage_attempts <= MAX_STAGE_ATTEMPTS:
+        raise ValueError(
+            f"max_stage_attempts must be between 1 and {MAX_STAGE_ATTEMPTS}"
+        )
+    root = Path(output_root).resolve()
+    database = _require_fresh_database(root)
     selected = (now or datetime.now(UTC)).isoformat()
     with _connect_readonly(database) as connection:
         rows = connection.execute(
@@ -348,7 +356,23 @@ def query_failure_queue(
             """,
             (selected,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    tasks = {
+        task.task_id: task
+        for task, _digest in (_read_task_fact(path) for path in _task_paths(root))
+    }
+    result: list[dict[str, Any]] = []
+    for raw_row in rows:
+        row = dict(raw_row)
+        task = tasks.get(str(row["task_id"]))
+        failed_stage = row.get("failed_stage")
+        if (
+            task is not None
+            and failed_stage is not None
+            and stage_attempt_count(task, failed_stage) >= max_stage_attempts
+        ):
+            continue
+        result.append(row)
+    return result
 
 
 def _insert_task(

@@ -21,8 +21,9 @@ from learnnest.discovery_store import (
     mark_discovery_results,
 )
 from learnnest.execution import classify_failure
+from learnnest.pipeline import process_source, recover_task
 from learnnest.models import TaskProfile, TaskRecord
-from learnnest.pipeline import process_source
+from learnnest.task_store import find_task_by_id
 from learnnest.source_models import SourceItem
 from learnnest.util import safe_title
 from pydantic import SecretStr
@@ -49,6 +50,7 @@ def run_pending_downloads(
     max_items: int = 10,
     profile: TaskProfile = "evidence",
     retry_failed: bool = False,
+    max_stage_attempts: int = 4,
     schedule_id: str | None = None,
     selection: Literal["oldest", "latest_observed"] = "oldest",
     processor: Processor = process_source,
@@ -64,6 +66,7 @@ def run_pending_downloads(
         max_items=max_items,
         now=selected_time,
         retry_failed=retry_failed,
+        max_attempts=max_stage_attempts,
         schedule_id=schedule_id,
         selection=selection,
     )
@@ -79,39 +82,81 @@ def run_pending_downloads(
     failed = 0
     completed_task_ids: list[str] = []
     if video_claims:
-        manifest = run_batch(
-            [claim.link.source for claim in video_claims],
-            root,
-            profile,
-            processor=processor,
-            now=selected_time,
-            kind="manual",
-            downloader=(
-                YtDlpDownloader(cookie=douyin_cookie)
-                if douyin_cookie is not None
-                else None
-            ),
-        )
-        batch_id = manifest.batch_id
-        updates = [
-            (
-                claim,
-                "downloaded"
-                if result.status in {"completed", "skipped_duplicate"}
-                else "failed",
-                result.task_id,
-                result.failure,
-            )
-            for claim, result in zip(video_claims, manifest.results, strict=True)
+        new_video_claims = [claim for claim in video_claims if claim.task_id is None]
+        retry_video_claims = [
+            claim for claim in video_claims if claim.task_id is not None
         ]
-        mark_discovery_results(root, updates, now=selected_time)
-        completed += sum(status == "downloaded" for _, status, _, _ in updates)
-        failed += sum(status == "failed" for _, status, _, _ in updates)
-        completed_task_ids.extend(
-            task_id
-            for _claim, status, task_id, _failure in updates
-            if status == "downloaded" and task_id is not None
-        )
+        if new_video_claims:
+            manifest = run_batch(
+                [claim.link.source for claim in new_video_claims],
+                root,
+                profile,
+                processor=processor,
+                now=selected_time,
+                kind="manual",
+                downloader=(
+                    YtDlpDownloader(cookie=douyin_cookie)
+                    if douyin_cookie is not None
+                    else None
+                ),
+            )
+            batch_id = manifest.batch_id
+            updates = [
+                (
+                    claim,
+                    "downloaded"
+                    if result.status in {"completed", "skipped_duplicate"}
+                    else "failed",
+                    result.task_id,
+                    result.failure,
+                )
+                for claim, result in zip(
+                    new_video_claims, manifest.results, strict=True
+                )
+            ]
+            mark_discovery_results(root, updates, now=selected_time)
+            completed += sum(status == "downloaded" for _, status, _, _ in updates)
+            failed += sum(status == "failed" for _, status, _, _ in updates)
+            completed_task_ids.extend(
+                task_id
+                for _claim, status, task_id, _failure in updates
+                if status == "downloaded" and task_id is not None
+            )
+        for claim in retry_video_claims:
+            assert claim.task_id is not None
+            linked = find_task_by_id(root, claim.task_id)
+            if linked is None:
+                failure = classify_failure(
+                    RuntimeError("download task fact is missing")
+                )
+                mark_discovery_results(
+                    root,
+                    [(claim, "failed", claim.task_id, failure)],
+                    now=selected_time,
+                )
+                failed += 1
+                continue
+            try:
+                recovered = recover_task(
+                    linked[0],
+                    reason="retry",
+                    max_stage_attempts=max_stage_attempts,
+                )
+            except Exception as error:
+                mark_discovery_results(
+                    root,
+                    [(claim, "failed", claim.task_id, classify_failure(error))],
+                    now=selected_time,
+                )
+                failed += 1
+                continue
+            mark_discovery_results(
+                root,
+                [(claim, "downloaded", recovered.task_id, None)],
+                now=selected_time,
+            )
+            completed += 1
+            completed_task_ids.append(recovered.task_id)
 
     selected_image_downloader = image_text_downloader
     if selected_image_downloader is None and douyin_cookie is not None:

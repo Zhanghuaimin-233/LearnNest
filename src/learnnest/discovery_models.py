@@ -78,6 +78,7 @@ class DiscoveryRecord(BaseModel):
     observed_position: int | None = Field(default=None, ge=0)
     last_observed_at: datetime | None = None
     lease_until: datetime | None = None
+    attempt_count: int = Field(default=0, ge=0, le=4)
     task_id: str | None = Field(default=None, min_length=1)
     artifact_path: str | None = Field(default=None, min_length=1)
     failure: FailureInfo | None = None
@@ -100,6 +101,12 @@ class DiscoveryRecord(BaseModel):
 
     @model_validator(mode="after")
     def validate_state(self) -> DiscoveryRecord:
+        if self.attempt_count == 0 and self.status in {
+            "running",
+            "downloaded",
+            "failed",
+        }:
+            self.attempt_count = 1
         if self.updated_at < self.first_seen_at:
             raise ValueError("updated_at must not precede first_seen_at")
         if (self.observed_position is None) != (self.last_observed_at is None):

@@ -123,11 +123,4 @@ WHERE attempts.status IN ('failed', 'interrupted')
     SELECT MAX(latest.ordinal)
     FROM attempts AS latest
     WHERE latest.task_id = attempts.task_id
-  )
-  AND (
-    SELECT COUNT(*)
-    FROM attempts AS retryable
-    WHERE retryable.task_id = attempts.task_id
-      AND retryable.status = 'failed'
-      AND retryable.failure_disposition = 'retryable'
-  ) <= 3;
+  );

@@ -1,9 +1,13 @@
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+from pydantic import SecretStr
 from typer.testing import CliRunner
 
 from learnnest.automation_models import AutomationBudget, AutomationPolicy
+from learnnest.automation_runner import AutomationRunResult
 from learnnest.automation_store import (
     authorize,
     disable,
@@ -13,6 +17,7 @@ from learnnest.automation_store import (
 )
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.cli import app
+from learnnest.download_queue import DownloadOutcome
 from learnnest.provider_profiles import connect
 from learnnest.schedule_models import ScheduleRecord
 from learnnest.schedule_store import write_schedule_atomic
@@ -132,3 +137,63 @@ def test_cli_requires_explicit_paid_authorization(tmp_path: Path) -> None:
     assert "--confirm-paid" in blocked.output
     assert allowed.exit_code == 0, allowed.output
     assert load_status(tmp_path).policy.enabled  # type: ignore[union-attr]
+
+
+def test_automation_tick_applies_retry_setting_to_every_local_queue(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import learnnest.cli as cli
+
+    _schedule(tmp_path)
+    save_policy(
+        tmp_path,
+        _policy().model_copy(update={"retries_per_stage": 0}),
+    )
+    authorize(tmp_path, now=datetime(2026, 7, 28, tzinfo=UTC))
+    observed: dict[str, int] = {}
+
+    monkeypatch.setattr(
+        cli,
+        "run_schedule_once",
+        lambda *args, **kwargs: SimpleNamespace(status="completed"),
+    )
+
+    def fake_downloads(root: Path, **kwargs: object) -> DownloadOutcome:
+        del root
+        observed["downloads"] = int(kwargs["max_stage_attempts"])
+        return DownloadOutcome(None, 0, 0, 0)
+
+    def fake_recoveries(root: Path, **kwargs: object) -> list[object]:
+        del root
+        observed["recoveries"] = int(kwargs["max_stage_attempts"])
+        return []
+
+    monkeypatch.setattr(cli, "run_pending_downloads", fake_downloads)
+    monkeypatch.setattr(cli, "run_failure_queue", fake_recoveries)
+    monkeypatch.setattr(cli, "_load_douyin_cookie", lambda: None)
+    monkeypatch.setattr(cli, "_runtime_environment", lambda: {})
+    monkeypatch.setattr(
+        cli,
+        "_assisted_note_provider",
+        lambda *args, **kwargs: (object(), None),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_mimo_api_key",
+        lambda *args, **kwargs: SecretStr("fake-key"),
+    )
+    monkeypatch.setattr(cli, "_verify_provider_workers", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        cli,
+        "run_automation_tasks",
+        lambda *args, **kwargs: AutomationRunResult((), (), ()),
+    )
+
+    result = runner.invoke(
+        app,
+        ["automation", "tick", "--output-root", str(tmp_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed == {"downloads": 1, "recoveries": 1}

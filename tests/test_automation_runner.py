@@ -88,7 +88,7 @@ def _snapshot() -> AssistedConnectionSnapshot:
     )
 
 
-def test_authorized_runner_retries_writer_once_and_preserves_attempt_facts(
+def test_authorized_runner_retries_writer_on_the_next_due_tick_and_preserves_attempt_facts(
     monkeypatch, tmp_path: Path
 ) -> None:
     import learnnest.automation_runner as runner
@@ -124,7 +124,7 @@ def test_authorized_runner_retries_writer_once_and_preserves_attempt_facts(
         ),
     )
 
-    result = run_automation_tasks(
+    first = run_automation_tasks(
         root,
         ["20260728-automation"],
         AutomationProviders(
@@ -135,10 +135,22 @@ def test_authorized_runner_retries_writer_once_and_preserves_attempt_facts(
         ),
         now=datetime(2026, 7, 28, tzinfo=UTC),
     )
+    result = run_automation_tasks(
+        root,
+        ["20260728-automation"],
+        AutomationProviders(
+            writer=writer,
+            reviewer=reviewer,
+            podcast=UnusedProvider(),
+            tts=UnusedProvider(),
+        ),
+        now=datetime(2026, 7, 28, 0, 1, tzinfo=UTC),
+    )
 
     status = load_status(root)
     assert status is not None
     state = load_task_state(root, "20260728-automation", status.policy_sha256)
+    assert first.failed_task_ids == ("20260728-automation",)
     assert result.completed_task_ids == ("20260728-automation",)
     assert writer.writer_calls == 2
     assert reviewer.reviewer_calls == 1

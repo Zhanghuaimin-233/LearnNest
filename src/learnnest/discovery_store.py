@@ -28,6 +28,7 @@ class DiscoveryClaim:
     schedule_id: str
     discovery_id: str
     link: DiscoveredLink
+    task_id: str | None = None
 
 
 def discovery_path(output_root: str | Path, schedule_id: str) -> Path:
@@ -103,6 +104,7 @@ def claim_pending_discoveries(
     max_items: int,
     now: datetime,
     retry_failed: bool = False,
+    max_attempts: int = 4,
     schedule_id: str | None = None,
     selection: Literal["oldest", "latest_observed"] = "oldest",
 ) -> list[DiscoveryClaim]:
@@ -114,6 +116,8 @@ def claim_pending_discoveries(
     """
     if max_items < 1:
         raise ValueError("max_items must be positive")
+    if not 1 <= max_attempts <= 4:
+        raise ValueError("max_attempts must be between 1 and 4")
     if selection not in {"oldest", "latest_observed"}:
         raise ValueError(f"unsupported discovery selection: {selection}")
     if selection == "latest_observed" and schedule_id is None:
@@ -150,10 +154,14 @@ def claim_pending_discoveries(
                     )
                 if not eligible:
                     continue
+                next_attempt_count = record.attempt_count + 1
+                if next_attempt_count > max_attempts:
+                    continue
                 claimed = record.model_copy(
                     update={
                         "status": "running",
                         "lease_until": now + _LEASE_DURATION,
+                        "attempt_count": next_attempt_count,
                         "updated_at": now,
                         "failure": None,
                     }
@@ -161,7 +169,10 @@ def claim_pending_discoveries(
                 records[index] = claimed
                 claims.append(
                     DiscoveryClaim(
-                        current_schedule_id, record.discovery_id, record.link
+                        current_schedule_id,
+                        record.discovery_id,
+                        record.link,
+                        record.task_id,
                     )
                 )
                 changed = True

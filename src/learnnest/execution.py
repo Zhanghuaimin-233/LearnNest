@@ -46,6 +46,88 @@ _RETRY_DELAYS = (
     timedelta(minutes=5),
     timedelta(minutes=30),
 )
+RETRY_DELAYS = _RETRY_DELAYS
+MAX_STAGE_RETRIES = 3
+MAX_STAGE_ATTEMPTS = MAX_STAGE_RETRIES + 1
+
+
+class StageAttemptLimitError(RuntimeError):
+    """A stage has exhausted its four persisted execution opportunities."""
+
+
+def stage_attempt_count(task: TaskRecord, stage: StageName) -> int:
+    """Count executions of one stage from the task's existing attempts."""
+    count = 0
+    for attempt in task.attempts:
+        if attempt.executed_stages:
+            count += stage in attempt.executed_stages
+            continue
+        count += stage in _legacy_attempt_stages(task, attempt)
+    return count
+
+
+def ensure_stage_attempts_available(
+    task: TaskRecord,
+    stages: tuple[StageName, ...],
+    *,
+    max_attempts: int = MAX_STAGE_ATTEMPTS,
+) -> None:
+    if not 1 <= max_attempts <= MAX_STAGE_ATTEMPTS:
+        raise ValueError(f"max_attempts must be between 1 and {MAX_STAGE_ATTEMPTS}")
+    exhausted = [
+        stage for stage in stages if stage_attempt_count(task, stage) >= max_attempts
+    ]
+    if exhausted:
+        raise StageAttemptLimitError(
+            "stage attempt limit exhausted: " + ", ".join(exhausted)
+        )
+
+
+def record_stage_attempt(
+    task_dir: str | Path, task: TaskRecord, stage: StageName
+) -> TaskRecord:
+    """Persist one stage execution in the active existing TaskAttempt."""
+    active_id = task.active_attempt_id
+    if active_id is None:
+        raise ValueError("stage execution requires an active task attempt")
+    if stage_attempt_count(task, stage) >= MAX_STAGE_ATTEMPTS:
+        raise StageAttemptLimitError(f"stage attempt limit exhausted: {stage}")
+    attempts = list(task.attempts)
+    index = next(
+        (i for i, attempt in enumerate(attempts) if attempt.attempt_id == active_id),
+        None,
+    )
+    if index is None:
+        raise ValueError("active attempt is missing")
+    current = attempts[index]
+    if stage not in current.executed_stages:
+        attempts[index] = current.model_copy(
+            update={"executed_stages": [*current.executed_stages, stage]}
+        )
+    updated = TaskRecord.model_validate(
+        task.model_copy(update={"attempts": attempts}).model_dump(mode="python")
+    )
+    write_task_atomic(task_dir, updated)
+    return updated
+
+
+def _legacy_attempt_stages(
+    task: TaskRecord, attempt: TaskAttempt
+) -> tuple[StageName, ...]:
+    """Conservatively infer stage execution for pre-contract task records."""
+    try:
+        start = STAGES.index(attempt.from_stage)
+    except ValueError:
+        return ()
+    if attempt.failed_stage is not None:
+        end = STAGES.index(attempt.failed_stage)
+    elif attempt.status == "completed":
+        end = STAGES.index("content_pack" if task.profile == "evidence" else "publish")
+    elif attempt.status == "running":
+        return ()
+    else:
+        end = start
+    return STAGES[start : end + 1]
 
 
 def classify_failure(error: Exception) -> FailureInfo:
@@ -76,6 +158,7 @@ def next_retry_time(
     failure: FailureInfo,
     *,
     now: datetime,
+    stage: StageName | None = None,
 ) -> datetime | None:
     """Return the next bounded automatic retry time for one retryable failure."""
     if failure.disposition != "retryable":
@@ -84,6 +167,7 @@ def next_retry_time(
         attempt.failure is not None
         and attempt.failure.disposition == "retryable"
         and attempt.status == "failed"
+        and (stage is None or attempt.failed_stage == stage)
         for attempt in task.attempts
     )
     return now + _RETRY_DELAYS[previous] if previous < len(_RETRY_DELAYS) else None
@@ -257,7 +341,7 @@ def fail_persisted_attempt(
         now=now,
         failed_stage=failed_stage,
         failure=failure,
-        next_retry_at=next_retry_time(task, failure, now=now),
+        next_retry_at=next_retry_time(task, failure, now=now, stage=failed_stage),
     ).model_copy(update={"error_summary": failure.safe_summary})
     write_task_atomic(root, updated)
     return updated

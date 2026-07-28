@@ -22,7 +22,9 @@ def automation_directory(output_root: str | Path) -> Path:
 
 
 def policy_sha256(policy: AutomationPolicy) -> str:
-    payload = policy.model_dump(mode="json")
+    payload = policy.model_dump(
+        mode="json", exclude={"enabled", "authorized_at", "paid_retry_limit"}
+    )
     return hashlib.sha256(
         json.dumps(
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -35,7 +37,20 @@ def load_status(output_root: str | Path) -> AutomationStatus | None:
     if not path.is_file():
         return None
     try:
-        return AutomationStatus.model_validate_json(path.read_bytes())
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        status = AutomationStatus.model_validate(payload)
+        current_sha = policy_sha256(status.policy)
+        stored_sha = payload.get("policy_sha256") if isinstance(payload, dict) else None
+        if stored_sha != current_sha:
+            if isinstance(stored_sha, str) and len(stored_sha) == 64:
+                _migrate_task_states(
+                    Path(output_root).resolve(), stored_sha, current_sha
+                )
+            status = status.model_copy(
+                update={"schema_version": "1.1", "policy_sha256": current_sha}
+            )
+            _write_json(path, status.model_dump(mode="json"))
+        return status
     except (OSError, UnicodeError, ValidationError, ValueError) as error:
         raise ValueError("automation status is missing or invalid") from error
 
@@ -45,6 +60,7 @@ def save_policy(output_root: str | Path, policy: AutomationPolicy) -> Automation
     current_sha = policy_sha256(policy)
     same_policy = previous is not None and previous.policy_sha256 == current_sha
     status = AutomationStatus(
+        schema_version="1.1",
         policy=policy,
         policy_sha256=current_sha,
         last_tick_at=previous.last_tick_at if same_policy else None,
@@ -131,6 +147,58 @@ def list_incomplete_task_ids(
     return tuple(sorted(set(task_ids)))
 
 
+def list_task_states(
+    output_root: str | Path, policy_sha: str
+) -> tuple[AutomationTaskState, ...]:
+    """Load current-policy task facts for read-only status projection."""
+    directory = automation_directory(output_root) / "tasks"
+    if not directory.is_dir():
+        return ()
+    states: list[AutomationTaskState] = []
+    for path in directory.glob(f"*/{policy_sha}.json"):
+        try:
+            state = AutomationTaskState.model_validate_json(path.read_bytes())
+        except (OSError, UnicodeError, ValidationError, ValueError):
+            continue
+        states.append(state)
+    return tuple(sorted(states, key=lambda item: item.task_id))
+
+
+def provider_call_usage(
+    output_root: str | Path,
+    _policy_sha: str,
+    *,
+    now: datetime,
+    limit: int,
+) -> tuple[int, int, int]:
+    """Return global UTC-day used, limit, and remaining calls from task facts."""
+    _require_aware(now)
+    calls: set[str | tuple[str, str, int, str, int]] = set()
+    directory = automation_directory(output_root) / "tasks"
+    if directory.is_dir():
+        for path in directory.glob("*/*.json"):
+            try:
+                state = AutomationTaskState.model_validate_json(path.read_bytes())
+            except (OSError, UnicodeError, ValidationError, ValueError):
+                continue
+            calls.update(
+                attempt.call_id
+                or (
+                    state.task_id,
+                    attempt.stage,
+                    attempt.attempt,
+                    attempt.started_at.astimezone(UTC).isoformat(),
+                    position,
+                )
+                for position, attempt in enumerate(state.attempts)
+                if attempt.stage in {"writer", "reviewer", "podcast", "tts"}
+                and attempt.started_at.astimezone(UTC).date()
+                == now.astimezone(UTC).date()
+            )
+    used = len(calls)
+    return used, limit, max(0, limit - used)
+
+
 def _require_status(output_root: str | Path) -> AutomationStatus:
     status = load_status(output_root)
     if status is None:
@@ -142,6 +210,24 @@ def _task_path(output_root: str | Path, task_id: str, policy_sha: str) -> Path:
     return automation_directory(output_root) / "tasks" / task_id / f"{policy_sha}.json"
 
 
+def _migrate_task_states(root: Path, old_sha: str, new_sha: str) -> None:
+    directory = automation_directory(root) / "tasks"
+    if not directory.is_dir() or old_sha == new_sha:
+        return
+    for path in directory.glob(f"*/{old_sha}.json"):
+        try:
+            state = AutomationTaskState.model_validate_json(path.read_bytes())
+        except (OSError, UnicodeError, ValidationError, ValueError):
+            continue
+        target = _task_path(root, state.task_id, new_sha)
+        if target.is_file():
+            continue
+        _write_json(
+            target,
+            state.model_copy(update={"policy_sha256": new_sha}).model_dump(mode="json"),
+        )
+
+
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -151,3 +237,8 @@ def _write_json(path: Path, payload: object) -> None:
         stream.write("\n")
         temporary = Path(stream.name)
     temporary.replace(path)
+
+
+def _require_aware(value: datetime) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("automation time must be timezone-aware")

@@ -52,7 +52,7 @@
 
 > 此流程当前只适用于视频任务。抖音收藏夹中的图文会单独下载为本地素材及 `image_text.json`；它尚未进入 ASR、关键帧、OCR、证据包或笔记阶段。
 
-`note`、`podcast` 和 `tts` 分别由显式命令触发。无论是否已经配置 API Key，`process`、`queue run`、`flow run` 和恢复流程都不会暗中触发付费服务。
+`note`、`podcast` 和 `tts` 分别由显式命令触发。无论是否已经配置 API Key，`process`、`queue run`、`flow run` 和恢复流程都不会暗中触发付费服务。自动交付也只会在单独授权后运行。
 
 ## 语栖现在可以做什么
 
@@ -138,7 +138,7 @@ WebUI 是普通学习者的本地入口：添加一个本地视频或公开链�
 uv run learnnest web serve --output-root .\learnnest-output
 ```
 
-然后打开 `http://127.0.0.1:8765`。服务固定监听本机回环地址，不提供局域网访问、账号或云端托管。本轮是免费的本地模式：在线生成、付费 provider、自动化、Windows 调度和高级诊断尚未接入人用页面。
+然后打开 `http://127.0.0.1:8765`。服务固定监听本机回环地址，不提供局域网访问、账号或云端托管。本轮是免费的本地模式：在线生成、付费 provider、自动化、Windows 调度和高级诊断尚未接入人用页面；WebUI 仍是只读任务/成品视图，不会替自动化授权。
 
 ## 从抖音收藏夹开始
 
@@ -312,14 +312,18 @@ uv run learnnest assisted-note status <plan.json>
 `assisted_draft` route 标签的播客与音频链路。它不改变严格 `note`、`quality-note`、
 `schedule tick`、`queue run` 或 `recover` 的语义。
 
-先建立 Douyin schedule 与 Writer connection，再写入默认关闭的 policy。`--paid-retry-limit 1`
-表示每个付费阶段最多额外重试一次；设为 `0` 可关闭自动重试，最多可设为 `3`。每次尝试都计入
-每日预算，超时后的重试可能产生额外计费。
+先建立 Douyin schedule 与 Writer connection，再写入默认关闭的 policy。`--retries-per-stage 3`
+表示每个阶段“首次执行一次 + 最多三次重试”，共四次机会；`0` 可关闭自动重试。下载和确定性阶段
+也遵守同一上限，失败只有明确标记为 `retryable` 才会由 `automation tick` 自动领取，重试沿用有界
+等待，不在一个 tick 内紧密循环。每日 provider 上限是按 UTC 日、跨任务和 Writer/Reviewer/Podcast/TTS
+共享的**调用次数**，默认 `80`，不是金额；首次调用、失败、`running`、`unknown` 和重试都计数。
+可通过 `--provider-calls-per-day` 调整。
 
 ```powershell
 uv run learnnest automation configure douyin-favorites `
   --writer-connection coding-plan `
-  --paid-retry-limit 1 `
+  --retries-per-stage 3 `
+  --provider-calls-per-day 80 `
   --max-items 1 `
   --output-root .\learnnest-output
 
@@ -330,9 +334,13 @@ uv run learnnest automation install --every-minutes 30 `
   --output-root .\learnnest-output
 ```
 
-`automation tick` 可用于诊断；`status` 显示授权、预算、重试上限与计划任务状态，`disable` 会立即
-停止新的自动付费调用，`uninstall` 只移除本程序在该 output root 下创建的 Windows Task Scheduler
-任务。首次真实 tick 前仍应使用新的独立 output root，并单独完成人工阅读、图片和听音检查。
+`automation tick` 先恢复本地 retryable 阶段，再进入付费阶段；`status` 显示 UTC 当日
+`used/limit/remaining`、各付费阶段 `attempt/max`、`unknown` 和预算阻塞原因。付费调用前会先落盘
+`running`，成功响应/产物先落盘再验证；重启时只从完整响应或已验证产物本地恢复。无法确认结果的
+timeout 会进入 `unknown` 并暂停，必须人工确认，不能自动拿下一次机会。达到 80 次后保留待续状态
+和已有成品，不再调用 provider。`disable` 只停止新调用，之后对相同不可变配置重新
+`authorize --confirm-paid` 会保持同一 policy 身份并继续未完成任务；安装 Scheduler 只唤醒
+`automation tick`，不会授权。首次真实 tick 前仍应使用新的独立 output root，并单独完成人工阅读、图片和听音检查。
 
 继续生成播客稿和音频：
 

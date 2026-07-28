@@ -93,6 +93,7 @@ class TaskAttempt(_ExecutionModel):
     finished_at: datetime | None = None
     failed_stage: ExecutionStage | None = None
     batch_id: str | None = Field(default=None, min_length=1)
+    executed_stages: list[ExecutionStage] = Field(default_factory=list)
     failure: FailureInfo | None = None
     next_retry_at: datetime | None = None
 
@@ -105,6 +106,8 @@ class TaskAttempt(_ExecutionModel):
 
     @model_validator(mode="after")
     def validate_lifecycle(self) -> TaskAttempt:
+        if len(self.executed_stages) != len(set(self.executed_stages)):
+            raise ValueError("executed_stages must not contain duplicates")
         if self.status == "running":
             if self.finished_at is not None:
                 raise ValueError("running attempt must not have finished_at")

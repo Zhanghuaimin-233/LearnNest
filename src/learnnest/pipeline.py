@@ -18,9 +18,11 @@ from learnnest.downloader import YtDlpDownloader
 from learnnest.execution import (
     begin_attempt,
     classify_failure,
+    ensure_stage_attempts_available,
     finish_attempt,
     next_retry_time,
     plan_recovery,
+    record_stage_attempt,
 )
 from learnnest.execution_models import AttemptReason, SourceIdentities
 from learnnest.identities import source_identities, stream_sha256
@@ -492,6 +494,7 @@ def rerun_task(
     task_lock_timeout: float = 0.0,
     batch_id: str | None = None,
     on_attempt_started: Callable[[TaskRecord], None] | None = None,
+    max_stage_attempts: int = 4,
     _task_lock_held: bool = False,
 ) -> TaskRecord:
     """Re-run one persisted stage and every following applicable stage."""
@@ -509,6 +512,7 @@ def rerun_task(
                 task_lock_timeout=task_lock_timeout,
                 batch_id=batch_id,
                 on_attempt_started=on_attempt_started,
+                max_stage_attempts=max_stage_attempts,
                 _task_lock_held=True,
             )
     try:
@@ -535,6 +539,11 @@ def rerun_task(
     }
     reset = task.model_copy(
         update={"stages": stages, "artifacts": artifacts, "error_summary": None}
+    )
+    ensure_stage_attempts_available(
+        reset,
+        _runnable_stages(reset, from_stage),
+        max_attempts=max_stage_attempts,
     )
     reset = begin_attempt(
         reset,
@@ -623,6 +632,7 @@ def recover_task(
     batch_id: str | None = None,
     on_attempt_started: Callable[[TaskRecord], None] | None = None,
     reason: AttemptReason = "resume",
+    max_stage_attempts: int = 4,
 ) -> TaskRecord:
     """Plan and execute one free recovery inside a single task lock."""
     root = Path(task_dir).resolve()
@@ -645,6 +655,7 @@ def recover_task(
             scheduler=scheduler,
             batch_id=batch_id,
             on_attempt_started=on_attempt_started,
+            max_stage_attempts=max_stage_attempts,
             _task_lock_held=True,
         )
 
@@ -1159,12 +1170,22 @@ def _publish_note(task_dir: Path, task: TaskRecord, output_root: str | Path) -> 
 
 
 def _run_stage(task_dir: Path, task: TaskRecord, stage: StageName, action: Any) -> Any:
-    _set_stage(task_dir, task, stage, StageStatus.RUNNING)
+    current = record_stage_attempt(task_dir, load_task(task_dir), stage)
+    _set_stage(task_dir, current, stage, StageStatus.RUNNING)
     result = action()
     task = load_task(task_dir)
     artifacts = _stage_artifacts(stage)
     _complete_stage(task_dir, task, stage, artifacts)
     return result
+
+
+def _runnable_stages(task: TaskRecord, from_stage: StageName) -> tuple[StageName, ...]:
+    start = _STAGES.index(from_stage)
+    end_stage = "content_pack" if task.profile == "evidence" else "publish"
+    end = _STAGES.index(end_stage)
+    if start > end:
+        return ()
+    return _STAGES[start : end + 1]
 
 
 def _stage_artifacts(stage: StageName) -> list[str]:
@@ -1235,7 +1256,12 @@ def _record_failure(
             now=failed_at,
             failed_stage=failed_stage_name,
             failure=failure,
-            next_retry_at=next_retry_time(updated, failure, now=failed_at),
+            next_retry_at=next_retry_time(
+                updated,
+                failure,
+                now=failed_at,
+                stage=failed_stage_name,
+            ),
         )
     write_task_atomic(task_dir, updated)
     _write_report(task_dir)

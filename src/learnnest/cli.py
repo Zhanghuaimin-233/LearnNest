@@ -6,6 +6,7 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -20,6 +21,8 @@ from learnnest.automation_store import (
     disable as disable_automation,
     list_incomplete_task_ids,
     load_status as load_automation_status,
+    list_task_states,
+    provider_call_usage,
     save_policy as save_automation_policy,
 )
 from learnnest.automation_runner import AutomationProviders, run_automation_tasks
@@ -678,25 +681,25 @@ def automation_configure(
     max_items: Annotated[
         int, typer.Option("--max-items", min=1, max=20, help="Maximum videos per tick.")
     ] = 1,
-    paid_retry_limit: Annotated[
+    retries_per_stage: Annotated[
         int,
         typer.Option(
+            "--retries-per-stage",
             "--paid-retry-limit",
             min=0,
             max=3,
-            help="Automatic retries per paid stage; 0 disables retries, default 1.",
+            help="Automatic retries per stage; 3 retries means 4 total opportunities.",
         ),
-    ] = 1,
-    writer_per_day: Annotated[
-        int, typer.Option("--writer-per-day", min=0, max=200)
-    ] = 20,
-    reviewer_per_day: Annotated[
-        int, typer.Option("--reviewer-per-day", min=0, max=200)
-    ] = 20,
-    podcast_per_day: Annotated[
-        int, typer.Option("--podcast-per-day", min=0, max=200)
-    ] = 20,
-    tts_per_day: Annotated[int, typer.Option("--tts-per-day", min=0, max=200)] = 20,
+    ] = 3,
+    provider_calls_per_day: Annotated[
+        int,
+        typer.Option(
+            "--provider-calls-per-day",
+            min=0,
+            max=800,
+            help="Shared UTC-day provider call count (not an amount of money).",
+        ),
+    ] = 80,
     output_root: Annotated[
         Path | None, typer.Option("--output-root", help="Vault root.")
     ] = None,
@@ -716,13 +719,8 @@ def automation_configure(
             writer=writer,
             reviewer=reviewer,
             max_items_per_tick=max_items,
-            paid_retry_limit=paid_retry_limit,
-            budget=AutomationBudget(
-                writer_per_day=writer_per_day,
-                reviewer_per_day=reviewer_per_day,
-                podcast_per_day=podcast_per_day,
-                tts_per_day=tts_per_day,
-            ),
+            retries_per_stage=retries_per_stage,
+            budget=AutomationBudget(provider_calls_per_day=provider_calls_per_day),
         )
         status = save_automation_policy(root, policy)
     except (OSError, RuntimeError, ValueError) as error:
@@ -730,7 +728,10 @@ def automation_configure(
         raise typer.Exit(code=1) from error
     typer.echo(
         "Automation configured: disabled "
-        f"schedule={status.policy.schedule_id} retries={status.policy.paid_retry_limit} "
+        f"schedule={status.policy.schedule_id} "
+        f"retries_per_stage={status.policy.retries_per_stage} "
+        f"opportunities_per_stage={status.policy.retries_per_stage + 1} "
+        f"provider_calls_per_day={status.policy.budget.provider_calls_per_day} "
         f"policy={status.policy_sha256[:12]}"
     )
 
@@ -759,7 +760,8 @@ def automation_authorize(
         raise typer.Exit(code=1) from error
     typer.echo(
         "Automation authorized: "
-        f"retries={status.policy.paid_retry_limit} policy={status.policy_sha256[:12]}"
+        f"retries_per_stage={status.policy.retries_per_stage} "
+        f"policy={status.policy_sha256[:12]}"
     )
 
 
@@ -795,16 +797,38 @@ def automation_status(
         typer.echo("Automation: not configured")
         return
     policy = status.policy
+    used, limit, remaining = provider_call_usage(
+        root,
+        status.policy_sha256,
+        now=datetime.now(UTC),
+        limit=policy.budget.provider_calls_per_day,
+    )
     typer.echo(
         f"Automation: {'enabled' if policy.enabled else 'disabled'} "
-        f"schedule={policy.schedule_id} retries={policy.paid_retry_limit} "
+        f"schedule={policy.schedule_id} "
+        f"retries_per_stage={policy.retries_per_stage} "
+        f"opportunities_per_stage={policy.retries_per_stage + 1} "
         f"max_items={policy.max_items_per_tick} policy={status.policy_sha256[:12]}"
     )
     typer.echo(
-        "Daily budget: "
-        f"writer={policy.budget.writer_per_day} reviewer={policy.budget.reviewer_per_day} "
-        f"podcast={policy.budget.podcast_per_day} tts={policy.budget.tts_per_day}"
+        "Daily provider calls (UTC, count not amount): "
+        f"used={used} limit={limit} remaining={remaining}"
     )
+    for state in list_task_states(root, status.policy_sha256):
+        max_attempts = policy.retries_per_stage + 1
+        stage_counts = " ".join(
+            f"{stage}={sum(item.stage == stage for item in state.attempts)}/{max_attempts}"
+            for stage in ("writer", "reviewer", "podcast", "tts")
+        )
+        reasons = ",".join(
+            f"{item.stage}:{item.safe_summary or 'unknown'}"
+            for item in state.attempts
+            if item.status == "unknown"
+        )
+        reason = state.blocked_reason or ""
+        if reasons:
+            reason = f"{reason} unknown={reasons}" if reason else f"unknown={reasons}"
+        typer.echo(f"Task {state.task_id}: {stage_counts} reason={reason or 'none'}")
     if status.last_tick_at is not None:
         typer.echo(
             f"Last tick: {status.last_tick_at.isoformat()} {status.last_tick_summary or ''}"
@@ -881,15 +905,7 @@ def automation_tick(
             raise ValueError("automation is not configured")
         if not status.policy.enabled or status.policy.authorized_at is None:
             raise ValueError("automation paid delivery is not authorized")
-        runtime_environ = _runtime_environment()
-        writer, secret = _assisted_note_provider(
-            runtime_environ, root, status.policy.writer
-        )
-        reviewer, secret = _assisted_note_provider(
-            runtime_environ, root, status.policy.reviewer
-        )
-        mimo_secret = _mimo_api_key(runtime_environ)
-        _verify_provider_workers(runtime_environ)
+        tick_now = datetime.now(UTC)
         schedule = load_schedule(schedule_path(root, status.policy.schedule_id))
         if schedule.source.kind != "douyin":
             raise ValueError("automation policy schedule is not a Douyin monitor")
@@ -907,8 +923,29 @@ def automation_tick(
             profile=schedule.profile,
             schedule_id=schedule.schedule_id,
             selection="oldest",
+            retry_failed=True,
+            max_stage_attempts=status.policy.retries_per_stage + 1,
             douyin_cookie=_load_douyin_cookie(),
+            now=tick_now,
         )
+        # The queue contains only retryable deterministic failures.  It runs
+        # before any paid provider is even constructed for this tick.
+        local_recoveries = run_failure_queue(
+            root,
+            workers=1,
+            max_items=status.policy.max_items_per_tick,
+            max_stage_attempts=status.policy.retries_per_stage + 1,
+            now=tick_now,
+        )
+        runtime_environ = _runtime_environment()
+        writer, secret = _assisted_note_provider(
+            runtime_environ, root, status.policy.writer
+        )
+        reviewer, secret = _assisted_note_provider(
+            runtime_environ, root, status.policy.reviewer
+        )
+        mimo_secret = _mimo_api_key(runtime_environ)
+        _verify_provider_workers(runtime_environ)
         task_ids = tuple(
             dict.fromkeys(
                 [
@@ -926,6 +963,7 @@ def automation_tick(
                 podcast=MimoPodcastProvider(mimo_secret),
                 tts=MimoTtsProvider(mimo_secret),
             ),
+            now=tick_now,
         )
     except LockUnavailable as error:
         typer.echo(f"ERROR: {error}", err=True)
@@ -935,6 +973,7 @@ def automation_tick(
         raise typer.Exit(code=1) from error
     typer.echo(
         f"Automation tick: claimed={downloads.claimed_count} tasks={len(result.task_ids)} "
+        f"local_recovered={sum(item.status == 'completed' for item in local_recoveries)} "
         f"completed={len(result.completed_task_ids)} failed={len(result.failed_task_ids)}"
     )
 

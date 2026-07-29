@@ -313,6 +313,47 @@ def test_learning_api_adds_note_and_opens_safe_rendered_markdown(
         assert forbidden not in page.text.lower()
 
 
+def test_douyin_webui_keeps_login_and_favorite_vocabulary_human_facing(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    page = client.get("/").text
+    script = client.get("/static/workspace.js").text
+
+    for visible_text in (
+        "连接抖音",
+        "默认视频收藏",
+        "手动同步",
+        "打开抖音验证窗口",
+        "Windows 当前用户加密",
+        "手机号验证码",
+        "抖音 App 扫码确认",
+        "两步完成后才会连接",
+        "已扫码",
+        "需验证",
+        "需重连",
+    ):
+        assert visible_text in page or visible_text in script
+    for forbidden in (
+        "cookie",
+        "token",
+        "passport",
+        "evidence",
+        "sha",
+        "stage",
+        "plan",
+        "recover",
+        "route",
+    ):
+        assert forbidden not in page.lower()
+    assert "error.status === 401" in script
+    assert "登录已失效，请重新连接抖音。" in script
+    assert "请在原抖音官方窗口继续完成短信、扫码或页面要求的额外验证。" in script
+    assert 'api("/api/douyin/login/browser"' in script
+    assert 'api("/api/douyin/login/current"' in script
+    assert 'type="tel"' not in page
+
+
 def test_learning_snapshot_observes_external_atomic_task_update(tmp_path: Path) -> None:
     task_dir, task = _task(tmp_path)
     client = _client(tmp_path)

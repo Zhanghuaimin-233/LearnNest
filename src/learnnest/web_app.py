@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import re
 import threading
 import uuid
@@ -12,13 +13,17 @@ from typing import Any, Callable, Literal
 from urllib.parse import quote, urlsplit
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from markdown_it import MarkdownIt
 from pydantic import BaseModel, ConfigDict, Field
 
 from learnnest.automation_store import load_status as load_automation_status
+from learnnest.adapters.douyin_http import DouyinAuthenticationError
+from learnnest.douyin_favorites import DouyinFavoritesStore
+from learnnest.douyin_cookie_store import DouyinCookieStore
+from learnnest.douyin_login import DouyinLoginError, DouyinLoginSessionManager
 from learnnest.execution import plan_recovery
 from learnnest.learning_workspace import (
     LearningItem,
@@ -53,6 +58,14 @@ class LearningItemRequest(BaseModel):
 
     source: str = Field(min_length=1, max_length=4096)
     desired_output: Literal["readable_note", "materials_only"] = "readable_note"
+
+
+class DouyinFavoritesSyncRequest(BaseModel):
+    """A local login-session handle that never contains credentials."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    session_id: str = Field(min_length=16, max_length=128)
 
 
 @dataclass
@@ -110,9 +123,21 @@ class WebJobStore:
 class WebService:
     """Adapts the existing task and pipeline services for a local browser."""
 
-    def __init__(self, output_root: str | Path) -> None:
+    def __init__(
+        self,
+        output_root: str | Path,
+        *,
+        douyin_login: DouyinLoginSessionManager | None = None,
+        douyin_favorites: DouyinFavoritesStore | None = None,
+    ) -> None:
         self.output_root = Path(output_root).resolve()
         self.jobs = WebJobStore()
+        self.douyin_login = douyin_login or DouyinLoginSessionManager(
+            cookie_store=DouyinCookieStore(self.output_root)
+        )
+        self.douyin_favorites = douyin_favorites or DouyinFavoritesStore(
+            self.output_root
+        )
 
     def list_tasks(self) -> list[dict[str, Any]]:
         task_root = self.output_root / "视频学习素材"
@@ -205,12 +230,70 @@ class WebService:
                 return (task_dir / relative_path).resolve()
         raise FileNotFoundError(relative_path)
 
+    def create_douyin_login(self) -> dict[str, Any]:
+        return self.douyin_login.create_session()
 
-def create_web_app(output_root: str | Path) -> FastAPI:
+    def create_douyin_browser_login(self) -> dict[str, Any]:
+        return self.douyin_login.create_browser_session()
+
+    def current_douyin_login(self) -> dict[str, Any]:
+        return self.douyin_login.current_session()
+
+    def douyin_login_state(self, session_id: str) -> dict[str, Any]:
+        return self.douyin_login.get_session(session_id)
+
+    def refresh_douyin_login(self, session_id: str) -> dict[str, Any]:
+        return self.douyin_login.refresh_session(session_id)
+
+    def cancel_douyin_login(self, session_id: str) -> dict[str, Any]:
+        return self.douyin_login.cancel_session(session_id)
+
+    def douyin_qr_image(self, session_id: str) -> bytes:
+        return self.douyin_login.qr_image(session_id)
+
+    def douyin_favorites_snapshot(self) -> dict[str, Any]:
+        return self.douyin_favorites.read_snapshot().payload()
+
+    def sync_douyin_favorites(self, session_id: str) -> dict[str, Any]:
+        cookie = self.douyin_login.cookie_for(session_id)
+        snapshot = self.douyin_favorites.sync(
+            cookie,
+            on_authentication_failure=lambda: self.douyin_login.invalidate(session_id),
+        )
+        return snapshot.payload()
+
+    def douyin_thumbnail(self, relative_path: str) -> Path:
+        return self.douyin_favorites.thumbnail_file(relative_path)
+
+    def shutdown(self) -> None:
+        self.douyin_login.shutdown()
+
+
+def create_web_app(
+    output_root: str | Path,
+    *,
+    douyin_login: DouyinLoginSessionManager | None = None,
+    douyin_favorites: DouyinFavoritesStore | None = None,
+) -> FastAPI:
     """Create the loopback WebUI application without starting a server."""
-    service = WebService(output_root)
+    service = WebService(
+        output_root,
+        douyin_login=douyin_login,
+        douyin_favorites=douyin_favorites,
+    )
     workspace = LearningWorkspace(output_root)
-    app = FastAPI(title="语栖学习收件箱", docs_url=None, redoc_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> Any:
+        yield
+        service.shutdown()
+
+    app = FastAPI(
+        title="语栖学习收件箱",
+        docs_url=None,
+        redoc_url=None,
+        lifespan=lifespan,
+    )
     app.state.web_service = service
     app.state.learning_workspace = workspace
     app.mount("/static", StaticFiles(directory=_STATIC_DIRECTORY), name="static")
@@ -222,6 +305,101 @@ def create_web_app(output_root: str | Path) -> FastAPI:
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok", "scope": "loopback"}
+
+    @app.post("/api/douyin/login/qr", status_code=201)
+    def create_douyin_login() -> dict[str, Any]:
+        try:
+            return service.create_douyin_login()
+        except DouyinLoginError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.post("/api/douyin/login/browser", status_code=201)
+    def create_douyin_browser_login() -> dict[str, Any]:
+        try:
+            return service.create_douyin_browser_login()
+        except DouyinLoginError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.get("/api/douyin/login/current")
+    def current_douyin_login() -> dict[str, Any]:
+        return service.current_douyin_login()
+
+    @app.get("/api/douyin/login/{session_id}")
+    def douyin_login_state_general(session_id: str) -> dict[str, Any]:
+        try:
+            return service.douyin_login_state(session_id)
+        except DouyinLoginError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.delete("/api/douyin/login/{session_id}")
+    def cancel_douyin_login_general(session_id: str) -> dict[str, Any]:
+        try:
+            return service.cancel_douyin_login(session_id)
+        except DouyinLoginError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/api/douyin/login/qr/{session_id}")
+    def douyin_login_state(session_id: str) -> dict[str, Any]:
+        try:
+            return service.douyin_login_state(session_id)
+        except DouyinLoginError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.post("/api/douyin/login/qr/{session_id}/refresh")
+    def refresh_douyin_login(session_id: str) -> dict[str, Any]:
+        try:
+            return service.refresh_douyin_login(session_id)
+        except DouyinLoginError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.delete("/api/douyin/login/qr/{session_id}")
+    def cancel_douyin_login(session_id: str) -> dict[str, Any]:
+        try:
+            return service.cancel_douyin_login(session_id)
+        except DouyinLoginError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/api/douyin/login/qr/{session_id}/image")
+    def douyin_qr_image(session_id: str) -> Response:
+        try:
+            return Response(service.douyin_qr_image(session_id), media_type="image/png")
+        except DouyinLoginError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/api/douyin/favorites")
+    def douyin_favorites() -> dict[str, Any]:
+        return service.douyin_favorites_snapshot()
+
+    @app.post("/api/douyin/favorites")
+    def sync_douyin_favorites(
+        request: DouyinFavoritesSyncRequest,
+    ) -> dict[str, Any]:
+        try:
+            return service.sync_douyin_favorites(request.session_id)
+        except DouyinAuthenticationError as error:
+            raise HTTPException(
+                status_code=401,
+                detail="登录已失效，请重新连接抖音。",
+            ) from error
+        except DouyinLoginError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=502,
+                detail="抖音收藏暂时无法同步。",
+            ) from error
+
+    @app.get("/api/douyin/favorites/thumbnails/{relative_path:path}")
+    def douyin_thumbnail(relative_path: str) -> FileResponse:
+        try:
+            thumbnail = service.douyin_thumbnail(relative_path)
+            media_type, _ = guess_type(thumbnail.name)
+            return FileResponse(
+                thumbnail,
+                media_type=media_type or "application/octet-stream",
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="缩略图不存在。") from error
 
     @app.get("/api/learning/snapshot")
     def learning_snapshot(revision: str | None = None) -> dict[str, Any]:

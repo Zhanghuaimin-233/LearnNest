@@ -698,7 +698,7 @@ def test_flow_runs_one_named_monitor_and_its_pending_consumer_without_paid_stage
         lambda *args, **kwargs: type("Result", (), {"ok": True, "issues": []})(),
     )
     monkeypatch.setattr(cli, "_verify_provider_workers", lambda *args: [])
-    monkeypatch.setattr(cli, "_load_douyin_cookie", lambda: None)
+    monkeypatch.setattr(cli, "_load_douyin_cookie", lambda _root=None: None)
     monkeypatch.setattr(
         cli,
         "load_schedule",

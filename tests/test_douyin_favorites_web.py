@@ -1,0 +1,464 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+import pytest
+from pydantic import SecretStr
+
+from learnnest.adapters.douyin import DouyinAdapterError
+from learnnest.adapters.douyin_http import DouyinAuthenticationError
+from learnnest.douyin_favorites import (
+    DouyinFavoritesError,
+    DouyinFavoritesStore,
+)
+from learnnest.web_app import create_web_app
+from fastapi.testclient import TestClient
+
+
+def _item(item_id: str, title: str, *, cover: str | None = None) -> dict[str, Any]:
+    raw: dict[str, Any] = {"aweme_id": item_id, "desc": title}
+    if cover is not None:
+        raw["video"] = {"cover": {"url_list": [cover]}}
+    return raw
+
+
+class FakeTransport:
+    def __init__(self, pages: list[Mapping[str, Any]]) -> None:
+        self.pages = pages
+        self.calls: list[tuple[int, int]] = []
+
+    def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+        self.calls.append((cursor, count))
+        return self.pages[len(self.calls) - 1]
+
+
+class FakeResponse:
+    status = 200
+
+    def __init__(self, data: bytes, content_type: str = "image/jpeg") -> None:
+        self.data = data
+        self.headers = {"Content-Type": content_type}
+
+    def __enter__(self) -> FakeResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self, _limit: int) -> bytes:
+        return self.data
+
+
+class FakeThumbnailOpener:
+    def __init__(self, responses: Mapping[str, bytes | Exception]) -> None:
+        self.responses = responses
+        self.urls: list[str] = []
+
+    def __call__(self, request: Any, *, timeout: float) -> FakeResponse:
+        assert timeout == 20.0
+        self.urls.append(request.full_url)
+        result = self.responses[request.full_url]
+        if isinstance(result, Exception):
+            raise result
+        return FakeResponse(result)
+
+
+def _store(
+    tmp_path: Path,
+    transport: FakeTransport,
+    opener: FakeThumbnailOpener | None = None,
+) -> DouyinFavoritesStore:
+    return DouyinFavoritesStore(
+        tmp_path,
+        transport_factory=lambda _cookie: transport,
+        thumbnail_opener=opener,
+        page_size=10,
+    )
+
+
+def test_syncs_paginated_favorites_dedupes_and_persists_local_thumbnails(
+    tmp_path: Path,
+) -> None:
+    cover_one = "https://cdn.example/1.jpg?x=signature-one"
+    cover_two = "https://cdn.example/2.jpg?x=signature-two"
+    cover_three = "https://cdn.example/3.jpg?x=signature-three"
+    transport = FakeTransport(
+        [
+            {
+                "status_code": 0,
+                "aweme_list": [
+                    _item("1", "第一条", cover=cover_one),
+                    _item("2", "第二条", cover=cover_two),
+                ],
+                "cursor": 10,
+                "has_more": True,
+            },
+            {
+                "status_code": 0,
+                "aweme_list": [
+                    _item("2", "第二条重复", cover=cover_two),
+                    _item("3", "第三条", cover=cover_three),
+                ],
+                "cursor": 20,
+                "has_more": False,
+            },
+        ]
+    )
+    opener = FakeThumbnailOpener(
+        {
+            cover_one: b"jpeg-one",
+            cover_two: b"jpeg-two",
+            cover_three: b"jpeg-three",
+        }
+    )
+    store = _store(tmp_path, transport, opener)
+
+    snapshot = store.sync(SecretStr("session-cookie"))
+
+    assert [item.aweme_id for item in snapshot.items] == ["1", "2", "3"]
+    assert [item.title for item in snapshot.items] == ["第一条", "第二条", "第三条"]
+    assert transport.calls == [(0, 10), (10, 10)]
+    assert len(opener.urls) == 3
+    facts = store.facts_path.read_text(encoding="utf-8")
+    assert "signature-one" not in facts
+    assert "https://cdn.example" not in facts
+    assert "session-cookie" not in facts
+    assert json.loads(facts)["items"][0].keys() == {
+        "aweme_id",
+        "title",
+        "url",
+        "synced_at",
+        "thumbnail_path",
+    }
+    expected_images = {"1": b"jpeg-one", "2": b"jpeg-two", "3": b"jpeg-three"}
+    for item in snapshot.items:
+        assert item.thumbnail_path is not None
+        assert (
+            store.thumbnail_file(item.thumbnail_path).read_bytes()
+            == expected_images[item.aweme_id]
+        )
+
+
+def test_thumbnail_failure_keeps_the_favorite_with_placeholder_path(
+    tmp_path: Path,
+) -> None:
+    failed_cover = "https://cdn.example/fail.jpg?sig=hidden"
+    transport = FakeTransport(
+        [
+            {
+                "status_code": 0,
+                "aweme_list": [
+                    _item("1", "能显示", cover="https://cdn.example/ok.jpg"),
+                    _item("2", "封面失败", cover=failed_cover),
+                    _item("3", "没有封面"),
+                ],
+                "has_more": False,
+            }
+        ]
+    )
+    opener = FakeThumbnailOpener(
+        {
+            "https://cdn.example/ok.jpg": b"ok",
+            failed_cover: OSError("remote signature should not escape"),
+        }
+    )
+
+    snapshot = _store(tmp_path, transport, opener).sync(SecretStr("cookie"))
+
+    assert len(snapshot.items) == 3
+    assert snapshot.items[0].thumbnail_path is not None
+    assert snapshot.items[1].thumbnail_path is None
+    assert snapshot.items[2].thumbnail_path is None
+    assert "sig=hidden" not in (
+        tmp_path / ".learnnest" / "douyin" / "favorites.json"
+    ).read_text(encoding="utf-8")
+
+
+def test_non_json_transport_failure_is_safe() -> None:
+    class NonJsonTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            raise DouyinAdapterError("Douyin API returned a non-JSON response")
+
+    store = DouyinFavoritesStore(
+        Path("artifacts/local/douyin-test"),
+        transport_factory=lambda _cookie: NonJsonTransport(),
+    )
+    with pytest.raises(DouyinFavoritesError, match="收藏同步失败"):
+        store.sync(SecretStr("COOKIE" + "_SENTINEL"))
+
+
+def test_favorites_require_success_status_and_numeric_aweme_id(tmp_path: Path) -> None:
+    invalid_payloads = [
+        {"status_code": 999, "aweme_list": [_item("1", "业务失败")]},
+        {"status_code": 0, "aweme_list": []},
+        {"status_code": 0, "aweme_list": [{"aweme_id": "not-a-number"}]},
+    ]
+
+    for index, payload in enumerate(invalid_payloads):
+        store = _store(tmp_path / str(index), FakeTransport([payload]))
+        with pytest.raises(DouyinFavoritesError):
+            store.sync(SecretStr("cookie"))
+
+
+def test_authentication_failure_invokes_reconnect_callback(tmp_path: Path) -> None:
+    class AuthTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            raise DouyinAuthenticationError("authentication failed")
+
+    reconnected = []
+    store = DouyinFavoritesStore(
+        tmp_path,
+        transport_factory=lambda _cookie: AuthTransport(),
+    )
+
+    with pytest.raises(DouyinAuthenticationError):
+        store.sync(
+            SecretStr("COOKIE" + "_SENTINEL"),
+            on_authentication_failure=lambda: reconnected.append(True),
+        )
+
+    assert reconnected == [True]
+
+
+def test_thumbnail_endpoint_boundary_rejects_path_traversal_and_unlisted_files(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport(
+        [
+            {
+                "status_code": 0,
+                "aweme_list": [_item("1", "一", cover="https://cdn.example/1.jpg")],
+            }
+        ]
+    )
+    store = _store(
+        tmp_path,
+        transport,
+        FakeThumbnailOpener({"https://cdn.example/1.jpg": b"image"}),
+    )
+    snapshot = store.sync(SecretStr("cookie"))
+    assert snapshot.items[0].thumbnail_path == "thumbnails/1.jpg"
+
+    with pytest.raises(FileNotFoundError):
+        store.thumbnail_file("thumbnails/../favorites.json")
+    with pytest.raises(FileNotFoundError):
+        store.thumbnail_file("thumbnails/not-declared.jpg")
+
+    outside = store.directory / "secret.png"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_bytes(b"outside")
+    store.facts_path.write_text(
+        json.dumps(
+            {
+                "synced_at": "now",
+                "items": [
+                    {
+                        "aweme_id": "9",
+                        "title": "恶意",
+                        "url": "https://www.douyin.com/video/9",
+                        "synced_at": "now",
+                        "thumbnail_path": "thumbnails/../secret.png",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(FileNotFoundError):
+        store.thumbnail_file("thumbnails/../secret.png")
+
+
+def test_new_store_reads_only_last_safe_snapshot(tmp_path: Path) -> None:
+    transport = FakeTransport(
+        [
+            {
+                "status_code": 0,
+                "aweme_list": [
+                    _item("1", "持久收藏", cover="https://cdn.example/1.jpg")
+                ],
+            }
+        ]
+    )
+    first = _store(
+        tmp_path,
+        transport,
+        FakeThumbnailOpener({"https://cdn.example/1.jpg": b"image"}),
+    )
+    first.sync(SecretStr("cookie"))
+
+    restarted = DouyinFavoritesStore(tmp_path)
+    snapshot = restarted.read_snapshot()
+
+    assert [item.title for item in snapshot.items] == ["持久收藏"]
+    assert snapshot.items[0].url == "https://www.douyin.com/video/1"
+    assert restarted.thumbnail_file("thumbnails/1.jpg").read_bytes() == b"image"
+
+
+class FakeLoginBoundary:
+    def __init__(self, cookie: str = "session-cookie") -> None:
+        self.cookie = SecretStr(cookie)
+        self.status = "connected"
+        self.shutdown_called = False
+        self.invalidated = False
+
+    def create_session(self) -> dict[str, Any]:
+        self.status = "qr_ready"
+        return self.get_session("session1234567890")
+
+    def create_browser_session(self) -> dict[str, Any]:
+        self.status = "browser_ready"
+        return self.get_session("session1234567890")
+
+    def current_session(self) -> dict[str, Any]:
+        if self.status != "connected":
+            return {
+                "session_id": None,
+                "status": "disconnected",
+                "expires_in": 0,
+                "qr_available": False,
+            }
+        return {
+            "session_id": "session1234567890",
+            "status": "connected",
+            "expires_in": 0,
+            "qr_available": False,
+        }
+
+    def get_session(self, session_id: str) -> dict[str, Any]:
+        assert session_id == "session1234567890"
+        return {
+            "session_id": session_id,
+            "status": self.status,
+            "expires_in": 0 if self.status == "connected" else 60,
+            "qr_available": self.status == "qr_ready",
+        }
+
+    def refresh_session(self, session_id: str) -> dict[str, Any]:
+        return self.get_session(session_id)
+
+    def cancel_session(self, session_id: str) -> dict[str, Any]:
+        self.status = "cancelled"
+        return self.get_session(session_id)
+
+    def qr_image(self, session_id: str) -> bytes:
+        assert session_id == "session1234567890"
+        return _PNG
+
+    def cookie_for(self, session_id: str) -> SecretStr:
+        assert session_id == "session1234567890"
+        if self.status != "connected":
+            raise RuntimeError("not connected")
+        return self.cookie
+
+    def invalidate(self, session_id: str) -> None:
+        assert session_id == "session1234567890"
+        self.status = "failed"
+        self.invalidated = True
+
+    def shutdown(self) -> None:
+        self.shutdown_called = True
+
+
+_PNG = b"\x89PNG\r\n\x1a\nlocal"
+
+
+def test_douyin_web_apis_return_safe_login_state_and_shutdown(tmp_path: Path) -> None:
+    login = FakeLoginBoundary()
+    app = create_web_app(tmp_path, douyin_login=login)
+
+    with TestClient(app) as client:
+        current = client.get("/api/douyin/login/current")
+        browser = client.post("/api/douyin/login/browser")
+        browser_state = client.get("/api/douyin/login/session1234567890")
+        browser_cancelled = client.delete("/api/douyin/login/session1234567890")
+        created = client.post("/api/douyin/login/qr")
+        state = client.get("/api/douyin/login/qr/session1234567890")
+        image = client.get("/api/douyin/login/qr/session1234567890/image")
+        cancelled = client.delete("/api/douyin/login/qr/session1234567890")
+
+    assert current.json()["status"] == "connected"
+    assert browser.status_code == 201
+    assert browser_state.json()["status"] == "browser_ready"
+    assert browser_state.json()["qr_available"] is False
+    assert browser_cancelled.json()["status"] == "cancelled"
+    assert created.status_code == 201
+    assert state.json().keys() == {
+        "session_id",
+        "status",
+        "expires_in",
+        "qr_available",
+    }
+    assert all(
+        secret not in state.text.lower() for secret in ("cookie", "token", "passport")
+    )
+    assert image.status_code == 200
+    assert image.headers["content-type"].startswith("image/png")
+    assert image.content == _PNG
+    assert cancelled.json()["status"] == "cancelled"
+    assert login.shutdown_called is True
+
+
+def test_douyin_favorites_web_sync_thumbnail_and_restart_snapshot(
+    tmp_path: Path,
+) -> None:
+    cover = "https://cdn.example/1.jpg?signature=never-persist"
+    transport = FakeTransport(
+        [{"status_code": 0, "aweme_list": [_item("1", "收藏标题", cover=cover)]}]
+    )
+    opener = FakeThumbnailOpener({cover: b"local-image"})
+    store = _store(tmp_path, transport, opener)
+    login = FakeLoginBoundary()
+    app = create_web_app(tmp_path, douyin_login=login, douyin_favorites=store)
+
+    with TestClient(app) as client:
+        synced = client.post(
+            "/api/douyin/favorites",
+            json={"session_id": "session1234567890"},
+        )
+        listing = client.get("/api/douyin/favorites")
+        thumbnail = client.get("/api/douyin/favorites/thumbnails/thumbnails/1.jpg")
+        traversal = client.get(
+            "/api/douyin/favorites/thumbnails/thumbnails/../favorites.json"
+        )
+
+    assert synced.status_code == 200
+    assert synced.json()["items"][0]["title"] == "收藏标题"
+    assert "signature=never-persist" not in synced.text
+    assert listing.json() == synced.json()
+    assert thumbnail.status_code == 200
+    assert thumbnail.content == b"local-image"
+    assert traversal.status_code == 404
+
+    restarted = create_web_app(tmp_path, douyin_login=FakeLoginBoundary())
+    with TestClient(restarted) as client:
+        readonly = client.get("/api/douyin/favorites")
+    assert readonly.json()["items"][0]["url"] == "https://www.douyin.com/video/1"
+
+
+def test_douyin_favorites_web_auth_failure_requires_reconnect(tmp_path: Path) -> None:
+    class AuthTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            raise DouyinAuthenticationError("authentication failed")
+
+    login = FakeLoginBoundary()
+    store = DouyinFavoritesStore(
+        tmp_path,
+        transport_factory=lambda _cookie: AuthTransport(),
+    )
+    app = create_web_app(tmp_path, douyin_login=login, douyin_favorites=store)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/douyin/favorites",
+            json={"session_id": "session1234567890"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "登录已失效，请重新连接抖音。"
+    assert login.invalidated is True

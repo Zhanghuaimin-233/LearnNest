@@ -47,6 +47,7 @@ from learnnest.adapters.folder import FolderAdapter
 from learnnest.batch import resume_batch, run_batch
 from learnnest.batch_store import load_batch
 from learnnest.download_queue import run_pending_downloads
+from learnnest.douyin_cookie_store import DouyinCookieStore
 from learnnest.execution import plan_recovery
 from learnnest.index import (
     IndexRebuildError,
@@ -479,13 +480,22 @@ def readiness(
 ) -> None:
     """Preflight an explicit workflow before discovery, downloads, or paid calls."""
     runtime_environ = _runtime_environment()
+    root = _output_root(output_root)
+    try:
+        douyin_cookie_available = (
+            _load_douyin_cookie(root) is not None if douyin else None
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
     result = preflight_runtime(
-        _output_root(output_root),
+        root,
         require_douyin=douyin,
         require_note=note,
         require_podcast=podcast,
         require_tts=tts,
         runtime_environ=runtime_environ,
+        douyin_cookie_available=douyin_cookie_available,
     )
     for issue in result.issues:
         typer.echo(
@@ -565,6 +575,11 @@ def flow_run(
         raise typer.Exit(code=1)
     root = _output_root(output_root)
     runtime_environ = _runtime_environment()
+    try:
+        douyin_cookie = _load_douyin_cookie(root)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
     readiness_result = preflight_runtime(
         root,
         require_douyin=True,
@@ -572,6 +587,7 @@ def flow_run(
         require_podcast=with_podcast,
         require_tts=with_tts,
         runtime_environ=runtime_environ,
+        douyin_cookie_available=douyin_cookie is not None,
     )
     for issue in readiness_result.issues:
         typer.echo(
@@ -588,7 +604,7 @@ def flow_run(
             root,
             schedule_id,
             adapter_factory=_schedule_adapter,
-            runtime_credentials=_load_douyin_cookie(),
+            runtime_credentials=douyin_cookie,
         )
         if outcome.status not in {"completed", "partial"}:
             raise RuntimeError(
@@ -601,7 +617,7 @@ def flow_run(
             profile=schedule.profile,
             schedule_id=schedule_id,
             selection="latest_observed" if latest_only else "oldest",
-            douyin_cookie=_load_douyin_cookie(),
+            douyin_cookie=douyin_cookie,
         )
         if downloads.failed_count:
             raise RuntimeError("download consumer reported failed links")
@@ -909,11 +925,12 @@ def automation_tick(
         schedule = load_schedule(schedule_path(root, status.policy.schedule_id))
         if schedule.source.kind != "douyin":
             raise ValueError("automation policy schedule is not a Douyin monitor")
+        douyin_cookie = _load_douyin_cookie(root)
         outcome = run_schedule_once(
             root,
             schedule.schedule_id,
             adapter_factory=_schedule_adapter,
-            runtime_credentials=_load_douyin_cookie(),
+            runtime_credentials=douyin_cookie,
         )
         if outcome.status not in {"completed", "partial"}:
             raise RuntimeError(f"monitor did not complete: {outcome.status}")
@@ -925,7 +942,7 @@ def automation_tick(
             selection="oldest",
             retry_failed=True,
             max_stage_attempts=status.policy.retries_per_stage + 1,
-            douyin_cookie=_load_douyin_cookie(),
+            douyin_cookie=douyin_cookie,
             now=tick_now,
         )
         # The queue contains only retryable deterministic failures.  It runs
@@ -1552,14 +1569,15 @@ def download_pending(
     try:
         if latest_only and schedule_id is None:
             raise ValueError("--latest-only requires --schedule-id")
+        root = _output_root(output_root)
         outcome = run_pending_downloads(
-            _output_root(output_root),
+            root,
             max_items=1 if latest_only else max_items,
             retry_failed=retry_failed,
             schedule_id=schedule_id,
             selection="latest_observed" if latest_only else "oldest",
             profile=profile.value,
-            douyin_cookie=_load_douyin_cookie(),
+            douyin_cookie=_load_douyin_cookie(root),
         )
     except (LockUnavailable, OSError, PipelineError, ValueError) as error:
         typer.echo(f"ERROR: {error}", err=True)
@@ -2504,8 +2522,8 @@ def schedule_run_command(
 ) -> None:
     """Run exactly one monitor in this foreground process, regardless of due time."""
     root = _output_root(output_root)
-    runtime_credentials = _load_douyin_cookie()
     try:
+        runtime_credentials = _load_douyin_cookie(root)
         outcome = run_schedule_once(
             root,
             schedule_id,
@@ -2560,8 +2578,8 @@ def schedule_tick_command(
 ) -> None:
     """Run due schedules once in this foreground process."""
     root = _output_root(output_root)
-    runtime_credentials = _load_douyin_cookie()
     try:
+        runtime_credentials = _load_douyin_cookie(root)
         outcomes = tick_schedules(
             root,
             adapter_factory=_schedule_adapter,
@@ -2592,7 +2610,8 @@ def _schedule_adapter(schedule, credentials):
         )
     if credentials is None or not credentials.get_secret_value().strip():
         raise RuntimeError(
-            "Douyin cookie is missing; set DOUYIN_COOKIE or provide a local .env"
+            "Douyin login is missing; connect this output root in WebUI "
+            "or provide legacy DOUYIN_COOKIE"
         )
     if schedule.source.folder_ids:
         raise RuntimeError(
@@ -2606,8 +2625,17 @@ def _schedule_adapter(schedule, credentials):
     )
 
 
-def _load_douyin_cookie() -> SecretStr | None:
-    """Load a runtime-only Douyin cookie from the unified runtime config."""
+def _load_douyin_cookie(output_root: Path | None = None) -> SecretStr | None:
+    """Resolve one runtime CookieJar without creating a second fact source.
+
+    A WebUI login encrypted under the selected output root is canonical.
+    ``DOUYIN_COOKIE`` remains a compatibility fallback only when that local
+    encrypted credential does not exist.
+    """
+    if output_root is not None:
+        persisted = DouyinCookieStore(output_root).load()
+        if persisted is not None:
+            return persisted
     value = _runtime_environment().get("DOUYIN_COOKIE", "")
     return SecretStr(value) if value else None
 

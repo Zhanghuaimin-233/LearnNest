@@ -171,7 +171,7 @@ def test_automation_tick_applies_retry_setting_to_every_local_queue(
 
     monkeypatch.setattr(cli, "run_pending_downloads", fake_downloads)
     monkeypatch.setattr(cli, "run_failure_queue", fake_recoveries)
-    monkeypatch.setattr(cli, "_load_douyin_cookie", lambda: None)
+    monkeypatch.setattr(cli, "_load_douyin_cookie", lambda _root=None: None)
     monkeypatch.setattr(cli, "_runtime_environment", lambda: {})
     monkeypatch.setattr(
         cli,

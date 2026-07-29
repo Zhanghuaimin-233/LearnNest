@@ -7,6 +7,7 @@ import pytest
 from pydantic import SecretStr
 
 from learnnest.adapters.douyin_http import (
+    DouyinAuthenticationError,
     DouyinHttpTransport,
     DouyinSignedRequest,
 )
@@ -112,6 +113,7 @@ def test_http_transport_fails_closed_on_html_response() -> None:
     with pytest.raises(DouyinAdapterError, match="non-JSON") as error:
         transport.list_video_favorites(cursor=0, count=20)
 
+    assert not isinstance(error.value, DouyinAuthenticationError)
     assert "secret-cookie" not in str(error.value)
 
 

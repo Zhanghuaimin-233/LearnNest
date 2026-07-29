@@ -35,6 +35,10 @@ _DEFAULT_USER_AGENT = (
 )
 
 
+class DouyinAuthenticationError(DouyinAdapterError):
+    """The runtime CookieJar is no longer accepted by Douyin."""
+
+
 @dataclass(frozen=True)
 class DouyinSignedRequest:
     """Signer output that is still safe to combine with the request body."""
@@ -223,14 +227,22 @@ class DouyinHttpTransport:
             with self.opener(request, timeout=self.timeout) as response:
                 status = getattr(response, "status", None)
                 if status is not None and not 200 <= int(status) < 300:
-                    raise DouyinAdapterError(
-                        f"Douyin API request returned HTTP {int(status)}"
+                    error_type = (
+                        DouyinAuthenticationError
+                        if int(status) in {401, 403}
+                        else DouyinAdapterError
                     )
+                    raise error_type(f"Douyin API request returned HTTP {int(status)}")
                 raw = response.read()
         except DouyinAdapterError:
             raise
         except HTTPError as error:
-            raise DouyinAdapterError(
+            error_type = (
+                DouyinAuthenticationError
+                if error.code in {401, 403}
+                else DouyinAdapterError
+            )
+            raise error_type(
                 f"Douyin API request returned HTTP {error.code}"
             ) from error
         except (OSError, URLError) as error:
@@ -238,6 +250,10 @@ class DouyinHttpTransport:
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, JSONDecodeError) as error:
+            # A 200 HTML/challenge page is ambiguous: it may be an expired
+            # session, but it may also be a transient edge/WAF response. Only
+            # explicit authentication signals are allowed to destroy a
+            # persisted login.
             raise DouyinAdapterError(
                 "Douyin API returned a non-JSON response"
             ) from error

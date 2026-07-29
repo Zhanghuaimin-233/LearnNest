@@ -47,6 +47,18 @@
             </label>
           </form>
           <p id="notice" class="notice" aria-live="polite">准备好后，从这里添加第一项内容。</p>
+
+          <div class="favorites-heading">
+            <div class="chapter-heading">
+              <div>
+                <p class="chapter-label">抖音收藏</p>
+                <h2 id="favorites-title">默认视频收藏</h2>
+              </div>
+              <button id="sync-favorites" class="secondary-button" type="button">手动同步</button>
+            </div>
+            <p id="favorites-status" class="section-note" aria-live="polite">连接抖音后，收藏会出现在这里。</p>
+          </div>
+          <div id="douyin-favorites-list" class="favorite-grid"></div>
         </section>
 
         <section id="library" class="chapter" aria-labelledby="library-title">
@@ -79,7 +91,28 @@
             <p class="chapter-label">使用方式</p>
             <h2 id="settings-title">设置</h2>
           </div>
-          <p><strong>本地模式</strong>；在线生成稍后接入。</p>
+          <div class="connection-card">
+            <div class="connection-heading">
+              <div>
+                <p class="chapter-label">抖音</p>
+                <h3>连接抖音</h3>
+              </div>
+              <span id="douyin-connection-state" class="status-pill">未连接</span>
+            </div>
+            <p class="section-note">请在同一个抖音官方窗口完成手机号验证码和抖音 App 扫码确认；登录状态使用 Windows 当前用户加密保存在本机。</p>
+            <button id="connect-douyin" type="button">打开抖音验证窗口</button>
+            <div id="douyin-login-panel" class="login-panel" hidden>
+              <img id="douyin-qr" class="qr-image" alt="抖音登录二维码" hidden />
+              <div class="login-copy">
+                <p id="douyin-login-message" class="login-message" aria-live="polite">正在打开官方短信与扫码验证窗口。</p>
+                <p id="douyin-countdown" class="countdown" aria-live="polite" hidden></p>
+                <div class="login-actions">
+                  <button id="refresh-douyin" class="secondary-button" type="button" hidden>刷新二维码</button>
+                  <button id="cancel-douyin" class="text-button" type="button">取消</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
       </section>
     </main>

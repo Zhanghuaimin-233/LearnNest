@@ -148,6 +148,26 @@ def test_runtime_preflight_reports_missing_credentials_without_echoing_values(
     }
 
 
+def test_runtime_preflight_accepts_encrypted_douyin_cookie(
+    tmp_path: Path,
+) -> None:
+    from learnnest.preflight import preflight_runtime
+
+    result = preflight_runtime(
+        tmp_path,
+        require_douyin=True,
+        runtime_environ={},
+        douyin_cookie_available=True,
+        command_finder=lambda name: f"C:/tools/{name}.exe",
+        writable_checker=lambda path: True,
+    )
+
+    assert result.ok is True
+    assert "runtime_missing_douyin_cookie" not in {
+        issue.code for issue in result.issues
+    }
+
+
 def test_runtime_preflight_accepts_a_complete_generic_note_provider(
     tmp_path: Path,
 ) -> None:

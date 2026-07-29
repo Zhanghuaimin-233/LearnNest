@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from learnnest.cli import _load_douyin_cookie, _schedule_adapter, app
 from learnnest.download_queue import DownloadOutcome
+from learnnest.douyin_cookie_store import DouyinCookieStore
 from learnnest.schedule_models import ScheduleRecord
 from learnnest.schedules import ScheduleOutcome
 
@@ -69,6 +70,33 @@ def test_load_douyin_cookie_accepts_key_value_env_file(
     loaded = _load_douyin_cookie()
 
     assert loaded == SecretStr("from-key")
+
+
+def test_encrypted_output_root_cookie_precedes_legacy_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DOUYIN_COOKIE", "legacy-env-cookie")
+    output_root = tmp_path / "vault"
+    encrypted = SecretStr("sessionid=encrypted-output-root")
+    DouyinCookieStore(output_root).save(encrypted)
+
+    loaded = _load_douyin_cookie(output_root)
+
+    assert loaded == encrypted
+
+
+def test_output_root_without_encrypted_cookie_falls_back_to_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DOUYIN_COOKIE", "legacy-env-cookie")
+
+    loaded = _load_douyin_cookie(tmp_path / "vault")
+
+    assert loaded == SecretStr("legacy-env-cookie")
 
 
 def test_schedule_adapter_defaults_to_verified_video_scope() -> None:

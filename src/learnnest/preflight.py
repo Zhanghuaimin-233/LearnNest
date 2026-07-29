@@ -146,6 +146,7 @@ def preflight_runtime(
     require_podcast: bool = False,
     require_tts: bool = False,
     runtime_environ: Mapping[str, str],
+    douyin_cookie_available: bool | None = None,
     command_finder: Callable[[str], str | None] = shutil.which,
     writable_checker: Callable[[Path], bool] | None = None,
 ) -> PreflightResult:
@@ -171,12 +172,20 @@ def preflight_runtime(
                     message="required command is unavailable: yt-dlp",
                 )
             )
-        if not _runtime_value(runtime_environ, "DOUYIN_COOKIE"):
+        cookie_available = (
+            bool(_runtime_value(runtime_environ, "DOUYIN_COOKIE"))
+            if douyin_cookie_available is None
+            else douyin_cookie_available
+        )
+        if not cookie_available:
             issues.append(
                 PreflightIssue(
                     severity="error",
                     code="runtime_missing_douyin_cookie",
-                    message="DOUYIN_COOKIE is required for the Douyin monitor",
+                    message=(
+                        "A Douyin login is required in this output root; "
+                        "connect in WebUI or provide legacy DOUYIN_COOKIE"
+                    ),
                 )
             )
 

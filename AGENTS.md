@@ -36,7 +36,9 @@ LearnNest（语栖）是本地优先的 Windows CLI：本地视频或公开 URL 
 - `LEARNNEST_NOTE_API_KEY`、`LEARNNEST_NOTE_BASE_URL`、`LEARNNEST_NOTE_MODEL`：兼容 OpenAI 的笔记 provider，三项必须同时存在，且不能与 `MIMO_API_KEY` 共用。
 - `LEARNNEST_NOTE_PROVIDER`、`LEARNNEST_NOTE_JSON_MODE`、`LEARNNEST_NOTE_SAFE_INPUT_TOKENS`：可选 provider 参数。
 - `HUGGINGFACE_HUB_CACHE`：本机 ASR cache。
-- `DOUYIN_COOKIE`：仅 adapter 边界运行时读取。
+- `DOUYIN_COOKIE`：兼容旧 CLI/调度的明文回退；同一输出根存在 WebUI 生成的
+  `.learnnest/douyin/session.dpapi` 时，以 Windows 当前用户加密凭据为准。不得把解密值
+  写回 `.env`、任务、日志或事实。
 
 ## 不可破坏的合同
 

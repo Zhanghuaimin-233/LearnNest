@@ -5,79 +5,67 @@
 <h1 align="center">语栖 · LearnNest</h1>
 
 <p align="center">
-  把散落在视频、声音与画面里的知识，带回自己的学习之巢。
+  把本地视频和公开内容整理成可阅读的完整笔记，并按需生成可播放的播客音频。
 </p>
 
-<p align="center">
-  <strong>收藏夹发现</strong> · <strong>视频下载与转录</strong> · <strong>多模态证据整理</strong> · <strong>可追溯学习输出</strong>
-</p>
+LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面和 OCR 整理成可追溯材料，再生成学习笔记；需要时，笔记还可以继续变成播客稿和音频。数据和运行产物默认留在用户指定的本地目录。
 
----
+项目已经跑通“视频 → 完整笔记 → 播客音频”的核心路线，当前重点不再是证明 MVP，而是收敛不稳定路线、解耦 Provider 和工作流，并把 WebUI 完善为普通用户的主要入口。
 
-我们收藏过许多“以后一定会看”的视频。
+## 当前能做什么
 
-它们可能来自抖音收藏夹、公开视频链接，也可能只是硬盘中一个尚未整理的课程录像。随着收藏越来越多，真正留下来的却往往只有一个链接、一段模糊的印象，或者一句“等有空再看”。
+| 能力 | 当前状态 |
+| --- | --- |
+| 本地视频 | 支持单个文件、目录和可恢复任务处理 |
+| 公开 URL | 通过本机 `yt-dlp` 尽力下载视频与平台字幕 |
+| 抖音收藏 | 支持隔离官方窗口登录、默认收藏同步、待下载队列与本地缩略图 |
+| 材料提取 | 支持 ASR、关键帧、OCR、evidence 和 `content_pack.json` |
+| 学习笔记 | 已有严格笔记、效率笔记和质量实验链路；效率路线是后续唯一默认产品路线 |
+| 播客与音频 | 已能从笔记生成播客稿、`speech.txt` 和音频 |
+| WebUI | 已有本地收件箱、来源添加、任务与成品查看；统一设置与自动工作流仍在收敛 |
+| 恢复与事实 | 任务/批次 JSON 保存事实，SQLite 作为可重建查询投影 |
 
-**语栖希望让这些内容真正沉淀下来。**
+抖音图文目前只下载为本地素材和 `image_text.json`，尚未进入视频的 ASR、关键帧、证据包和笔记流程。
 
-它会取得视频与字幕，执行 ASR 转录、关键帧抽取和 OCR，将分散的信息整理为结构化证据，再按需生成可以阅读、检索和复查的笔记、播客稿与音频。
-
-> 语栖在生成结论之前，它会先保存字幕、画面、OCR 和来源关系，让每一条重要内容都有迹可循。
-
-## 一条内容如何在语栖中安顿下来
+## 核心流程
 
 ```text
-视频任务：抖音收藏夹 / 公开视频链接 / 本地视频
-                  │
-                  ▼
-            发现与获取内容
-                  │
-                  ▼
-        平台字幕或本地 ASR 转录
-                  │
-                  ▼
-          关键帧抽取与 OCR
-                  │
-                  ▼
-      evidence + content_pack.json
-                  │
-                  ▼
-       可追溯 Markdown 学习笔记
-                  │
-                  ├── 可选：播客稿
-                  └── 可选：TTS 音频
+本地视频 / 公开 URL / 抖音收藏
+                │
+                ▼
+       字幕 · ASR · 帧 · OCR
+                │
+                ▼
+     evidence + content_pack.json
+                │
+                ▼
+          完整 Markdown 笔记
+                │
+                ├── 播客稿 / speech.txt
+                └── TTS 音频
 ```
 
-前半段是一条本地优先、可验证、可重跑的确定性管线。
+`content_pack.json` 和稳定 `evidence_id` 是生成阶段的共享输入合同。笔记策略、播客稿和 TTS 是不同模块；付费 Provider 阶段必须显式触发或先获得自动工作流授权。
 
-> 此流程当前只适用于视频任务。抖音收藏夹中的图文会单独下载为本地素材及 `image_text.json`；它尚未进入 ASR、关键帧、OCR、证据包或笔记阶段。
+## 当前路线说明
 
-`note`、`podcast` 和 `tts` 分别由显式命令触发。无论是否已经配置 API Key，`process`、`queue run`、`flow run` 和恢复流程都不会暗中触发付费服务。自动交付也只会在单独授权后运行。
+- **效率模式**：`assisted-note` 的 Writer + Reviewer 路线，后续作为默认笔记产品路径。
+- **质量模式**：`quality-note`，仍处于开发调试阶段，成功率较低，不属于稳定承诺。
+- **V4 路线**：失败率过高，已经废弃；当前代码仍有兼容实现等待移除，不应再扩展。
+- **Provider 范围**：稳定 LLM 承诺将收敛到 MiMo 和 DeepSeek，同时保留新增 Provider 的模块接口。
+- **TTS 边界**：后续默认使用 Windows 系统 TTS，MiMo TTS 作为可选云端方案；当前配置和编排尚未完成这项解耦。
 
-## 语栖现在可以做什么
-
-| 能力        | 当前用途                                 |
-| --------- | ------------------------------------ |
-| 抖音收藏夹扫描   | 发现默认视频收藏夹中的新作品，并写入可恢复的待下载队列。         |
-| 公开视频导入    | 通过 `yt-dlp` 获取公开视频及可用的平台字幕。          |
-| 本地视频处理    | 处理单个视频、目录或任务清单，不依赖第三方平台。             |
-| ASR 与 OCR | 从语音和画面中提取字幕、操作信息、界面文字与关键内容。          |
-| 证据整理      | 使用稳定的 `evidence_id`、来源类型和文件哈希保存事实关系。 |
-| 学习笔记      | 将经过校验的证据渲染为可检索、可回溯的 Markdown 笔记。     |
-| 播客与音频     | 基于已经激活的笔记，按需生成口语化播客稿与音频。             |
-| 批次与恢复     | 保存任务、批次和重试事实，在失败或中断后继续处理。            |
+这些是当前产品方向，不代表所有收敛工作已经在代码中完成。
 
 ## 快速开始
 
-### 环境要求
+### 环境
 
-* Windows
-* Python 3.12
-* [uv](https://docs.astral.sh/uv/)
-* FFmpeg 与 FFprobe
-* 真实 ASR 所需的本地模型缓存和适配硬件环境
-
-### 安装
+- Windows
+- Python 3.12
+- [uv](https://docs.astral.sh/uv/)
+- FFmpeg 与 FFprobe
+- 真实 ASR 所需的本地模型缓存
 
 ```powershell
 git clone <你的 LearnNest 仓库地址>
@@ -85,7 +73,7 @@ Set-Location .\LearnNest
 uv sync
 ```
 
-### 从一个本地视频开始
+处理一个本地视频：
 
 ```powershell
 uv run learnnest process `
@@ -94,399 +82,64 @@ uv run learnnest process `
   '.\lesson.mp4'
 ```
 
-语栖会在输出目录中保存：
-
-```text
-字幕与时间片段
-关键帧与 OCR
-evidence.json
-content_pack.json
-任务状态与处理报告
-可阅读的证据追溯视图
-```
-
-### 导入一个公开视频
-
-```powershell
-uv run learnnest process `
-  --profile evidence `
-  --output-root .\learnnest-output `
-  '<公开视频链接>'
-```
-
-公开链接由当前安装的 `yt-dlp` 处理。平台规则、登录要求和 extractor 能力可能随时间变化，因此实际支持情况以本机运行结果为准。
-
-链接无法下载时，也可以先手动取得视频，再作为本地文件交给语栖处理。
-
-### 只预检，不正式处理
-
-```powershell
-uv run learnnest process `
-  --dry-run `
-  --profile evidence `
-  --output-root .\learnnest-output `
-  '<本地文件或公开视频链接>'
-```
-
-`dry-run` 会校验输入、输出路径、所需命令（FFmpeg、FFprobe，以及公开链接所需的 `yt-dlp`），并预览任务身份与重复风险；它不会下载视频、调用模型或写入正式任务结果。运行时 Cookie/API Key 与 ASR/OCR provider 可用性请通过 `readiness` 或 `doctor` 检查。
-
-### 在本机浏览器学习
-
-WebUI 是普通学习者的本地入口：添加一个本地视频或公开链接后，默认会生成可读学习笔记；页面会自动读取同一输出根的变化，并在笔记可用时提供“打开笔记”。也可以选择“只整理材料”。
+启动本地 WebUI：
 
 ```powershell
 uv run learnnest web serve --output-root .\learnnest-output
 ```
 
-然后打开 `http://127.0.0.1:8765`。服务固定监听本机回环地址，不提供局域网访问、账号或云端托管。本轮是免费的本地模式：在线生成、付费 provider、自动化、Windows 调度和高级诊断尚未接入人用页面；本地任务与成品视图不会替自动化授权。
+然后打开 `http://127.0.0.1:8765`。服务只监听本机回环地址，不提供云端账号或局域网托管。Windows 一键启动脚本属于下一阶段工作，当前仍使用上述命令。
 
-WebUI 的“收件箱”包含首版默认视频收藏入口。首次使用时，在“设置”点击“连接抖音”，
-在 LearnNest 启动的隔离 Edge 官方窗口中完成手机号验证码，并按抖音要求使用手机客户端
-扫码确认。两步属于同一个官方组合验证会话，不是可二选一的登录方式；手机号、验证码和
-扫码确认始终只提交给抖音官方页面。登录完成后，收藏通过纯 HTTP 同步，页面只展示标题、
-规范作品页、本地缩略图和同步时间。WebUI 不会读取日常浏览器配置，也不依赖 `.env` 中
-的运行时收藏凭据。
-
-登录 Cookie 使用 Windows DPAPI 按当前用户加密，保存到输出根目录下的
-`.learnnest/douyin/session.dpapi`；服务重启时先解密并通过收藏接口重新验活，失效即
-清除。明文 Cookie 不进入任务、日志、SQLite 或 Git。2026-07-29 已在一个全新隔离会话
-完成“手机号验证码 + 手机客户端扫码确认”、服务重启恢复、130 条收藏与 130 张本地
-缩略图的首次真实闭环；由于站点行为仍可能变化，这项能力继续按实验功能管理。
-
-同一输出根中的加密登录态也是 CLI、调度、下载和自动化的默认抖音凭据。只有该文件
-不存在时，程序才兼容回退到进程环境或当前 `.env` 的 `DOUYIN_COOKIE`；两者同时存在时
-DPAPI 密文优先，旧 `.env` 不会覆盖较新的 WebUI 登录。程序不会把解密值反写到 `.env`。
-完成一次 WebUI 登录并确认同一 `--output-root` 可恢复后，可以从 `.env` 移除
-`DOUYIN_COOKIE`。不同输出根各自保存登录态，不隐式共享账号。
-
-## 从抖音收藏夹开始
-
-语栖的 WebUI 正在实现默认视频收藏的官方窗口登录、纯 HTTP 同步、去重和本地缩略图
-展示；这项首版不包含手动收藏夹目录、调度、下载或付费 provider。
-
-Cookie 只在运行时解密使用；本地仅保存 Windows 当前用户可解密的 DPAPI 密文。
-下面的 `.env` 方式只用于尚未建立加密登录态的旧 CLI 兼容流程。
+查看当前 CLI：
 
 ```powershell
-$env:DOUYIN_COOKIE = Read-Host 'Douyin Cookie' -MaskInput
-
-uv run learnnest readiness `
-  --douyin `
-  --output-root .\learnnest-output
-
-uv run learnnest schedule add-douyin `
-  douyin-favorites `
-  '<你的抖音收藏页 URL>' `
-  --output-root .\learnnest-output
+uv run learnnest --help
+uv run learnnest doctor
 ```
 
-只扫描收藏夹并写入待下载队列：
+`doctor` 不应下载模型或产生付费调用；完整检查需要本机 ASR/OCR 环境以及 `src/learnnest/fixtures/README.md` 说明的本地 fixture。
+
+## 生成阶段与付费边界
+
+基础材料管线不需要付费 LLM。当前代码中的笔记、播客与 TTS 命令分别显式运行；`process`、`queue run` 和本地恢复不得暗中调用付费 Provider。
 
 ```powershell
-uv run learnnest schedule run `
-  douyin-favorites `
-  --output-root .\learnnest-output
+uv run learnnest assisted-note --help
+uv run learnnest podcast --help
+uv run learnnest tts --help
 ```
 
-首次使用时，可以只消费最新发现的一条内容：
+当前版本仍保留历史配置和 Provider 兼容路径，具体可用参数以命令帮助和 [`.env.example`](.env.example) 为准。不要把计划中的 MiMo/DeepSeek 注册表、职责绑定或 Windows TTS 默认值误认为已经实现。
 
-```powershell
-uv run learnnest download pending `
-  --schedule-id douyin-favorites `
-  --latest-only `
-  --output-root .\learnnest-output
-```
+自动工作流必须默认关闭，并由用户显式授权。自动重试只能处理明确的临时错误，所有尝试必须可见并计数；结果为 `unknown` 时停止，不能跨 Provider 自动切换。
 
-也可以将“扫描、下载、处理”组合成一次前台操作：
+## 本地优先与安全
 
-```powershell
-uv run learnnest flow run `
-  douyin-favorites `
-  --latest-only `
-  --output-root .\learnnest-output
-```
+- API Key、Cookie、原始 Provider 请求、模型、媒体和运行产物不进入 Git。
+- WebUI 的抖音登录态使用 Windows 当前用户 DPAPI 加密，保存在对应输出根的 `.learnnest/douyin/session.dpapi`。
+- 程序不读取日常浏览器配置，不把解密 Cookie 写回 `.env`、任务、日志或 SQLite。
+- 请只处理你有权访问、下载和使用的内容，并遵守目标平台规则和适用法律。
 
-语栖只维护自己的前台计划与任务事实，**不会自动注册或修改 Windows 计划任务**。
+不同版本可能使用不同锁目录；切换代码版本前，先停止正在访问同一输出根的旧进程。
 
-## 按需开启 AI 能力
+## 开发
 
-语栖的基础证据管线不需要付费模型。
-
-只有在你显式运行相应命令时，才会调用笔记、播客或 TTS provider。
-
-复制 [`.env.example`](.env.example) 为本地 `.env`，或者只在当前 PowerShell 会话中设置环境变量。`.env` 不应提交到 Git。
-
-| 用途                     | 环境变量                                                                      |
-| ---------------------- | ------------------------------------------------------------------------- |
-| 抖音收藏夹扫描与下载             | 输出根 DPAPI 登录态；`DOUYIN_COOKIE` 仅作旧流程回退                       |
-| MiMo 笔记、播客与 TTS        | `MIMO_API_KEY`                                                            |
-| OpenAI-compatible 笔记服务 | `LEARNNEST_NOTE_API_KEY`、`LEARNNEST_NOTE_BASE_URL`、`LEARNNEST_NOTE_MODEL` |
-
-Writer 连接通过本地 BYOK 管理。`provider connect mimo|openai|anthropic|gemini|deepseek|coding-plan`
-只会询问 API Key；聚合服务使用 `openai-compatible` 并显式提供 endpoint、model 和
-secret env 名。连接和能力档案保存在输出根 `.learnnest/providers/`，不保存 Key、请求或
-响应。默认 `local_only`，必须显式运行 `provider check`；一次性执行
-`provider authorize automatic` 后，后续连接变更会触发最多四次、单独计费且可见的
-ReaderDraft 兼容性检查。`quality-note plan` 只读取已经验证的档案并固定 snapshot，
-`status` 和 `recover` 永不触发检查或 provider 调用。
-`assisted-note plan` 只冻结 OpenAI-compatible connection 身份和材料包 SHA，不依赖
-ReaderDraft 能力档案；它的 `generate` 与 `review` 才分别执行一次显式 Markdown 调用。
-当前执行 adapter 覆盖 OpenAI-compatible 家族；Anthropic 和 Gemini 预设已登记，但其
-原生请求 adapter 尚未实现，不能用于 quality-note 或 assisted-note 的真实调用。
-
-### 火山方舟 Coding Plan
-
-使用套餐时通过 `coding-plan` 预设建立本地连接；它固定 OpenAI-compatible 套餐端点
-`https://ark.cn-beijing.volces.com/api/coding/v3` 和本机 `CODING_PLAN_KEY` 引用，**不得**改用
-通用 `https://ark.cn-beijing.volces.com/api/v3`，后者不消耗 Coding Plan 额度而会另行计费。
-
-```powershell
-uv run learnnest provider connect coding-plan --name coding-plan `
-  --model deepseek-v4-pro `
-  --output-root .\learnnest-output
-```
-
-截至 2026-07-27，官方列出的套餐模型为 `doubao-seed-2.1-turbo`、`doubao-seed-2.0-lite`、
-`minimax-m2.7`、`minimax-m3`、`glm-5.2`、`deepseek-v4-flash`、`deepseek-v4-pro`、`kimi-k2.6` 和
-`kimi-k2.7-code`。效率模式当前推荐基线排除 `glm-5.2`（本地实测两次 Reviewer 空正文）；历史
-`doubao-seed-code` 不受套餐支持。其余八个模型，包括两个 DeepSeek 模型，均应以新的显式 plan
-分别验收；官方模型清单可能变化，使用前应回查火山方舟文档。
-| 本地 ASR 模型缓存            | `HUGGINGFACE_HUB_CACHE`                                                   |
-
-生成一篇受约束、可校验的学习笔记：
-
-```powershell
-$env:MIMO_API_KEY = Read-Host 'MiMo API Key' -MaskInput
-
-uv run learnnest note `
-  <task_id> `
-  --template concept-explanation `
-  --output-root .\learnnest-output
-```
-
-### 质量优先学习笔记
-
-质量优先链路是独立的显式工作流，不改变旧 `learnnest note` 的默认行为。它将“来源审计”和“读者正文”分开处理：
-
-1. Organizer 覆盖完整内容包，把证据归为 `core`、`supporting`、`background` 或 `noise`，并选择少量引用与视觉锚点。
-2. Writer 只看到 `core` 和 `supporting`，在受限 JSON 中返回可读 CommonMark；摘要、脉络和复习等纯重组内容不必重复堆叠脚注。
-3. 程序验证 task、SHA、unit、evidence、OCR 父 frame 和视觉预算，渲染紧凑脚注与最多三张显式图片；完整证据闭包写入独立的 `note.provenance.json`。
-
-每个计划都会保存输入 SHA、分片、角色模型和最大调用数。候选、active 和交付 Markdown 会针对各自目录重新渲染，避免复制文件后图片相对路径失效。
-
-```powershell
-uv run learnnest quality-note plan `
-  <task_id> `
-  --template mixed `
-  --review-mode gate `
-  --output-root .\learnnest-output
-
-uv run learnnest quality-note organize <plan.json> --output-root .\learnnest-output
-uv run learnnest quality-note generate <plan.json> --output-root .\learnnest-output
-uv run learnnest quality-note review <plan.json> --output-root .\learnnest-output
-uv run learnnest quality-note status <plan.json>
-```
-
-如果 Writer 失败但已经存在同一 task、source fingerprint、内容包 SHA 和 organization SHA 绑定的 `organization.json`，可以创建只包含一次 Writer 预算的新计划：
-
-```powershell
-uv run learnnest quality-note plan `
-  <task_id> `
-  --template mixed `
-  --review-mode none `
-  --reuse-organization <organization.json> `
-  --output-root .\learnnest-output
-```
-
-`plan`、`status` 和 `recover` 不调用 provider。Writer HTTP 成功响应会先落盘，再做本地结构与来源校验；可恢复的渲染或格式规则变化由 `recover` 重新校验，不增加调用数。未知来源、核心证据漏覆盖和跨源引用仍会硬失败。
-
-质量报告不等同于人工阅读、图片或音频验收，`gate` 被拒绝时旧 active note 保持不变。
-
-### 效率模式学习笔记
-
-`assisted-note` 是与 `quality-note` 完全隔离的效率路线。程序从同一
-`content_pack.json` 投影出确定性 reader dossier：ASR transcript 与按帧归组的 OCR 保持
-独立，模型不得把冲突来源拼接为事实；Writer 与 Reviewer 分别只调用一次，
-都返回完整 CommonMark。它交付的状态是 `model_reviewed`，**不等同于** `source_valid`、
-人工事实复核或现实世界时效证明；不会更新严格路线 active note，也不能作为 podcast 或
-TTS 的输入。
-
-```powershell
-uv run learnnest assisted-note plan `
-  <task_id> `
-  --connection <writer-connection> `
-  --reviewer-connection <optional-reviewer-connection> `
-  --output-root .\learnnest-output
-
-uv run learnnest assisted-note generate <plan.json> --output-root .\learnnest-output
-uv run learnnest assisted-note review <plan.json> --output-root .\learnnest-output
-uv run learnnest assisted-note status <plan.json>
-```
-
-`recover` 只从已落盘的响应重建本地 Markdown，不会重试或再次调用 provider；二审失败时，
-第一稿候选会保留，但不会成为 `model_reviewed` 成品。
-
-### 自动交付（实验性）
-
-自动交付只覆盖默认抖音视频收藏夹中的视频：它会在已授权后执行监测、下载、确定性提取、
-`assisted-note` Writer/Reviewer，并将成功的 `model_reviewed` Markdown 交给带
-`assisted_draft` route 标签的播客与音频链路。它不改变严格 `note`、`quality-note`、
-`schedule tick`、`queue run` 或 `recover` 的语义。
-
-先建立 Douyin schedule 与 Writer connection，再写入默认关闭的 policy。`--retries-per-stage 3`
-表示每个阶段“首次执行一次 + 最多三次重试”，共四次机会；`0` 可关闭自动重试。下载和确定性阶段
-也遵守同一上限，失败只有明确标记为 `retryable` 才会由 `automation tick` 自动领取，重试沿用有界
-等待，不在一个 tick 内紧密循环。每日 provider 上限是按 UTC 日、跨任务和 Writer/Reviewer/Podcast/TTS
-共享的**调用次数**，默认 `80`，不是金额；首次调用、失败、`running`、`unknown` 和重试都计数。
-可通过 `--provider-calls-per-day` 调整。
-
-```powershell
-uv run learnnest automation configure douyin-favorites `
-  --writer-connection coding-plan `
-  --retries-per-stage 3 `
-  --provider-calls-per-day 80 `
-  --max-items 1 `
-  --output-root .\learnnest-output
-
-uv run learnnest automation authorize --confirm-paid `
-  --output-root .\learnnest-output
-
-uv run learnnest automation install --every-minutes 30 `
-  --output-root .\learnnest-output
-```
-
-`automation tick` 先恢复本地 retryable 阶段，再进入付费阶段；`status` 显示 UTC 当日
-`used/limit/remaining`、各付费阶段 `attempt/max`、`unknown` 和预算阻塞原因。付费调用前会先落盘
-`running`，成功响应/产物先落盘再验证；重启时只从完整响应或已验证产物本地恢复。无法确认结果的
-timeout 会进入 `unknown` 并暂停，必须人工确认，不能自动拿下一次机会。达到 80 次后保留待续状态
-和已有成品，不再调用 provider。`disable` 只停止新调用，之后对相同不可变配置重新
-`authorize --confirm-paid` 会保持同一 policy 身份并继续未完成任务；安装 Scheduler 只唤醒
-`automation tick`，不会授权。首次真实 tick 前仍应使用新的独立 output root，并单独完成人工阅读、图片和听音检查。
-
-继续生成播客稿和音频：
-
-```powershell
-uv run learnnest podcast `
-  <task_id> `
-  --output-root .\learnnest-output
-
-uv run learnnest tts `
-  <task_id> `
-  --output-root .\learnnest-output
-```
-
-笔记、播客稿和音频都由显式命令生成，可分别校验和重跑；但生成顺序有依赖：播客稿需要已激活且校验通过的笔记，TTS 会进一步复验笔记、内容包、播客稿和 `speech.txt`。
-
-## 为什么强调“证据”
-
-普通的视频摘要很容易遇到一个问题：
-
-> 生成的内容看起来合理，却无法确认它究竟来自视频，还是来自模型自己的补充。
-
-语栖会明确区分：
-
-* 字幕证据
-* OCR 证据
-* 关键帧证据
-* AI 补充内容
-* 最终渲染产物
-
-重要结论和操作步骤通过稳定的 `evidence_id` 关联原始材料。读者 Markdown 只显示紧凑脚注，完整 unit 与 evidence 闭包保存在 provenance 侧车；Markdown 链接、任务状态、上游 SHA 和发布文件也会经过校验。
-
-因此，语栖输出的不只是“答案”，还有答案从哪里来的路径。
-
-## 平台支持
-
-| 来源              | 当前状态                             |
-| --------------- | -------------------------------- |
-| 抖音默认视频收藏夹       | 已支持扫描、增量发现和待下载队列                 |
-| 抖音公开作品链接        | 通过通用 URL 导入处理                    |
-| Bilibili 公开视频链接 | 通过 `yt-dlp` 尽力支持                 |
-| YouTube 公开视频链接  | 通过 `yt-dlp` 尽力支持                 |
-| 其他公开站点          | 取决于本机 `yt-dlp` extractor 与目标站点限制 |
-| 本地视频文件与目录       | 完整支持，不依赖平台                       |
-
-目前只有抖音默认视频收藏夹拥有专用扫描适配器。
-
-Bilibili 收藏夹、YouTube 播放列表或频道订阅等专用发现能力尚未实现，但平台发现层与后续处理管线已经解耦。未来新增平台时，只需输出稳定的逻辑来源，不需要重写下载、转录、OCR 和证据链。
-
-请只处理你有权访问、下载和使用的内容，并遵守目标平台规则与适用法律。
-
-## 本地优先与隐私边界
-
-语栖默认将所有任务产物保存在你指定的输出目录中。
+主要模块边界：
 
 ```text
-<output-root>/
-├─ 视频学习素材/       # 任务事实、视频和确定性阶段产物
-├─ 视频学习批次/       # 批次、计划与发现/待下载队列
-├─ 视频学习笔记/       # 已发布 Markdown 笔记
-├─ 视频学习音频/       # 已发布音频
-├─ 抖音图文素材/       # 抖音图文下载内容（按需产生）
-└─ .learnnest/
-   ├─ index.sqlite3    # 可重建 SQLite 查询投影
-   ├─ quality-first/   # 不可变质量计划、状态与 active 笔记
-   └─ locks/           # 跨进程锁
+来源适配
+  → 确定性材料管线
+  → evidence / content_pack
+  → 笔记策略
+  → 标准笔记
+  → 播客稿 / speech.txt
+  → TTS
+  → WebUI / CLI
 ```
 
-任务与批次 JSON 是事实来源，SQLite 只是可删除、可重建的查询投影。
+WebUI 应调用应用服务，不直接拼接底层 CLI 或 Provider。ASR、OCR、LLM 和 TTS 按能力注册；笔记和播客按工作流职责引用 LLM Provider。
 
-以下内容不会进入 Git：
-
-* API Key
-* Cookie
-* 原始 provider 请求
-* 本地媒体
-* 模型缓存
-* 运行时任务产物
-
-旧版与新版的锁目录可能不同。切换版本前应先停止旧进程，避免在同一输出根目录中并发运行两个不兼容版本。
-
-## 项目结构
-
-```text
-src/learnnest/
-├─ adapters/          平台收藏与来源发现
-├─ downloader.py      公开视频和平台字幕获取
-├─ pipeline.py        主处理管线
-├─ stages.py          确定性处理阶段
-├─ worker.py          ASR 与 OCR 独立工作进程
-├─ models.py          任务、证据与生成产物契约
-├─ task_store.py      JSON 事实存储
-├─ batch_*.py         批次、队列与恢复
-├─ note_*.py          受约束笔记生成与校验
-├─ evidence_*.py      语义证据单元、降噪、锚点与 Writer 输入
-├─ quality_*.py       读者优先笔记计划、质量报告、恢复与发布
-├─ podcast_*.py       播客稿生成与校验
-├─ tts_*.py           音频生成与发布对账
-├─ rendering.py       确定性 Markdown 渲染
-├─ scheduler.py       前台扫描计划
-└─ locks.py           跨进程资源锁
-```
-
-语栖坚持几个不变的原则：
-
-1. 标题可以修改，稳定任务身份不能依赖标题。
-2. 原始证据与 AI 补充必须保持区分。
-3. LLM 只生成受约束结构，链接和 Markdown 由程序渲染。
-4. 任何阶段都不能暗中触发付费 provider。
-5. 下游失败不能破坏已经验证的上游产物。
-6. 数据库可以重建，任务事实不能只存在数据库里。
-7. 新平台适配器不能绕过统一处理管线。
-
-## 诊断与开发
-
-`doctor` 会在独立子进程中检查 ASR 和 OCR provider，不调用付费服务，也不会主动下载模型。
-
-完整实测需要本地 smoke fixture：
-
-```text
-src/learnnest/fixtures/README.md
-```
-
-公开仓不会分发测试用音频与图片。fixture 缺失时，命令会明确报告，而不是静默跳过真实验证。
-
-常用开发命令：
+常用验证：
 
 ```powershell
 uv run pytest -q
@@ -494,44 +147,11 @@ uv run ruff check src tests
 uv run ruff format --check src tests
 uv run learnnest --help
 uv run learnnest doctor
+git diff --check
 ```
 
-维护代码前请阅读 [AGENT.md](AGENT.md)，完整工程合同见 [AGENTS.md](AGENTS.md)。
-
-## 当前进度
-
-当前已经形成的核心路径：
-
-```text
-本地视频 / 公开视频 / 抖音收藏夹
-              ↓
-      下载、字幕、ASR 与 OCR
-              ↓
-       证据包与内容包
-              ↓
-        可追溯学习笔记
-              ↓
-       可选播客稿与音频
-```
-
-GeneratedNote 4.0 已具备模板约束、证据校验、快照重渲染和可选审验能力。
-
-目前仍在进行多内容包的人工质量验收。程序层面的 `source_valid` 表示引用结构有效，并不等同于内容已经通过人工质量审核。
-
-后续将继续完善：
-
-* 更多平台的专用发现适配器
-* 多内容类型的质量评测
-* 长视频与多模态理解
-* 更稳定的恢复和自动化体验
-* 面向稳定公开发布的安装与迁移流程
+维护代码前请阅读 [AGENTS.md](AGENTS.md)；兼容入口见 [AGENT.md](AGENT.md)。
 
 ## 许可证
 
-许可证将在首次公开发布前确定。
-
----
-
-<p align="center">
-  <strong>让收藏不再只是收藏，让知识在自己的设备上安静栖息。</strong>
-</p>
+许可证将在首次正式公开发布前确定。

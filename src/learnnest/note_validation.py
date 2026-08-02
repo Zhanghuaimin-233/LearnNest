@@ -2,23 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Iterator
-from pathlib import Path
-
 from learnnest.models import ContentPack
 from learnnest.note_models import (
     GENERATED_NOTE_ADAPTER,
     AnyGeneratedNote,
     ConceptExplanationNote,
     GeneratedNote,
-    GeneratedNoteV4,
     NoteStatement,
     PracticalTutorialNote,
     ResourceShareNote,
 )
-from learnnest.note_templates import NoteTemplate, template_snapshot_sha256
 from learnnest.note_types import ConcreteNoteType
 
 _URL_TOKEN_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -63,16 +58,10 @@ def validate_generated_note(
     *,
     requested_note_type: ConcreteNoteType | None = None,
     require_classification_evidence: bool = False,
-    template: NoteTemplate | None = None,
 ) -> list[str]:
     """Return stable semantic errors without mutating either input."""
     if isinstance(note, GeneratedNote):
         return _validate_identity_and_evidence(note, content_pack)
-    if isinstance(note, GeneratedNoteV4):
-        errors = validate_v4_source_contract(note, content_pack, template=template)
-        if template is not None:
-            errors.extend(validate_v4_template_presentation(note, template))
-        return errors
     errors = _validate_identity_and_evidence(note, content_pack)
     if requested_note_type is not None and note.note_type != requested_note_type:
         errors.append("generated note type does not match requested note type")
@@ -81,139 +70,6 @@ def validate_generated_note(
     errors.extend(_validate_v3_evidence_lists(note, content_pack))
     errors.extend(_validate_v3_urls(note, content_pack))
     errors.extend(_validate_practical_actions(note, content_pack))
-    return errors
-
-
-def validate_v4_source_contract(
-    note: GeneratedNoteV4,
-    content_pack: ContentPack,
-    *,
-    template: NoteTemplate | None = None,
-) -> list[str]:
-    """Validate V4 facts and immutable bindings, excluding presentation quality."""
-    errors = _validate_identity_and_evidence(note, content_pack)
-    errors.extend(_validate_v4_model_text(note))
-    errors.extend(_validate_v4_evidence_lists(note, content_pack))
-    errors.extend(_validate_v4_urls(note, content_pack))
-    if template is not None:
-        errors.extend(_validate_v4_template_binding(note, template))
-    return errors
-
-
-def validate_v4_template_presentation(
-    note: GeneratedNoteV4,
-    template: NoteTemplate,
-) -> list[str]:
-    """Report template-shape and readability risks without changing source validity."""
-    return _validate_v4_template_presentation(note, template)
-
-
-def validate_v4_bundle_provenance(
-    bundle_dir: Path,
-    note: GeneratedNoteV4,
-    template: NoteTemplate,
-    *,
-    content_pack_sha256: str | None,
-) -> list[str]:
-    """Validate immutable metadata that binds an active V4 note to its source pack."""
-    errors: list[str] = []
-    metadata_path = bundle_dir / "generation.json"
-    try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return ["active GeneratedNote 4.0 generation metadata is invalid"]
-    if not isinstance(payload, dict):
-        return ["active GeneratedNote 4.0 generation metadata is invalid"]
-    if payload.get("schema_version") != "2.0":
-        errors.append("active GeneratedNote 4.0 metadata schema_version is invalid")
-    if payload.get("note_schema_version") != "4.0":
-        errors.append(
-            "active GeneratedNote 4.0 metadata note_schema_version is invalid"
-        )
-    template_metadata = payload.get("template")
-    if not isinstance(template_metadata, dict):
-        errors.append("active GeneratedNote 4.0 metadata template is invalid")
-    else:
-        if template_metadata.get("template_id") != note.template_id:
-            errors.append("active GeneratedNote 4.0 metadata template_id is invalid")
-        if template_metadata.get("template_sha256") != template_snapshot_sha256(
-            template
-        ):
-            errors.append(
-                "active GeneratedNote 4.0 metadata template_sha256 is invalid"
-            )
-        if template_metadata.get("snapshot") != "template.json":
-            errors.append("active GeneratedNote 4.0 metadata snapshot path is invalid")
-    expected_template_warnings = validate_v4_template_presentation(note, template)
-    template_validation = payload.get("template_validation")
-    if template_validation is None:
-        if expected_template_warnings:
-            errors.append(
-                "active GeneratedNote 4.0 metadata template validation is missing"
-            )
-    elif not isinstance(template_validation, dict):
-        errors.append(
-            "active GeneratedNote 4.0 metadata template validation is invalid"
-        )
-    else:
-        template_status = template_validation.get("status")
-        template_warnings = template_validation.get("warnings")
-        if template_status not in {"passed", "flagged"}:
-            errors.append(
-                "active GeneratedNote 4.0 metadata template validation status is invalid"
-            )
-        if (
-            not isinstance(template_warnings, list)
-            or not all(isinstance(item, str) for item in template_warnings)
-            or template_warnings != expected_template_warnings
-        ):
-            errors.append(
-                "active GeneratedNote 4.0 metadata template validation warnings are invalid"
-            )
-        elif template_status != ("flagged" if expected_template_warnings else "passed"):
-            errors.append(
-                "active GeneratedNote 4.0 metadata template validation status is invalid"
-            )
-    if payload.get("content_pack_sha256") != content_pack_sha256:
-        errors.append(
-            "active GeneratedNote 4.0 metadata content_pack_sha256 is invalid"
-        )
-    if payload.get("candidate_status") != "source_valid":
-        errors.append("active GeneratedNote 4.0 is not source_valid")
-    if payload.get("source_validation_status") != "source_valid":
-        errors.append("active GeneratedNote 4.0 source validation status is invalid")
-    if payload.get("activation_decision") != "activate":
-        errors.append("active GeneratedNote 4.0 activation decision is invalid")
-    calls = payload.get("model_call_count")
-    if not isinstance(calls, int) or calls < 0:
-        errors.append("active GeneratedNote 4.0 model_call_count is invalid")
-    operation = payload.get("operation")
-    if operation not in {"generate", "external", "rerender"}:
-        errors.append("active GeneratedNote 4.0 operation is invalid")
-    review = payload.get("review")
-    if not isinstance(review, dict):
-        errors.append("active GeneratedNote 4.0 review metadata is invalid")
-        return errors
-    mode = review.get("mode")
-    status = review.get("status")
-    if mode not in {"none", "report", "gate"}:
-        errors.append("active GeneratedNote 4.0 review mode is invalid")
-    if status not in {"not_requested", "passed", "flagged", "unavailable"}:
-        errors.append("active GeneratedNote 4.0 review status is invalid")
-    if review.get("disclaimer") != "模型辅助审验，不等于人工确认。":
-        errors.append("active GeneratedNote 4.0 review disclaimer is invalid")
-    if mode == "none" and status != "not_requested":
-        errors.append("active GeneratedNote 4.0 none review mode has invalid status")
-    if mode in {"report", "gate"} and status == "not_requested":
-        errors.append("active GeneratedNote 4.0 requested review has no status")
-    if mode == "gate" and status != "passed":
-        errors.append(
-            "active GeneratedNote 4.0 gated activation requires a passed review"
-        )
-    if mode in {"report", "gate"} and not (bundle_dir / "note_audit.json").is_file():
-        errors.append(
-            "active GeneratedNote 4.0 requested review is missing note_audit.json"
-        )
     return errors
 
 
@@ -239,16 +95,6 @@ def iter_factual_statement_entries(
             )
         for index, statement in enumerate(note.cautions):
             yield f"/cautions/{index}", statement
-        return
-
-    if isinstance(note, GeneratedNoteV4):
-        yield "/title", note.title
-        for block_index, block in enumerate(note.blocks):
-            for item_index, item in enumerate(block.items):
-                prefix = f"/blocks/{block_index}/items/{item_index}"
-                if item.title is not None:
-                    yield f"{prefix}/title", item.title
-                yield f"{prefix}/content", item.content
         return
 
     yield "/summary", note.summary
@@ -302,7 +148,7 @@ def referenced_evidence_ids(note: AnyGeneratedNote) -> list[str]:
     """Return referenced evidence IDs once, preserving contract order."""
     ordered: list[str] = []
     candidates: list[str] = []
-    if not isinstance(note, (GeneratedNote, GeneratedNoteV4)):
+    if not isinstance(note, GeneratedNote):
         candidates.extend(note.classification_evidence_ids)
     for statement in iter_factual_statements(note):
         candidates.extend(statement.evidence_ids)
@@ -310,11 +156,6 @@ def referenced_evidence_ids(note: AnyGeneratedNote) -> list[str]:
         for resource in note.resources:
             if resource.locator is not None:
                 candidates.extend(resource.locator.evidence_ids)
-    if isinstance(note, GeneratedNoteV4):
-        for block in note.blocks:
-            for item in block.items:
-                if item.locator is not None:
-                    candidates.extend(item.locator.evidence_ids)
     for evidence_id in candidates:
         if evidence_id not in ordered:
             ordered.append(evidence_id)
@@ -335,28 +176,6 @@ def _iter_v3_non_locator_text(
             yield step.title
     for supplement in note.ai_supplements:
         yield supplement.text
-
-
-def _iter_v4_non_locator_text(note: GeneratedNoteV4) -> Iterator[str]:
-    yield note.title.text
-    for statement in iter_factual_statements(note):
-        yield statement.text
-    for supplement in note.ai_supplements:
-        yield supplement.text
-
-
-def _validate_v4_model_text(note: GeneratedNoteV4) -> list[str]:
-    """Keep model text from manufacturing renderer-owned HTML annotations."""
-    texts = [note.title.text]
-    for block in note.blocks:
-        for item in block.items:
-            if item.title is not None:
-                texts.append(item.title.text)
-            texts.append(item.content.text)
-    texts.extend(supplement.text for supplement in note.ai_supplements)
-    if any("<" in text or ">" in text for text in texts):
-        return ["GeneratedNote 4.0 model text must not contain raw HTML markup"]
-    return []
 
 
 def _validate_identity_and_evidence(
@@ -502,153 +321,6 @@ def _validate_v3_urls(
 
     if any(_URL_TOKEN_PATTERN.search(text) for text in _iter_v3_non_locator_text(note)):
         errors.append("generated note factual text must not contain a URL")
-    return errors
-
-
-def _validate_v4_evidence_lists(
-    note: GeneratedNoteV4,
-    content_pack: ContentPack,
-) -> list[str]:
-    errors: list[str] = []
-    statements = list(iter_factual_statements(note))
-    for index, statement in enumerate(statements, start=1):
-        for evidence_id in _duplicate_evidence_ids(statement.evidence_ids):
-            errors.append(
-                f"generated note factual statement {index} contains duplicate "
-                f"evidence id: {evidence_id}"
-            )
-
-    evidence_by_id = {item.id: item for item in content_pack.evidence}
-    for index, statement in enumerate(statements, start=1):
-        statement_ids = set(statement.evidence_ids)
-        for evidence_id in dict.fromkeys(statement.evidence_ids):
-            evidence = evidence_by_id.get(evidence_id)
-            if evidence is None or evidence.kind != "ocr":
-                continue
-            if evidence.frame_id is not None and evidence.frame_id not in statement_ids:
-                errors.append(
-                    f"generated note factual statement {index} cites OCR evidence "
-                    f"{evidence_id} without parent frame {evidence.frame_id}"
-                )
-
-    for block_index, block in enumerate(note.blocks, start=1):
-        for item_index, item in enumerate(block.items, start=1):
-            if item.locator is None:
-                continue
-            for evidence_id in _duplicate_evidence_ids(item.locator.evidence_ids):
-                errors.append(
-                    "generated note V4 block "
-                    f"{block_index} item {item_index} locator contains duplicate "
-                    f"evidence id: {evidence_id}"
-                )
-    return errors
-
-
-def _validate_v4_urls(
-    note: GeneratedNoteV4,
-    content_pack: ContentPack,
-) -> list[str]:
-    errors: list[str] = []
-    evidence_by_id = {item.id: item for item in content_pack.evidence}
-    for block in note.blocks:
-        for item in block.items:
-            locator = item.locator
-            if locator is None:
-                continue
-            url = locator.url
-            if (
-                not url.lower().startswith(("http://", "https://"))
-                or any(character.isspace() for character in url)
-                or "<" in url
-                or ">" in url
-            ):
-                errors.append("resource locator must be a safe http(s) URL")
-            cited_evidence = [
-                evidence_by_id[evidence_id]
-                for evidence_id in locator.evidence_ids
-                if evidence_id in evidence_by_id
-            ]
-            if any(
-                evidence.kind not in {"transcript", "ocr"}
-                for evidence in cited_evidence
-            ):
-                errors.append("resource locator requires transcript or OCR evidence")
-            if not any(
-                evidence.kind in {"transcript", "ocr"}
-                and evidence.text is not None
-                and url in evidence.text
-                for evidence in cited_evidence
-            ):
-                errors.append(
-                    "resource locator is not present in cited transcript or OCR evidence"
-                )
-    if any(_URL_TOKEN_PATTERN.search(text) for text in _iter_v4_non_locator_text(note)):
-        errors.append("generated note factual text must not contain a URL")
-    return errors
-
-
-def _validate_v4_template_binding(
-    note: GeneratedNoteV4,
-    template: NoteTemplate,
-) -> list[str]:
-    """Validate the immutable template identity used for reproducible rendering."""
-    errors: list[str] = []
-    if note.template_id != template.template_id:
-        errors.append("generated note template_id does not match template snapshot")
-    if note.template_sha256 != template_snapshot_sha256(template):
-        errors.append("generated note template_sha256 does not match template snapshot")
-    return errors
-
-
-def _validate_v4_template_presentation(
-    note: GeneratedNoteV4,
-    template: NoteTemplate,
-) -> list[str]:
-    errors: list[str] = []
-    sections = {section.section_id: section for section in template.sections}
-    blocks = {block.block_id: block for block in note.blocks}
-    for section in template.sections:
-        block = blocks.get(section.section_id)
-        if block is None:
-            if section.required:
-                errors.append(
-                    f"generated note is missing required template block: {section.section_id}"
-                )
-            continue
-        if block.semantic_block != section.semantic_block:
-            errors.append(
-                "generated note template block semantic type does not match: "
-                f"{section.section_id}"
-            )
-        item_count = len(block.items)
-        if item_count < section.min_items or item_count > section.max_items:
-            errors.append(
-                "generated note template block item count is outside bounds: "
-                f"{section.section_id}"
-            )
-        requires_title = section.semantic_block in {"concept_cards", "steps"}
-        if requires_title and any(item.title is None for item in block.items):
-            errors.append(
-                "generated note template block requires evidence-backed item titles: "
-                f"{section.section_id}"
-            )
-        if section.semantic_block == "steps":
-            orders = [item.order for item in block.items]
-            if orders != list(range(1, len(block.items) + 1)):
-                errors.append(
-                    "generated note template step orders must start at 1 and be "
-                    f"contiguous: {section.section_id}"
-                )
-        elif any(item.order is not None for item in block.items):
-            errors.append(
-                "generated note template block has step order outside steps: "
-                f"{section.section_id}"
-            )
-    for block in note.blocks:
-        if block.block_id not in sections:
-            errors.append(
-                f"generated note has block absent from template snapshot: {block.block_id}"
-            )
     return errors
 
 

@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from learnnest.models import ContentPack, StageStatus, TaskRecord
 from learnnest.note_models import GENERATED_NOTE_ADAPTER
+from learnnest.podcast_models import PodcastScript
+from learnnest.rendering import render_podcast_speech
 from learnnest.rendering import render_generated_note
-from learnnest.task_store import create_task, write_task_atomic
+from learnnest.standard_note_publication import (
+    publish_standard_note,
+    write_standard_note_bundle,
+)
+from learnnest.task_store import create_task, load_task, write_task_atomic
 from learnnest.validation import validate_note_markdown_text, validate_task
 
 
@@ -81,6 +88,167 @@ def test_validate_task_accepts_consistent_completed_artifacts(tmp_path: Path) ->
     write_task_atomic(tmp_path, task)
 
     assert validate_task(tmp_path) == []
+
+
+def test_validate_task_rejects_ambiguous_standard_note_artifacts(
+    tmp_path: Path,
+) -> None:
+    task_dir = _note_task_dir(tmp_path)
+    _write_content_pack(task_dir)
+    _write_json(task_dir / "transcript.json", {})
+    task = _task(
+        stages={
+            "content_pack": StageStatus.COMPLETED,
+            "note": StageStatus.COMPLETED,
+        },
+        artifacts={"content_pack": ["content_pack.json"]},
+    )
+    write_task_atomic(task_dir, task)
+    first = task_dir / "assisted-draft" / "plan-a" / "reviewed"
+    second = task_dir / "assisted-draft" / "plan-b" / "reviewed"
+    write_standard_note_bundle(
+        task_dir,
+        first,
+        task,
+        "- 第一套 [tr_0001]\n",
+        route="assisted_draft",
+        status="model_reviewed",
+    )
+    write_standard_note_bundle(
+        task_dir,
+        second,
+        task,
+        "- 第二套 [tr_0001]\n",
+        route="assisted_draft",
+        status="model_reviewed",
+    )
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "artifacts": {
+                    **task.artifacts,
+                    "note": [
+                        "assisted-draft/plan-a/reviewed/metadata.json",
+                        "assisted-draft/plan-a/reviewed/note.md",
+                        "assisted-draft/plan-b/reviewed/metadata.json",
+                        "assisted-draft/plan-b/reviewed/note.md",
+                    ],
+                }
+            }
+        ),
+    )
+
+    assert validate_task(task_dir) == [
+        "invalid standard note: active standard note metadata/bundle is missing or ambiguous"
+    ]
+
+
+def test_validate_task_checks_standard_podcast_generation_identity_and_shas(
+    tmp_path: Path,
+) -> None:
+    task_dir = _note_task_dir(tmp_path)
+    _write_content_pack(task_dir)
+    _write_json(task_dir / "transcript.json", {})
+    task = _task()
+    write_task_atomic(task_dir, task)
+    bundle = task_dir / "assisted-draft" / "reviewed"
+    body = "- 字幕 [tr_0001]\n"
+    write_standard_note_bundle(
+        task_dir,
+        bundle,
+        task,
+        body,
+        route="assisted_draft",
+        status="model_reviewed",
+    )
+    publish_standard_note(
+        task_dir,
+        bundle,
+        tmp_path,
+        provider="fake-reviewer",
+        model="fake-1",
+    )
+    task = load_task(task_dir)
+    note_sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    script = PodcastScript.model_validate(
+        {
+            "schema_version": "1.0",
+            "task_id": task.task_id,
+            "source_fingerprint": task.source_fingerprint,
+            "note_content_sha256": note_sha,
+            "title": "设置复习",
+            "segments": [
+                {
+                    "order": 1,
+                    "kind": "intro",
+                    "text": "今天复习设置。",
+                    "evidence_ids": ["tr_0001"],
+                },
+                {
+                    "order": 2,
+                    "kind": "body",
+                    "text": "打开设置。",
+                    "evidence_ids": ["tr_0001"],
+                },
+                {
+                    "order": 3,
+                    "kind": "outro",
+                    "text": "完成复习。",
+                    "evidence_ids": ["tr_0001"],
+                },
+            ],
+            "ai_supplements": [],
+        }
+    )
+    podcast_dir = task_dir / "generated_podcasts" / "run-1"
+    podcast_dir.mkdir(parents=True)
+    script_bytes = (script.model_dump_json(indent=2) + "\n").encode("utf-8")
+    speech_bytes = render_podcast_speech(script).encode("utf-8")
+    (podcast_dir / "podcast_script.json").write_bytes(script_bytes)
+    (podcast_dir / "speech.txt").write_bytes(speech_bytes)
+    _write_json(
+        podcast_dir / "generation.json",
+        {
+            "schema_version": "1.0",
+            "run_id": "run-1",
+            "provider": "fake-podcast",
+            "model": "fake-1",
+            "attempt_count": 1,
+            "status": "completed",
+            "task_id": task.task_id,
+            "source_fingerprint": task.source_fingerprint,
+            "note_content_sha256": note_sha,
+            "podcast_script_sha256": hashlib.sha256(script_bytes).hexdigest(),
+            "speech_sha256": hashlib.sha256(speech_bytes).hexdigest(),
+            "errors": [],
+        },
+    )
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "stages": {**task.stages, "podcast_script": StageStatus.COMPLETED},
+                "artifacts": {
+                    **task.artifacts,
+                    "podcast_script": [
+                        "generated_podcasts/run-1/generation.json",
+                        "generated_podcasts/run-1/podcast_script.json",
+                        "generated_podcasts/run-1/speech.txt",
+                    ],
+                },
+            }
+        ),
+    )
+
+    assert validate_task(task_dir) == []
+    generation_path = podcast_dir / "generation.json"
+    generation = json.loads(generation_path.read_text(encoding="utf-8"))
+    generation["speech_sha256"] = "0" * 64
+    _write_json(generation_path, generation)
+    assert "generation.json speech_sha256 does not match speech" in validate_task(
+        task_dir
+    )
 
 
 def test_validate_task_rejects_completed_stage_without_artifact(tmp_path: Path) -> None:

@@ -14,7 +14,6 @@ from pydantic import (
     model_validator,
 )
 
-from learnnest.note_templates import SemanticBlockKind
 from learnnest.reader_templates import ReaderSlot
 
 
@@ -298,43 +297,6 @@ class ResourceLocator(_NoteModel):
     evidence_ids: list[NonEmptyString] = Field(min_length=1)
 
 
-class SemanticBlockItem(_NoteModel):
-    """One template-owned V4 item; all visible factual text stays evidenced."""
-
-    order: int | None = Field(default=None, ge=1)
-    title: NoteStatement | None = None
-    content: NoteStatement
-    locator: ResourceLocator | None = None
-
-
-class SemanticBlock(_NoteModel):
-    """A V4 semantic block selected by the persisted template snapshot."""
-
-    block_id: NonEmptyString
-    semantic_block: SemanticBlockKind
-    items: list[SemanticBlockItem]
-
-
-class GeneratedNoteV4(_NoteModel):
-    """Template-driven GeneratedNote 4.0 contract for all new note creation."""
-
-    schema_version: Literal["4.0"]
-    task_id: NonEmptyString
-    source_fingerprint: NonEmptyString
-    template_id: NonEmptyString
-    template_sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
-    title: NoteStatement
-    blocks: list[SemanticBlock] = Field(min_length=1)
-    ai_supplements: list[AiSupplement] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def block_ids_must_be_unique(self) -> GeneratedNoteV4:
-        block_ids = [block.block_id for block in self.blocks]
-        if len(set(block_ids)) != len(block_ids):
-            raise ValueError("semantic block IDs must be unique")
-        return self
-
-
 class _GeneratedNoteV3Base(_NoteModel):
     schema_version: Literal["3.0"]
     task_id: NonEmptyString
@@ -407,17 +369,13 @@ GeneratedNoteV3 = Annotated[
     ConceptExplanationNote | ResourceShareNote | PracticalTutorialNote,
     Field(discriminator="note_type"),
 ]
-AnyGeneratedNote = GeneratedNote | GeneratedNoteV3 | GeneratedNoteV4
+AnyGeneratedNote = GeneratedNote | GeneratedNoteV3
 GENERATED_NOTE_ADAPTER = TypeAdapter(AnyGeneratedNote)
 GENERATED_NOTE_V3_ADAPTER = TypeAdapter(GeneratedNoteV3)
 
 
 def generated_note_v3_json_schema() -> dict[str, object]:
     return GENERATED_NOTE_V3_ADAPTER.json_schema()
-
-
-def generated_note_v4_json_schema() -> dict[str, object]:
-    return TypeAdapter(GeneratedNoteV4).json_schema()
 
 
 def reader_draft_json_schema() -> dict[str, object]:

@@ -54,6 +54,10 @@ from learnnest.quality_note import (
     build_quality_note_provenance,
     render_quality_note,
 )
+from learnnest.standard_note_publication import (
+    publish_standard_note,
+    write_standard_note_bundle,
+)
 from learnnest.reader_templates import (
     ReaderTemplateManifest,
     parse_reader_template,
@@ -1153,6 +1157,27 @@ def _activate_for_task(
             "plan_id": context.plan.plan_id,
             "active_path": delivery_path.relative_to(context.root).as_posix(),
         },
+    )
+    write_standard_note_bundle(
+        context.task_dir,
+        context.bundle_dir / "candidate",
+        context.task,
+        (context.bundle_dir / "candidate" / "note.md").read_text(encoding="utf-8"),
+        route="quality_note",
+        status="source_valid",
+        metadata_extras={
+            "plan_id": context.plan.plan_id,
+            "notice": "Quality gate remains authoritative for source_valid activation.",
+        },
+    )
+    publish_standard_note(
+        context.task_dir,
+        context.bundle_dir / "candidate",
+        context.root,
+        provider=task_plan.writer_provider,
+        model=task_plan.writer_model,
+        expected_route="quality_note",
+        expected_status="source_valid",
     )
     current = _task_state(state, task_plan.task_id)
     _replace_task(

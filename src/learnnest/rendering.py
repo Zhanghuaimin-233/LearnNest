@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -12,13 +11,10 @@ from learnnest.note_models import (
     AnyGeneratedNote,
     ConceptExplanationNote,
     GeneratedNote,
-    GeneratedNoteV4,
     NoteStatement,
     PracticalTutorialNote,
     ResourceShareNote,
-    SemanticBlock,
 )
-from learnnest.note_templates import NoteTemplate
 from learnnest.note_validation import referenced_evidence_ids
 from learnnest.podcast_models import PodcastScript
 from learnnest.util import format_timestamp, safe_title
@@ -151,7 +147,6 @@ def render_generated_note(
     note: AnyGeneratedNote,
     *,
     asset_prefix: str,
-    template: NoteTemplate | None = None,
 ) -> str:
     """Render one supported generated note without trusting model Markdown."""
     if isinstance(note, GeneratedNote):
@@ -159,16 +154,6 @@ def render_generated_note(
             task,
             content_pack,
             note,
-            asset_prefix=asset_prefix,
-        )
-    if isinstance(note, GeneratedNoteV4):
-        if template is None:
-            raise ValueError("GeneratedNote 4.0 rendering requires a template snapshot")
-        return _render_generated_note_v4(
-            task,
-            content_pack,
-            note,
-            template=template,
             asset_prefix=asset_prefix,
         )
     return _render_generated_note_v3(
@@ -484,140 +469,6 @@ def _render_generated_note_v3(
             f"- {_escape_markdown_text(item.text)}" for item in note.ai_supplements
         )
 
-    state.lines.extend(
-        _render_v3_trace(
-            task,
-            referenced_evidence_ids(note),
-            evidence_by_id,
-            asset_prefix=asset_prefix,
-        )
-    )
-    state.lines.extend(_render_derived_materials(task, asset_prefix=asset_prefix))
-    return "\n".join(state.lines) + "\n"
-
-
-def _append_v4_heading_fact(
-    state: _V3RenderState,
-    statement: NoteStatement,
-    *,
-    level: int = 3,
-    prefix: str = "",
-) -> None:
-    state.lines.extend(
-        [
-            f"{'#' * level} {prefix}{_escape_markdown_text(statement.text)}",
-            "",
-            _evidence_comment(statement.evidence_ids),
-            "",
-        ]
-    )
-    _append_first_use_frames(state, statement.evidence_ids)
-
-
-def _append_v4_locator(
-    state: _V3RenderState,
-    url: str,
-    evidence_ids: list[str],
-) -> None:
-    state.lines.extend(
-        [
-            f"- 访问地址：<{url}>",
-            "",
-            _evidence_comment(evidence_ids),
-            "",
-        ]
-    )
-    _append_first_use_frames(state, evidence_ids)
-
-
-def _render_generated_note_v4(
-    task: TaskRecord,
-    content_pack: ContentPack,
-    note: GeneratedNoteV4,
-    *,
-    template: NoteTemplate,
-    asset_prefix: str,
-) -> str:
-    """Render V4 only from the immutable note plus its parsed template snapshot."""
-    evidence_by_id = {item.id: item for item in content_pack.evidence}
-    frontmatter = [
-        "---",
-        f"learnnest_task_id: {note.task_id}",
-        f"learnnest_source_fingerprint: {note.source_fingerprint}",
-        f"learnnest_template_id: {note.template_id}",
-        f"learnnest_template_sha256: {note.template_sha256}",
-    ]
-    frontmatter.extend(
-        f"{key}: {json.dumps(value, ensure_ascii=False)}"
-        for key, value in template.frontmatter.items()
-    )
-    frontmatter.extend(["---", ""])
-    state = _V3RenderState(
-        lines=[
-            f"<!-- learnnest-task-id: {task.task_id} -->",
-            *frontmatter,
-            f"# {_escape_markdown_text(note.title.text)}",
-            "",
-            _evidence_comment(note.title.evidence_ids),
-            "",
-        ],
-        evidence_by_id=evidence_by_id,
-        embedded_frames=set(),
-        asset_prefix=asset_prefix,
-    )
-    _append_first_use_frames(state, note.title.evidence_ids)
-    blocks = {block.block_id: block for block in note.blocks}
-    blocks_by_semantic: dict[str, list[SemanticBlock]] = {}
-    for block in note.blocks:
-        blocks_by_semantic.setdefault(block.semantic_block, []).append(block)
-    bullet_kinds = {"cautions", "review_questions", "action_checklist"}
-    for section in template.sections:
-        block = blocks.get(section.section_id)
-        if block is None:
-            semantic_matches = blocks_by_semantic.get(section.semantic_block, [])
-            if len(semantic_matches) == 1:
-                block = semantic_matches[0]
-        if block is None or not block.items:
-            continue
-        state.lines.extend([f"## {_escape_markdown_text(section.heading)}", ""])
-        for item in block.items:
-            if section.semantic_block == "steps":
-                title = item.title or item.content
-                order = item.order or 1
-                _append_v4_heading_fact(
-                    state,
-                    title,
-                    prefix=f"{order}. ",
-                )
-                _append_fact(state, item.content)
-            else:
-                if item.title is not None:
-                    _append_v4_heading_fact(state, item.title)
-                _append_fact(
-                    state,
-                    item.content,
-                    prefix="- " if section.semantic_block in bullet_kinds else "",
-                )
-            if item.locator is not None:
-                _append_v4_locator(
-                    state,
-                    item.locator.url,
-                    item.locator.evidence_ids,
-                )
-
-    if note.ai_supplements:
-        state.lines.extend(
-            [
-                "## AI 补充",
-                "",
-                "> AI 补充，不属于视频事实。",
-                "",
-                *(
-                    f"- {_escape_markdown_text(item.text)}"
-                    for item in note.ai_supplements
-                ),
-            ]
-        )
     state.lines.extend(
         _render_v3_trace(
             task,

@@ -12,31 +12,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
-
-from learnnest.models import ContentPack, StageStatus, TaskRecord
+from learnnest.models import StageStatus, TaskRecord
 from learnnest.path_budget import assert_stage_path_budget
 from learnnest.execution import (
     begin_persisted_attempt,
     complete_persisted_attempt,
     fail_persisted_attempt,
 )
-from learnnest.note_models import GeneratedNoteV4
-from learnnest.note_templates import load_template_snapshot
-from learnnest.note_validation import (
-    parse_generated_note,
-    validate_generated_note,
-    validate_v4_bundle_provenance,
-    validate_v4_source_contract,
-)
-from learnnest.podcast_models import PodcastScript
-from learnnest.podcast_validation import validate_podcast_script
+from learnnest.podcast_generation import validate_active_podcast_bundle
 from learnnest.publication import (
     atomic_replace_bytes,
     read_audio_ownership_marker,
-    reconcile_pending_note_publication,
 )
-from learnnest.rendering import render_podcast_speech
 from learnnest.task_store import load_task, write_task_atomic
 from learnnest.tts_providers import TtsProvider, TtsProviderError
 from learnnest.util import safe_title
@@ -89,12 +76,9 @@ def _generate_and_activate_tts(
     *,
     style_instruction: str,
 ) -> TaskRecord:
-    note_recovered = _recover_note_link_publication(task_dir, output_root)
-    if note_recovered is not None:
-        return note_recovered
     recovered = reconcile_completed_tts_publication(task_dir, output_root)
     if recovered is not None:
-        return _refresh_note_links(recovered, task_dir, output_root)
+        return recovered
     context = _load_context(task_dir)
     assert_stage_path_budget(
         context.task_dir,
@@ -173,7 +157,7 @@ def _generate_and_activate_tts(
         model=provider.model,
     )
     (final / "audio.mp3").unlink(missing_ok=True)
-    return _refresh_note_links(activated, context.task_dir, output_root)
+    return activated
 
 
 class _TtsContext:
@@ -193,78 +177,13 @@ class _TtsContext:
 
 def _load_context(task_dir: Path) -> _TtsContext:
     root = task_dir.resolve()
-    task = load_task(root)
-    pack_path = _active_artifact(root, task, "content_pack", "content_pack.json")
-    note_path = _active_artifact(root, task, "note", "note.json")
-    script_path = _active_artifact(root, task, "podcast_script", "podcast_script.json")
-    speech_path = _active_artifact(root, task, "podcast_script", "speech.txt")
-    content_pack_bytes = pack_path.read_bytes()
-    content_pack = ContentPack.model_validate_json(content_pack_bytes)
-    note_bytes = note_path.read_bytes()
-    note = parse_generated_note(note_bytes.decode("utf-8"))
-    script_bytes = script_path.read_bytes()
-    speech_bytes = speech_path.read_bytes()
-    script = PodcastScript.model_validate_json(script_bytes)
-    if content_pack.task_id != task.task_id:
-        raise ValueError("active content pack task_id does not match task.json")
-    if content_pack.source_fingerprint != task.source_fingerprint:
-        raise ValueError(
-            "active content pack source_fingerprint does not match task.json"
-        )
-    if isinstance(note, GeneratedNoteV4):
-        try:
-            template = load_template_snapshot(note_path.parent / "template.json")
-        except (OSError, UnicodeError, ValidationError, ValueError):
-            note_errors = ["V4 template snapshot is invalid"]
-        else:
-            note_errors = validate_v4_source_contract(
-                note, content_pack, template=template
-            )
-            note_errors.extend(
-                validate_v4_bundle_provenance(
-                    note_path.parent,
-                    note,
-                    template,
-                    content_pack_sha256=hashlib.sha256(content_pack_bytes).hexdigest(),
-                )
-            )
-    else:
-        note_errors = validate_generated_note(note, content_pack)
-    if note_errors:
-        raise ValueError(f"active note is invalid: {'; '.join(note_errors)}")
-    podcast_errors = validate_podcast_script(
-        script,
-        content_pack,
-        hashlib.sha256(note_bytes).hexdigest(),
+    validated = validate_active_podcast_bundle(root, load_task(root))
+    return _TtsContext(
+        root,
+        validated.task,
+        validated.script_bytes,
+        validated.speech_bytes,
     )
-    if podcast_errors:
-        raise ValueError(f"active podcast is invalid: {'; '.join(podcast_errors)}")
-    expected_speech = render_podcast_speech(script).encode("utf-8")
-    if speech_bytes != expected_speech:
-        raise ValueError("active speech.txt does not match podcast_script.json")
-    return _TtsContext(root, task, script_bytes, speech_bytes)
-
-
-def _active_artifact(
-    root: Path,
-    task: TaskRecord,
-    stage: str,
-    filename: str,
-) -> Path:
-    path = next(
-        (
-            root / item
-            for item in task.artifacts.get(stage, [])
-            if Path(item).name == filename
-        ),
-        None,
-    )
-    if path is None:
-        raise ValueError(f"task has no active {filename} artifact")
-    resolved = path.resolve()
-    if not resolved.is_relative_to(root) or not resolved.is_file():
-        raise ValueError(f"active {filename} artifact is missing or outside task")
-    return resolved
 
 
 def validate_wav_bytes(content: bytes) -> None:
@@ -542,32 +461,6 @@ def reconcile_completed_tts_publication(
 
 def _json_bytes(payload: dict[str, object]) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-
-
-def _refresh_note_links(
-    task: TaskRecord,
-    task_dir: Path,
-    output_root: Path,
-) -> TaskRecord:
-    from learnnest.note_generation import rerender_and_activate_note
-
-    return rerender_and_activate_note(task_dir, output_root)
-
-
-def _recover_note_link_publication(
-    task_dir: Path,
-    output_root: Path,
-) -> TaskRecord | None:
-    task = load_task(task_dir)
-    if task.stages.get("tts") is not StageStatus.COMPLETED:
-        return None
-    if task.stages.get("publish") is StageStatus.RUNNING:
-        return reconcile_pending_note_publication(task_dir, output_root)
-    if task.stages.get("publish") is StageStatus.FAILED:
-        from learnnest.note_generation import rerender_and_activate_note
-
-        return rerender_and_activate_note(task_dir, output_root)
-    return None
 
 
 def _write_text(path: Path, content: str) -> None:

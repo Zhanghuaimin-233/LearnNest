@@ -11,14 +11,11 @@ from pathlib import Path, PurePosixPath
 from pydantic import ValidationError
 
 from learnnest.models import ContentPack, StageStatus, TaskRecord
-from learnnest.note_models import GeneratedNoteV4
-from learnnest.note_templates import load_template_snapshot
 from learnnest.note_validation import (
     parse_generated_note,
     validate_generated_note,
-    validate_v4_bundle_provenance,
-    validate_v4_source_contract,
 )
+from learnnest.podcast_generation import validate_active_podcast_bundle
 from learnnest.podcast_models import PodcastScript
 from learnnest.podcast_validation import validate_podcast_script
 from learnnest.publication import (
@@ -26,6 +23,11 @@ from learnnest.publication import (
     select_published_note_path,
 )
 from learnnest.rendering import render_podcast_script, render_podcast_speech
+from learnnest.standard_note_publication import (
+    StandardNoteBundle,
+    load_active_standard_note,
+    standard_published_note_path,
+)
 from learnnest.task_store import load_task
 from learnnest.tts_generation import probe_audio, validate_wav_bytes
 from learnnest.util import safe_title
@@ -40,10 +42,13 @@ _NOTE_EVIDENCE_COMMENT_PATTERN = re.compile(
 _NOTE_EVIDENCE_ID_PATTERN = re.compile(r"(?:tr|fr|ocr|ai)_[0-9]{4,}")
 _OBSIDIAN_EMBED_PATTERN = re.compile(r"!\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 _REQUIRED_NOTE_ARTIFACTS = ("note.json", "note.md")
+_REQUIRED_STANDARD_NOTE_ARTIFACTS = ("metadata.json", "note.md")
 _REQUIRED_PODCAST_ARTIFACTS = (
+    "generation.json",
     "podcast_script.json",
     "speech.txt",
 )
+_REQUIRED_LEGACY_PODCAST_ARTIFACTS = ("podcast_script.json", "speech.txt")
 _REQUIRED_TTS_ARTIFACTS = ("audio.json", "audio.wav")
 
 
@@ -77,18 +82,24 @@ def validate_task(task_dir: str | Path) -> list[str]:
         declared_note_artifacts = {
             Path(path).name for path in task.artifacts.get("note", [])
         }
-        for required in _REQUIRED_NOTE_ARTIFACTS:
+        required_artifacts = (
+            _REQUIRED_STANDARD_NOTE_ARTIFACTS
+            if "metadata.json" in declared_note_artifacts
+            else _REQUIRED_NOTE_ARTIFACTS
+        )
+        for required in required_artifacts:
             if required not in declared_note_artifacts:
                 errors.append(
                     f"completed note stage is missing required artifact: {required}"
                 )
 
-    _validate_required_stage_artifacts(
-        task,
-        "podcast_script",
-        _REQUIRED_PODCAST_ARTIFACTS,
-        errors,
+    podcast_required = (
+        _REQUIRED_PODCAST_ARTIFACTS
+        if "metadata.json"
+        in {Path(path).name for path in task.artifacts.get("note", [])}
+        else _REQUIRED_LEGACY_PODCAST_ARTIFACTS
     )
+    _validate_required_stage_artifacts(task, "podcast_script", podcast_required, errors)
     _validate_required_stage_artifacts(
         task,
         "tts",
@@ -98,45 +109,69 @@ def validate_task(task_dir: str | Path) -> list[str]:
 
     content_pack = _load_content_pack(task, artifact_paths, errors)
     if content_pack is not None:
-        content_pack_path = _artifact_named(
-            artifact_paths.get("content_pack", []), "content_pack.json"
-        )
-        try:
-            content_pack_sha256 = (
-                hashlib.sha256(content_pack_path.read_bytes()).hexdigest()
-                if content_pack_path is not None
-                else None
-            )
-        except OSError:
-            content_pack_sha256 = None
         _validate_evidence_artifacts(root, content_pack, errors)
         note_json_path = _artifact_named(artifact_paths.get("note", []), "note.json")
-        note_markdown_path = _artifact_named(artifact_paths.get("note", []), "note.md")
-        _validate_note_references(
-            note_json_path,
-            content_pack,
-            errors,
-            content_pack_sha256=content_pack_sha256,
-        )
+        standard_note_declared = "metadata.json" in {
+            Path(path).name for path in task.artifacts.get("note", [])
+        }
+        standard_bundle = None
+        if standard_note_declared:
+            try:
+                standard_bundle = load_active_standard_note(root)
+            except (OSError, UnicodeError, ValidationError, ValueError) as error:
+                errors.append(f"invalid standard note: {error}")
+            note_markdown_path = (
+                standard_bundle.body_path if standard_bundle is not None else None
+            )
+        else:
+            note_markdown_path = _artifact_named(
+                artifact_paths.get("note", []), "note.md"
+            )
+            _validate_note_references(
+                note_json_path,
+                content_pack,
+                errors,
+            )
         _validate_note_markdown(
             root,
             task,
             note_markdown_path,
             content_pack,
             errors,
+            require_derived_links=not standard_note_declared,
         )
-        _validate_published_note(
-            root,
-            task,
-            note_markdown_path,
-            content_pack,
-            errors,
+        if standard_bundle is not None:
+            _validate_published_standard_note(
+                root,
+                task,
+                standard_bundle,
+                errors,
+            )
+        else:
+            _validate_published_note(
+                root,
+                task,
+                note_markdown_path,
+                content_pack,
+                errors,
+            )
+        active_note_sha256 = (
+            hashlib.sha256(standard_bundle.body_bytes).hexdigest()
+            if standard_bundle is not None
+            else (
+                hashlib.sha256(note_json_path.read_bytes()).hexdigest()
+                if note_json_path is not None
+                else None
+            )
         )
         _validate_podcast_artifacts(
+            root,
             task,
             artifact_paths,
             content_pack,
             errors,
+            active_note_sha256=active_note_sha256,
+            require_generation=standard_note_declared,
         )
         _validate_tts_artifacts(
             root,
@@ -218,8 +253,6 @@ def _validate_note_references(
     note_path: Path | None,
     content_pack: ContentPack,
     errors: list[str],
-    *,
-    content_pack_sha256: str | None,
 ) -> None:
     if note_path is None or not note_path.is_file():
         return
@@ -229,37 +262,14 @@ def _validate_note_references(
     except (OSError, json.JSONDecodeError) as error:
         errors.append(f"invalid note.json: {error}")
         return
-    if isinstance(note, dict) and note.get("schema_version") in {"2.0", "3.0", "4.0"}:
+    if isinstance(note, dict) and note.get("schema_version") in {"2.0", "3.0"}:
         schema_version = note["schema_version"]
         try:
             generated_note = parse_generated_note(raw_note)
         except ValidationError as error:
             errors.append(f"invalid generated note {schema_version}: {error}")
             return
-        if isinstance(generated_note, GeneratedNoteV4):
-            snapshot_path = note_path.parent / "template.json"
-            try:
-                template = load_template_snapshot(snapshot_path)
-            except ValueError:
-                errors.append("active GeneratedNote 4.0 template snapshot is invalid")
-                return
-            errors.extend(
-                validate_v4_source_contract(
-                    generated_note,
-                    content_pack,
-                    template=template,
-                )
-            )
-            errors.extend(
-                validate_v4_bundle_provenance(
-                    note_path.parent,
-                    generated_note,
-                    template,
-                    content_pack_sha256=content_pack_sha256,
-                )
-            )
-        else:
-            errors.extend(validate_generated_note(generated_note, content_pack))
+        errors.extend(validate_generated_note(generated_note, content_pack))
         return
     known_ids = {evidence.id for evidence in content_pack.evidence}
     for evidence_id in _evidence_ids(note):
@@ -273,6 +283,8 @@ def _validate_note_markdown(
     note_path: Path | None,
     content_pack: ContentPack,
     errors: list[str],
+    *,
+    require_derived_links: bool,
 ) -> None:
     if note_path is None or not note_path.is_file():
         return
@@ -286,7 +298,8 @@ def _validate_note_markdown(
         return
 
     errors.extend(validate_note_markdown_text(task_dir, markdown, content_pack))
-    errors.extend(_validate_derived_note_links(task_dir, task, markdown))
+    if require_derived_links:
+        errors.extend(_validate_derived_note_links(task_dir, task, markdown))
 
 
 def _validate_derived_note_links(
@@ -367,13 +380,84 @@ def _validate_published_note(
     )
 
 
+def _validate_published_standard_note(
+    task_dir: Path,
+    task: TaskRecord,
+    bundle: StandardNoteBundle,
+    errors: list[str],
+) -> None:
+    if task.stages.get("publish") is not StageStatus.COMPLETED:
+        return
+    destination = standard_published_note_path(task, task_dir.parents[1])
+    if not destination.is_file():
+        errors.append(f"published Vault note is missing: {destination.name}")
+        return
+    try:
+        published_bytes = destination.read_bytes()
+    except (OSError, UnicodeError) as error:
+        errors.append(f"invalid published Vault note: {error}")
+        return
+    if published_bytes != bundle.body_bytes:
+        errors.append("published Vault note does not match active standard note bundle")
+
+
 def _validate_podcast_artifacts(
+    task_dir: Path,
     task: TaskRecord,
     artifact_paths: dict[str, list[Path]],
     content_pack: ContentPack,
     errors: list[str],
+    *,
+    active_note_sha256: str | None,
+    require_generation: bool,
 ) -> None:
     if task.stages.get("podcast_script") is not StageStatus.COMPLETED:
+        return
+    if require_generation:
+        if active_note_sha256 is None:
+            return
+        try:
+            validated = validate_active_podcast_bundle(
+                task_dir,
+                task,
+                expected_note_sha256=active_note_sha256,
+            )
+        except (OSError, UnicodeError, ValidationError, ValueError) as error:
+            message = str(error)
+            message = {
+                "active podcast generation.json note SHA does not match active standard note": "generation.json note_content_sha256 does not match active note",
+                "active podcast generation.json script SHA does not match podcast_script.json": "generation.json podcast_script_sha256 does not match script",
+                "active podcast generation.json speech SHA does not match speech.txt": "generation.json speech_sha256 does not match speech",
+                "active speech.txt does not match podcast_script.json": "speech.txt does not match podcast_script.json",
+            }.get(message, message)
+            if message.startswith("generation.json ") or message == (
+                "speech.txt does not match podcast_script.json"
+            ):
+                errors.append(message)
+            else:
+                errors.append(f"invalid podcast artifacts: {message}")
+            return
+        errors.extend(
+            validate_podcast_script(
+                validated.script,
+                content_pack,
+                active_note_sha256,
+            )
+        )
+        markdown_path = _artifact_named(
+            artifact_paths.get("podcast_script", []),
+            "podcast_script.md",
+        )
+        if markdown_path is not None:
+            try:
+                markdown = markdown_path.read_bytes()
+            except OSError as error:
+                errors.append(f"invalid podcast artifacts: {error}")
+            else:
+                if markdown != render_podcast_script(validated.script).encode("utf-8"):
+                    errors.append(
+                        "podcast_script.md does not match podcast_script.json"
+                    )
         return
     script_path = _artifact_named(
         artifact_paths.get("podcast_script", []),
@@ -387,17 +471,15 @@ def _validate_podcast_artifacts(
         artifact_paths.get("podcast_script", []),
         "podcast_script.md",
     )
-    note_path = _artifact_named(artifact_paths.get("note", []), "note.json")
-    if script_path is None or speech_path is None or note_path is None:
+    if script_path is None or speech_path is None or active_note_sha256 is None:
         return
     try:
         script = PodcastScript.model_validate_json(script_path.read_bytes())
-        note_sha = hashlib.sha256(note_path.read_bytes()).hexdigest()
         speech = speech_path.read_bytes()
     except (OSError, UnicodeError, ValidationError, ValueError) as error:
         errors.append(f"invalid podcast artifacts: {error}")
         return
-    errors.extend(validate_podcast_script(script, content_pack, note_sha))
+    errors.extend(validate_podcast_script(script, content_pack, active_note_sha256))
     if speech != render_podcast_speech(script).encode("utf-8"):
         errors.append("speech.txt does not match podcast_script.json")
     if markdown_path is not None:

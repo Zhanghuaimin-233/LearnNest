@@ -21,6 +21,11 @@ from learnnest.assisted_note_models import (
     AssistedTaskState,
 )
 from learnnest.models import ContentPack, StageStatus, TaskRecord
+from learnnest.standard_note_publication import (
+    publish_standard_note,
+    reconcile_standard_note_publication,
+    write_standard_note_bundle,
+)
 from learnnest.task_store import find_task_by_id
 
 _SAFE_FILE_PART = re.compile(r"[^A-Za-z0-9._-]+")
@@ -379,6 +384,15 @@ def review_assisted_plan(
                 directory="reviewed",
                 status="model_reviewed",
             )
+            publish_standard_note(
+                context.task_dir,
+                reviewed_path.parent,
+                root,
+                provider=context.plan.reviewer.provider,
+                model=context.plan.reviewer.model,
+                expected_route="assisted_draft",
+                expected_status="model_reviewed",
+            )
         except Exception as error:
             _fail_local(state, task_plan.task_id, error, plan_file)
             continue
@@ -417,6 +431,8 @@ def recover_assisted_plan(
         current = _task_state(state, task_plan.task_id)
         try:
             context = _load_context(root, plan, task_plan)
+            if current.reviewer.status == "completed":
+                reconcile_standard_note_publication(context.task_dir, root)
             if current.writer.status == "running":
                 _recover_writer_response(state, context, plan_file)
                 current = _task_state(state, task_plan.task_id)
@@ -485,26 +501,26 @@ def _load_context(
 def _persist_note(
     context: _TaskContext, *, raw_markdown: str, directory: str, status: str
 ) -> Path:
-    body = _normalized_markdown(raw_markdown)
     note_dir = context.bundle_dir / directory
     note_path = note_dir / "note.md"
-    metadata = {
-        "schema_version": "1.0",
-        "route": "assisted_draft",
-        "status": status,
-        "plan_id": context.plan.plan_id,
-        "task_id": context.task.task_id,
-        "content_pack_sha256": context.task_plan.content_pack_sha256,
-        "dossier_sha256": context.task_plan.dossier_sha256,
-        "writer": context.plan.writer.model_dump(mode="json"),
-        "reviewer": context.plan.reviewer.model_dump(mode="json"),
-        "notice": "Model-reviewed Markdown is not source_valid or human-reviewed.",
-    }
-    _write_json_atomic(note_dir / "metadata.json", metadata)
-    _write_text_atomic(
-        note_path,
+    body = (
         "<!-- LearnNest: assisted_draft; model_reviewed is not source_valid or human-reviewed. -->\n\n"
-        + body,
+        + _normalized_markdown(raw_markdown)
+    )
+    write_standard_note_bundle(
+        context.task_dir,
+        note_dir,
+        context.task,
+        body,
+        route="assisted_draft",
+        status=status,
+        metadata_extras={
+            "plan_id": context.plan.plan_id,
+            "dossier_sha256": context.task_plan.dossier_sha256,
+            "writer": context.plan.writer.model_dump(mode="json"),
+            "reviewer": context.plan.reviewer.model_dump(mode="json"),
+            "notice": "Model-reviewed Markdown is not source_valid or human-reviewed.",
+        },
     )
     return note_path
 
@@ -568,6 +584,15 @@ def _recover_reviewer_response(
         raw_markdown=response_path.read_text(encoding="utf-8"),
         directory="reviewed",
         status="model_reviewed",
+    )
+    publish_standard_note(
+        context.task_dir,
+        reviewed_path.parent,
+        context.root,
+        provider=context.plan.reviewer.provider,
+        model=context.plan.reviewer.model,
+        expected_route="assisted_draft",
+        expected_status="model_reviewed",
     )
     _set_role(
         state,

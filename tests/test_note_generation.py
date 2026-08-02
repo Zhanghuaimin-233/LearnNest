@@ -622,54 +622,6 @@ def test_new_external_activation_rejects_v2(tmp_path: Path) -> None:
     assert load_task(task_dir).artifacts == task.artifacts
 
 
-def test_legacy_external_activation_rejects_v4_without_leaving_a_temp_bundle(
-    tmp_path: Path,
-) -> None:
-    from learnnest.note_generation import (
-        NoteGenerationError,
-        build_external_note_bundle,
-    )
-
-    task_dir, task = task_workspace(tmp_path)
-    external = tmp_path / "v4-note.json"
-    external.write_text(
-        json.dumps(
-            {
-                "schema_version": "4.0",
-                "task_id": task.task_id,
-                "source_fingerprint": task.source_fingerprint,
-                "template_id": "concept-explanation",
-                "template_sha256": "0" * 64,
-                "title": {"text": "V4 笔记", "evidence_ids": ["tr_0001"]},
-                "blocks": [
-                    {
-                        "block_id": "core",
-                        "semantic_block": "core_facts",
-                        "items": [
-                            {
-                                "content": {
-                                    "text": "证据事实。",
-                                    "evidence_ids": ["tr_0001"],
-                                }
-                            }
-                        ],
-                    }
-                ],
-                "ai_supplements": [],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(NoteGenerationError, match="GeneratedNote 3.0") as captured:
-        build_external_note_bundle(task_dir, external, run_id="external-v4")
-
-    assert captured.value.bundle_path.is_dir()
-    assert not (task_dir / "generated_notes" / ".external-v4.tmp").exists()
-    assert load_task(task_dir).artifacts == task.artifacts
-
-
 @pytest.mark.parametrize(
     ("cli_value", "expected_source"),
     [("auto", "external"), ("resource", "cli")],

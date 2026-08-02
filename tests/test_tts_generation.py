@@ -128,6 +128,29 @@ def workspace(tmp_path: Path) -> Path:
     (podcast / "speech.txt").write_bytes(
         render_podcast_speech(PodcastScript.model_validate(script)).encode("utf-8")
     )
+    script_bytes = (podcast / "podcast_script.json").read_bytes()
+    speech_bytes = (podcast / "speech.txt").read_bytes()
+    (podcast / "generation.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "run_id": "podcast-run",
+                "provider": "fake-podcast",
+                "model": "fake-1",
+                "status": "completed",
+                "task_id": "20260711-a1b2c3d4",
+                "source_fingerprint": "a1b2c3d4",
+                "note_content_sha256": hashlib.sha256(note_bytes).hexdigest(),
+                "podcast_script_sha256": hashlib.sha256(script_bytes).hexdigest(),
+                "speech_sha256": hashlib.sha256(speech_bytes).hexdigest(),
+                "errors": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     write_task_atomic(
         task_dir,
         TaskRecord(
@@ -150,6 +173,7 @@ def workspace(tmp_path: Path) -> Path:
                     "generated_notes/note-run/note.md",
                 ],
                 "podcast_script": [
+                    "generated_podcasts/podcast-run/generation.json",
                     "generated_podcasts/podcast-run/podcast_script.json",
                     "generated_podcasts/podcast-run/podcast_script.md",
                     "generated_podcasts/podcast-run/speech.txt",
@@ -204,74 +228,19 @@ def _write_v3_note_and_bound_podcast(task_dir: Path) -> bytes:
         json.dumps(script_payload, ensure_ascii=False),
         encoding="utf-8",
     )
-    return note_bytes
-
-
-def _write_v4_note_and_bound_podcast(task_dir: Path) -> bytes:
-    from learnnest.note_templates import (
-        builtin_template,
-        template_snapshot_json,
-        template_snapshot_sha256,
+    generation_path = (
+        task_dir / "generated_podcasts" / "podcast-run" / "generation.json"
     )
-
-    template = builtin_template("concept-explanation")
-    note_payload = {
-        "schema_version": "4.0",
-        "task_id": "20260711-a1b2c3d4",
-        "source_fingerprint": "a1b2c3d4",
-        "template_id": template.template_id,
-        "template_sha256": template_snapshot_sha256(template),
-        "title": {"text": "模板笔记", "evidence_ids": ["tr_0001"]},
-        "blocks": [
-            {
-                "block_id": "core",
-                "semantic_block": "core_facts",
-                "items": [
-                    {
-                        "content": {
-                            "text": "打开设置。",
-                            "evidence_ids": ["tr_0001"],
-                        }
-                    }
-                ],
-            },
-            {
-                "block_id": "concepts",
-                "semantic_block": "concept_cards",
-                "items": [
-                    {
-                        "title": {
-                            "text": "设置",
-                            "evidence_ids": ["tr_0001"],
-                        },
-                        "content": {
-                            "text": "保存配置。",
-                            "evidence_ids": ["tr_0002"],
-                        },
-                    }
-                ],
-            },
-            {
-                "block_id": "review",
-                "semantic_block": "review_questions",
-                "items": [],
-            },
-        ],
-        "ai_supplements": [],
-    }
-    note_dir = task_dir / "generated_notes" / "note-run"
-    note_bytes = json.dumps(note_payload, ensure_ascii=False).encode("utf-8")
-    (note_dir / "note.json").write_bytes(note_bytes)
-    (note_dir / "template.json").write_text(
-        template_snapshot_json(template), encoding="utf-8"
-    )
-    script_path = (
-        task_dir / "generated_podcasts" / "podcast-run" / "podcast_script.json"
-    )
-    script_payload = json.loads(script_path.read_text(encoding="utf-8"))
-    script_payload["note_content_sha256"] = hashlib.sha256(note_bytes).hexdigest()
-    script_path.write_text(
-        json.dumps(script_payload, ensure_ascii=False),
+    generation = json.loads(generation_path.read_text(encoding="utf-8"))
+    generation["note_content_sha256"] = hashlib.sha256(note_bytes).hexdigest()
+    generation["podcast_script_sha256"] = hashlib.sha256(
+        script_path.read_bytes()
+    ).hexdigest()
+    generation["speech_sha256"] = hashlib.sha256(
+        (task_dir / "generated_podcasts" / "podcast-run" / "speech.txt").read_bytes()
+    ).hexdigest()
+    generation_path.write_text(
+        json.dumps(generation, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return note_bytes
@@ -295,7 +264,7 @@ def test_tts_preflight_accepts_v3_note_without_changing_bound_sha(
     assert active_script.note_content_sha256 == hashlib.sha256(note_bytes).hexdigest()
 
 
-def test_tts_preflight_rejects_tampered_v3_active_note_bytes(
+def test_tts_preflight_ignores_note_bytes(
     tmp_path: Path,
 ) -> None:
     import learnnest.tts_generation as tts_module
@@ -305,24 +274,9 @@ def test_tts_preflight_rejects_tampered_v3_active_note_bytes(
     note_path = task_dir / "generated_notes" / "note-run" / "note.json"
     note_path.write_bytes(note_bytes + b"\n")
 
-    with pytest.raises(ValueError, match="active podcast is invalid"):
-        tts_module._load_context(task_dir)
+    context = tts_module._load_context(task_dir)
 
-
-def test_tts_preflight_rejects_v4_note_with_tampered_template_snapshot(
-    tmp_path: Path,
-) -> None:
-    import learnnest.tts_generation as tts_module
-
-    task_dir = workspace(tmp_path)
-    _write_v4_note_and_bound_podcast(task_dir)
-    snapshot_path = task_dir / "generated_notes" / "note-run" / "template.json"
-    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    snapshot["sections"][0]["heading"] = "被篡改的标题"
-    snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="active note is invalid"):
-        tts_module._load_context(task_dir)
+    assert context.speech
 
 
 def fake_audio_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -376,12 +330,26 @@ def test_generate_tts_activates_bundle_and_publishes_mp3(
     assert marker["mp3_sha256"] == hashlib.sha256(b"ID3fake-mp3").hexdigest()
     metadata = json.loads((bundle / "audio.json").read_text(encoding="utf-8"))
     assert metadata["mp3_sha256"] == marker["mp3_sha256"]
-    note_markdown = (tmp_path / "视频学习笔记" / "lesson.md").read_text(
-        encoding="utf-8"
-    )
-    assert "podcast_script.md|播客稿" in note_markdown
-    assert "[[视频学习音频/lesson--a1b2c3d4.mp3|音频]]" in note_markdown
     assert load_task(task_dir) == task
+
+
+def test_tts_does_not_read_note_or_content_pack(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from learnnest.tts_generation import generate_and_activate_tts
+
+    task_dir = workspace(tmp_path)
+    (task_dir / "content_pack.json").unlink()
+    note_dir = task_dir / "generated_notes" / "note-run"
+    (note_dir / "note.json").unlink()
+    (note_dir / "note.md").unlink()
+    fake_audio_tools(monkeypatch)
+
+    provider = FakeTtsProvider(wav_bytes())
+    task = generate_and_activate_tts(task_dir, provider, tmp_path)
+
+    assert len(provider.calls) == 1
+    assert task.stages["tts"] is StageStatus.COMPLETED
 
 
 def test_tts_provider_failure_marks_only_tts_failed(
@@ -433,7 +401,7 @@ def test_invalid_wav_never_reaches_conversion_or_publication(
     assert not (tmp_path / "视频学习音频").exists()
 
 
-def test_tts_rejects_semantically_invalid_script_before_provider_call(
+def test_tts_rejects_podcast_identity_mismatch_before_provider_call(
     tmp_path: Path,
 ) -> None:
     from learnnest.tts_generation import generate_and_activate_tts
@@ -443,14 +411,181 @@ def test_tts_rejects_semantically_invalid_script_before_provider_call(
         task_dir / "generated_podcasts" / "podcast-run" / "podcast_script.json"
     )
     payload = json.loads(script_path.read_text(encoding="utf-8"))
-    payload["segments"][1]["evidence_ids"] = ["tr_9999"]
+    payload["task_id"] = "another-task"
     script_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     provider = FakeTtsProvider(wav_bytes())
 
-    with pytest.raises(ValueError, match="active podcast is invalid"):
+    with pytest.raises(ValueError, match="active podcast task_id"):
         generate_and_activate_tts(task_dir, provider, tmp_path)
 
     assert provider.calls == []
+
+
+def test_tts_rejects_tampered_speech_before_provider_call(tmp_path: Path) -> None:
+    from learnnest.tts_generation import generate_and_activate_tts
+
+    task_dir = workspace(tmp_path)
+    speech_path = task_dir / "generated_podcasts" / "podcast-run" / "speech.txt"
+    speech_path.write_text("被篡改的口播稿。\n", encoding="utf-8")
+    provider = FakeTtsProvider(wav_bytes())
+
+    with pytest.raises(ValueError, match="speech.txt"):
+        generate_and_activate_tts(task_dir, provider, tmp_path)
+
+    assert provider.calls == []
+
+
+def test_tts_rejects_tampered_podcast_generation_sha_before_provider_call(
+    tmp_path: Path,
+) -> None:
+    from learnnest.tts_generation import generate_and_activate_tts
+
+    task_dir = workspace(tmp_path)
+    generation_path = (
+        task_dir / "generated_podcasts" / "podcast-run" / "generation.json"
+    )
+    generation = json.loads(generation_path.read_text(encoding="utf-8"))
+    generation["speech_sha256"] = "0" * 64
+    generation_path.write_text(
+        json.dumps(generation, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    provider = FakeTtsProvider(wav_bytes())
+
+    with pytest.raises(ValueError, match="generation.json speech SHA"):
+        generate_and_activate_tts(task_dir, provider, tmp_path)
+
+    assert provider.calls == []
+
+
+def test_tts_rejects_generation_note_sha_mismatch_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from learnnest.tts_generation import generate_and_activate_tts
+
+    task_dir = workspace(tmp_path)
+    fake_audio_tools(monkeypatch)
+    generation_path = (
+        task_dir / "generated_podcasts" / "podcast-run" / "generation.json"
+    )
+    generation = json.loads(generation_path.read_text(encoding="utf-8"))
+    generation["note_content_sha256"] = "0" * 64
+    generation_path.write_text(
+        json.dumps(generation, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    provider = FakeTtsProvider(wav_bytes())
+
+    with pytest.raises(ValueError, match="note"):
+        generate_and_activate_tts(task_dir, provider, tmp_path)
+
+    assert provider.calls == []
+
+
+def test_tts_rejects_missing_podcast_generation_before_provider_call(
+    tmp_path: Path,
+) -> None:
+    from learnnest.tts_generation import generate_and_activate_tts
+
+    task_dir = workspace(tmp_path)
+    task = load_task(task_dir)
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "artifacts": {
+                    **task.artifacts,
+                    "podcast_script": [
+                        "generated_podcasts/podcast-run/podcast_script.json",
+                        "generated_podcasts/podcast-run/speech.txt",
+                    ],
+                }
+            }
+        ),
+    )
+    provider = FakeTtsProvider(wav_bytes())
+
+    with pytest.raises(ValueError, match="generation.json"):
+        generate_and_activate_tts(task_dir, provider, tmp_path)
+
+    assert provider.calls == []
+
+
+def test_tts_rejects_synchronously_tampered_script_and_speech_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from learnnest.tts_generation import generate_and_activate_tts
+
+    task_dir = workspace(tmp_path)
+    fake_audio_tools(monkeypatch)
+    script_path = (
+        task_dir / "generated_podcasts" / "podcast-run" / "podcast_script.json"
+    )
+    speech_path = task_dir / "generated_podcasts" / "podcast-run" / "speech.txt"
+    payload = json.loads(script_path.read_text(encoding="utf-8"))
+    payload["title"] = "同步篡改后的播客"
+    tampered_script = PodcastScript.model_validate(payload)
+    script_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    speech_path.write_bytes(render_podcast_speech(tampered_script).encode("utf-8"))
+    provider = FakeTtsProvider(wav_bytes())
+
+    with pytest.raises(ValueError, match="generation.json"):
+        generate_and_activate_tts(task_dir, provider, tmp_path)
+
+    assert provider.calls == []
+
+
+@pytest.mark.parametrize(
+    ("podcast_artifacts", "message"),
+    [
+        (
+            [
+                "generated_podcasts/podcast-run/generation.json",
+                "generated_podcasts/podcast-run/podcast_script.json",
+            ],
+            "speech.txt",
+        ),
+        (
+            [
+                "generated_podcasts/podcast-run/generation.json",
+                "../podcast_script.json",
+                "generated_podcasts/podcast-run/speech.txt",
+            ],
+            "outside task",
+        ),
+        (
+            [
+                "../generation.json",
+                "generated_podcasts/podcast-run/podcast_script.json",
+                "generated_podcasts/podcast-run/speech.txt",
+            ],
+            "outside task",
+        ),
+    ],
+)
+def test_tts_rejects_missing_or_escaping_podcast_artifact(
+    tmp_path: Path,
+    podcast_artifacts: list[str],
+    message: str,
+) -> None:
+    import learnnest.tts_generation as tts_module
+
+    task_dir = workspace(tmp_path)
+    task = load_task(task_dir)
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "artifacts": {
+                    **task.artifacts,
+                    "podcast_script": podcast_artifacts,
+                }
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        tts_module._load_context(task_dir)
 
 
 def test_tts_publish_recovers_without_a_second_provider_call(

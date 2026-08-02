@@ -193,7 +193,7 @@ def generate_model_reviewed_tts(
     delivery_dir: Path,
     style_instruction: str,
 ) -> Path:
-    """Make exactly one TTS call and publish a route-labeled MP3 without a V4 note."""
+    """Make exactly one TTS call and publish a route-labeled MP3."""
     directory = delivery_dir / "tts"
     if directory.exists():
         metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))

@@ -58,21 +58,11 @@ from learnnest.index import (
     rebuild_index,
 )
 from learnnest.locks import LockUnavailable, schedule_lock, task_lock
-from learnnest.note_generation import (
-    build_and_activate_external_v4_note,
-    generate_and_activate_v4_note,
-    rerender_and_activate_note,
-    validate_external_v4_note,
-)
 from learnnest.note_providers import (
     DEFAULT_NOTE_SAFE_INPUT_TOKENS,
-    MimoNoteProvider,
-    MimoNoteReviewer,
     MimoQualityNoteProvider,
     OpenAICompatibleAssistedNoteProvider,
     OpenAICompatibleChatConfig,
-    OpenAICompatibleNoteProvider,
-    OpenAICompatibleNoteReviewer,
     OpenAICompatibleQualityNoteProvider,
     probe_openai_compatible_writer,
 )
@@ -87,11 +77,6 @@ from learnnest.provider_profiles import (
     set_authorization,
 )
 from learnnest.quality_execution_models import WriterCapabilitySnapshot
-from learnnest.note_templates import (
-    load_template_file,
-    resolve_note_template,
-    template_snapshot_sha256,
-)
 from learnnest.quality_note_generation import (
     create_quality_plan,
     generate_quality_note_plan,
@@ -143,7 +128,6 @@ download_app = typer.Typer(no_args_is_help=True)
 batch_app = typer.Typer(no_args_is_help=True)
 scan_app = typer.Typer(no_args_is_help=True)
 schedule_app = typer.Typer(no_args_is_help=True)
-template_app = typer.Typer(no_args_is_help=True)
 flow_app = typer.Typer(no_args_is_help=True)
 layout_app = typer.Typer(no_args_is_help=True)
 quality_note_app = typer.Typer(no_args_is_help=True)
@@ -170,9 +154,6 @@ app.add_typer(
     help="Configure and inspect explicitly authorized local paid delivery.",
 )
 app.add_typer(web_app, name="web", help="Run the local task workspace in a browser.")
-app.add_typer(
-    template_app, name="template", help="Validate constrained V4 note templates."
-)
 app.add_typer(
     queue_app, name="queue", help="Inspect the derived retryable failure queue."
 )
@@ -224,25 +205,8 @@ class StageOption(StrEnum):
     PUBLISH = "publish"
 
 
-class NoteTypeOption(StrEnum):
-    """User-facing note-type requests for structured note commands."""
-
-    AUTO = "auto"
-    CONCEPT = "concept"
-    RESOURCE = "resource"
-    PRACTICAL = "practical"
-
-
-class ReviewModeOption(StrEnum):
-    """Optional V4 semantic-audit policy for an explicit note command."""
-
-    NONE = "none"
-    REPORT = "report"
-    GATE = "gate"
-
-
 class QualityReviewModeOption(StrEnum):
-    """Quality-first review policy; separate from the legacy V4 command."""
+    """Quality-first review policy."""
 
     NONE = "none"
     REPORT = "report"
@@ -529,12 +493,6 @@ def flow_run(
             help="One-shot test selector; never changes monitor cursor semantics.",
         ),
     ] = False,
-    with_note: Annotated[
-        bool,
-        typer.Option(
-            "--with-note", help="Generate a V4 note after deterministic work."
-        ),
-    ] = False,
     with_podcast: Annotated[
         bool,
         typer.Option("--with-podcast", help="Generate a podcast after the note."),
@@ -549,14 +507,6 @@ def flow_run(
             "--confirm-paid", help="Required before any requested paid stage."
         ),
     ] = False,
-    template: Annotated[
-        str,
-        typer.Option("--template", help="V4 note template ID or constrained file."),
-    ] = "concept-explanation",
-    review_mode: Annotated[
-        ReviewModeOption,
-        typer.Option("--review-mode", help="Optional V4 NoteAudit policy."),
-    ] = ReviewModeOption.NONE,
     output_root: Annotated[
         Path | None,
         typer.Option("--output-root", help="Vault root."),
@@ -566,10 +516,7 @@ def flow_run(
     if with_tts and not with_podcast:
         typer.echo("ERROR: --with-tts requires --with-podcast", err=True)
         raise typer.Exit(code=1)
-    if with_podcast and not with_note:
-        typer.echo("ERROR: --with-podcast requires --with-note", err=True)
-        raise typer.Exit(code=1)
-    paid_requested = with_note or with_podcast or with_tts
+    paid_requested = with_podcast or with_tts
     if paid_requested and not confirm_paid:
         typer.echo("ERROR: paid stages require --confirm-paid", err=True)
         raise typer.Exit(code=1)
@@ -583,7 +530,7 @@ def flow_run(
     readiness_result = preflight_runtime(
         root,
         require_douyin=True,
-        require_note=with_note,
+        require_note=False,
         require_podcast=with_podcast,
         require_tts=with_tts,
         runtime_environ=runtime_environ,
@@ -626,30 +573,8 @@ def flow_run(
                 "the selected links produced no video tasks; use individual commands "
                 "for existing tasks or choose video links"
             )
-        selected_template = (
-            resolve_note_template(template, default_id="concept-explanation")
-            if with_note
-            else None
-        )
         for task_id in downloads.task_ids:
             task_dir = _find_task_dir(task_id, root)
-            if with_note:
-                with _task_execution_lock(root, task_dir):
-                    provider, auditor, secret = _note_provider_pair(runtime_environ)
-                    with _resource_execution(root, "network", "llm"):
-                        note_result = generate_and_activate_v4_note(
-                            task_dir,
-                            provider,
-                            root,
-                            template=selected_template,
-                            review_mode=review_mode.value,
-                            auditor=auditor,
-                        )
-                    if not note_result.activated:
-                        raise RuntimeError(
-                            "note candidate was retained without activation; "
-                            "podcast generation is not started"
-                        )
             if with_podcast:
                 with _task_execution_lock(root, task_dir):
                     secret = _mimo_api_key(runtime_environ)
@@ -1614,293 +1539,6 @@ def validate(
     typer.echo(f"Valid task: {task_id}")
 
 
-@app.command("note-status")
-def note_status(
-    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
-    output_root: Annotated[
-        Path | None,
-        typer.Option(
-            "--output-root", help="Vault root; defaults to the current directory."
-        ),
-    ] = None,
-) -> None:
-    """Explain V4 candidate/source/audit/activation state without a provider call."""
-    root = _output_root(output_root)
-    task_dir = _find_task_dir(task_id, root)
-    task = load_task(task_dir)
-    active_note = next(
-        (
-            task_dir / path
-            for path in task.artifacts.get("note", [])
-            if Path(path).name == "note.json"
-        ),
-        None,
-    )
-    active_bundle = active_note.parent.resolve() if active_note is not None else None
-    bundles_root = task_dir / "generated_notes"
-    if not bundles_root.is_dir():
-        typer.echo("No generated note bundles.")
-        return
-    rows: list[tuple[str, dict[str, object], bool]] = []
-    for bundle in sorted(path for path in bundles_root.iterdir() if path.is_dir()):
-        metadata_path = bundle / "generation.json"
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        if (
-            not isinstance(metadata, dict)
-            or metadata.get("note_schema_version") != "4.0"
-        ):
-            continue
-        rows.append((bundle.name, metadata, bundle.resolve() == active_bundle))
-    if not rows:
-        typer.echo("No GeneratedNote 4.0 bundles.")
-        return
-    for run_id, metadata, is_active in rows:
-        review = metadata.get("review")
-        review_status = review.get("status") if isinstance(review, dict) else "invalid"
-        template_validation = metadata.get("template_validation")
-        template_status = (
-            template_validation.get("status")
-            if isinstance(template_validation, dict)
-            else "not_recorded"
-        )
-        typer.echo(
-            f"{run_id}: candidate={metadata.get('candidate_status')} "
-            f"source={metadata.get('source_validation_status')} "
-            f"template={template_status} "
-            f"review={review_status} "
-            f"activation={metadata.get('activation_decision')} "
-            f"active={'yes' if is_active else 'no'}"
-        )
-
-
-@template_app.command("validate")
-def validate_template(
-    template_path: Annotated[
-        Path,
-        typer.Argument(exists=True, file_okay=True, dir_okay=False, readable=True),
-    ],
-) -> None:
-    """Validate one constrained, versioned V4 JSON template without a model call."""
-    try:
-        template = load_template_file(template_path)
-    except ValueError as error:
-        typer.echo(f"ERROR: {error}", err=True)
-        raise typer.Exit(code=1) from error
-    typer.echo(
-        f"Valid template: {template.template_id} ({template_snapshot_sha256(template)})"
-    )
-
-
-@app.command()
-def note(
-    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
-    external_note: Annotated[
-        Path | None,
-        typer.Option(
-            "--external-note",
-            exists=True,
-            file_okay=True,
-            dir_okay=False,
-            readable=True,
-            help="GeneratedNote 4.0 JSON from an external Agent.",
-        ),
-    ] = None,
-    template: Annotated[
-        str | None,
-        typer.Option(
-            "--template",
-            help="Official preset ID or a constrained JSON template file.",
-        ),
-    ] = None,
-    note_type: Annotated[
-        NoteTypeOption | None,
-        typer.Option(
-            "--note-type",
-            help="Compatibility alias mapping to an official V4 template preset.",
-        ),
-    ] = None,
-    review_mode: Annotated[
-        ReviewModeOption,
-        typer.Option(
-            "--review-mode",
-            help=(
-                "none activates source-valid notes; report retains an audit; "
-                "gate requires it to pass."
-            ),
-        ),
-    ] = ReviewModeOption.NONE,
-    output_root: Annotated[
-        Path | None,
-        typer.Option(
-            "--output-root", help="Vault root; defaults to the current directory."
-        ),
-    ] = None,
-    rerender: Annotated[
-        bool,
-        typer.Option(
-            "--rerender",
-            help="Re-render the active validated note without calling a provider.",
-        ),
-    ] = False,
-    retain_debug_artifacts: Annotated[
-        bool,
-        typer.Option(
-            "--retain-debug-artifacts",
-            help="Keep V4 provider and NoteAudit raw responses in this bundle.",
-        ),
-    ] = False,
-) -> None:
-    """Generate and publish a template-driven, traceable V4 note explicitly."""
-    root = _output_root(output_root)
-    task_dir = _find_task_dir(task_id, root)
-    secret: SecretStr | None = None
-    activated = True
-    candidate_bundle: Path | None = None
-    candidate_review = "not_requested"
-    debug_options = {"retain_debug_artifacts": True} if retain_debug_artifacts else {}
-    runtime_environ = _runtime_environment()
-    try:
-        with _task_execution_lock(root, task_dir):
-            if rerender and external_note is not None:
-                raise ValueError(
-                    "--rerender and --external-note are mutually exclusive"
-                )
-            if rerender and note_type is not None:
-                raise ValueError("--rerender and --note-type are mutually exclusive")
-            if rerender and template is not None:
-                raise ValueError("--rerender and --template are mutually exclusive")
-            if rerender and review_mode is not ReviewModeOption.NONE:
-                raise ValueError("--rerender and --review-mode are mutually exclusive")
-            if rerender and retain_debug_artifacts:
-                raise ValueError(
-                    "--rerender and --retain-debug-artifacts are mutually exclusive"
-                )
-            if rerender:
-                task = rerender_and_activate_note(task_dir, root)
-            else:
-                selected_template = _resolve_v4_template(
-                    task_dir,
-                    template,
-                    note_type.value if note_type is not None else None,
-                )
-                if external_note is not None:
-                    auditor: object | None = None
-                    if review_mode is not ReviewModeOption.NONE:
-                        auditor, secret = _optional_note_auditor(runtime_environ)
-                    if auditor is None:
-                        if review_mode is ReviewModeOption.NONE:
-                            result = build_and_activate_external_v4_note(
-                                task_dir,
-                                external_note,
-                                root,
-                                template=selected_template,
-                                **debug_options,
-                            )
-                        else:
-                            result = build_and_activate_external_v4_note(
-                                task_dir,
-                                external_note,
-                                root,
-                                template=selected_template,
-                                review_mode=review_mode.value,
-                                auditor=None,
-                                **debug_options,
-                            )
-                    else:
-                        with _resource_execution(root, "network", "llm"):
-                            result = build_and_activate_external_v4_note(
-                                task_dir,
-                                external_note,
-                                root,
-                                template=selected_template,
-                                review_mode=review_mode.value,
-                                auditor=auditor,
-                                **debug_options,
-                            )
-                else:
-                    provider, auditor, secret = _note_provider_pair(runtime_environ)
-                    with _resource_execution(root, "network", "llm"):
-                        result = generate_and_activate_v4_note(
-                            task_dir,
-                            provider,
-                            root,
-                            template=selected_template,
-                            review_mode=review_mode.value,
-                            auditor=auditor,
-                            **debug_options,
-                        )
-                task = result.task
-                activated = result.activated
-                candidate_bundle = result.bundle_path
-                candidate_review = result.review_status
-    except LockUnavailable as error:
-        typer.echo(f"ERROR: task is still running: {task_id}", err=True)
-        raise typer.Exit(code=1) from error
-    except (OSError, RuntimeError, ValueError) as error:
-        typer.echo(f"ERROR: {_safe_error(error, secret)}", err=True)
-        raise typer.Exit(code=1) from error
-    if activated:
-        typer.echo(f"Generated note: {task.task_id}")
-        return
-    assert candidate_bundle is not None
-    typer.echo(
-        "Source-valid candidate retained; active note is unchanged: "
-        f"{candidate_bundle} (review={candidate_review})",
-        err=True,
-    )
-    raise typer.Exit(code=2)
-
-
-@app.command("validate-note")
-def validate_note(
-    task_id: Annotated[str, typer.Argument(help="Stable task ID from task.json.")],
-    note_json: Annotated[
-        Path,
-        typer.Argument(exists=True, file_okay=True, dir_okay=False, readable=True),
-    ],
-    note_type: Annotated[
-        NoteTypeOption | None,
-        typer.Option(
-            "--note-type",
-            help="Compatibility alias mapping to an official V4 template preset.",
-        ),
-    ] = None,
-    template: Annotated[
-        str | None,
-        typer.Option(
-            "--template",
-            help="Official preset ID or a constrained JSON template file.",
-        ),
-    ] = None,
-    output_root: Annotated[
-        Path | None,
-        typer.Option(
-            "--output-root", help="Vault root; defaults to the current directory."
-        ),
-    ] = None,
-) -> None:
-    """Validate a new external GeneratedNote 4.0 against its template contract."""
-    task_dir = _find_task_dir(task_id, _output_root(output_root))
-    selected_template = _resolve_v4_template(
-        task_dir,
-        template,
-        note_type.value if note_type is not None else None,
-    )
-    errors = validate_external_v4_note(
-        task_dir,
-        note_json,
-        template=selected_template,
-    )
-    if errors:
-        for error in errors:
-            typer.echo(f"ERROR: {error}", err=True)
-        raise typer.Exit(code=1)
-    typer.echo(f"Valid generated note: {task_id}")
-
-
 @quality_note_app.command("plan")
 def quality_note_plan(
     task_ids: Annotated[
@@ -2706,7 +2344,7 @@ def _mimo_api_key(environ: Mapping[str, str]) -> SecretStr:
 
 
 def _note_safe_input_tokens(environ: Mapping[str, str]) -> int:
-    """Read one transparent conservative provider budget for full-pack V4 calls."""
+    """Read one transparent conservative budget for note provider inputs."""
     raw = environ.get("LEARNNEST_NOTE_SAFE_INPUT_TOKENS", "").strip()
     if not raw:
         return DEFAULT_NOTE_SAFE_INPUT_TOKENS
@@ -2719,77 +2357,6 @@ def _note_safe_input_tokens(environ: Mapping[str, str]) -> int:
     if value < 1_024:
         raise ValueError("LEARNNEST_NOTE_SAFE_INPUT_TOKENS must be at least 1024")
     return value
-
-
-def _resolve_v4_template(
-    task_dir: Path,
-    reference: str | None,
-    note_type: str | None,
-):
-    """Resolve V4 template intent deterministically without a classifier call."""
-    if reference is not None and note_type is not None:
-        raise ValueError("--template and --note-type are mutually exclusive")
-    preset_by_type = {
-        "concept": "concept-explanation",
-        "concept_explanation": "concept-explanation",
-        "resource": "resource-share",
-        "resource_share": "resource-share",
-        "practical": "practical-tutorial",
-        "practical_tutorial": "practical-tutorial",
-    }
-    if note_type is not None and note_type != "auto":
-        default_id = preset_by_type[note_type]
-    else:
-        stored = load_task(task_dir).note_type_override
-        default_id = preset_by_type.get(stored or "", "concept-explanation")
-    return resolve_note_template(reference, default_id=default_id)
-
-
-def _note_provider_pair(
-    environ: Mapping[str, str],
-) -> tuple[object, object, SecretStr]:
-    safe_input_tokens = _note_safe_input_tokens(environ)
-    generic_names = (
-        "LEARNNEST_NOTE_API_KEY",
-        "LEARNNEST_NOTE_BASE_URL",
-        "LEARNNEST_NOTE_MODEL",
-    )
-    if any(name in environ for name in generic_names):
-        values = {name: environ.get(name, "").strip() for name in generic_names}
-        if not all(values.values()):
-            raise ValueError(
-                "LEARNNEST_NOTE_API_KEY, LEARNNEST_NOTE_BASE_URL, and "
-                "LEARNNEST_NOTE_MODEL must be set together"
-            )
-        if environ.get("MIMO_API_KEY", "").strip():
-            raise ValueError(
-                "generic note provider configuration cannot be combined with "
-                "MIMO_API_KEY"
-            )
-        config = OpenAICompatibleChatConfig(
-            provider_name=environ.get("LEARNNEST_NOTE_PROVIDER", "").strip()
-            or "openai-compatible",
-            model=values["LEARNNEST_NOTE_MODEL"],
-            base_url=values["LEARNNEST_NOTE_BASE_URL"],
-            api_key=SecretStr(values["LEARNNEST_NOTE_API_KEY"]),
-            json_response_mode=environ.get(
-                "LEARNNEST_NOTE_JSON_MODE", "json_object"
-            ).strip()
-            or "json_object",
-            safe_input_tokens=safe_input_tokens,
-        )
-        return (
-            OpenAICompatibleNoteProvider(config),
-            OpenAICompatibleNoteReviewer(config),
-            config.api_key,
-        )
-
-    secret = _mimo_api_key(environ)
-    return (
-        MimoNoteProvider(secret, safe_input_tokens=safe_input_tokens),
-        MimoNoteReviewer(secret, safe_input_tokens=safe_input_tokens),
-        secret,
-    )
 
 
 def _quality_note_provider(
@@ -2892,24 +2459,6 @@ def _write_local_env_value(path: Path, key: str, value: str) -> None:
     if not replaced:
         result.append(f"{key}={value}")
     path.write_text("\n".join(result) + "\n", encoding="utf-8")
-
-
-def _optional_note_auditor(
-    environ: Mapping[str, str],
-) -> tuple[object | None, SecretStr | None]:
-    """Return an auditor only when a complete note-provider configuration exists."""
-    generic_names = (
-        "LEARNNEST_NOTE_API_KEY",
-        "LEARNNEST_NOTE_BASE_URL",
-        "LEARNNEST_NOTE_MODEL",
-    )
-    if (
-        any(name in environ for name in generic_names)
-        or environ.get("MIMO_API_KEY", "").strip()
-    ):
-        _provider, auditor, secret = _note_provider_pair(environ)
-        return auditor, secret
-    return None, None
 
 
 def _safe_error(error: Exception, secret: SecretStr | None) -> str:

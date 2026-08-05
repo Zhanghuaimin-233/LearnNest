@@ -267,3 +267,81 @@ def test_automation_tts_recovers_persisted_audio_without_a_second_provider_call(
     assert recovered.is_file()
     marker = recovered.with_suffix(".learnnest.json")
     assert '"status": "completed"' in marker.read_text(encoding="utf-8")
+
+
+def test_automation_tts_refuses_tampered_cached_mp3_without_republishing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import learnnest.automation_delivery as delivery
+    from learnnest.automation_delivery import PodcastArtifact, ReviewedMarkdownSource
+
+    pack = ContentPack(
+        task_id="20260805-automation-tamper",
+        source_fingerprint="tamper-fingerprint",
+        evidence=[],
+    )
+    source = ReviewedMarkdownSource(
+        task_id=pack.task_id,
+        task_dir=tmp_path / "task",
+        content_pack=pack,
+        content_pack_sha256="pack",
+        markdown="# reviewed\n",
+        markdown_sha256="markdown",
+        plan_id="plan",
+        dossier_sha256="dossier",
+    )
+    podcast = PodcastArtifact(
+        directory=tmp_path / "podcast",
+        script=None,  # type: ignore[arg-type]
+        speech="同一份已验证的 speech.txt。",
+        script_sha256="script",
+        speech_sha256="speech",
+    )
+
+    class Provider:
+        name = "fake"
+        model = "fake"
+        voice = "fake"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def synthesize(self, speech: str, style: str) -> bytes:
+            self.calls += 1
+            return b"wav"
+
+    monkeypatch.setattr(delivery, "validate_wav_bytes", lambda content: None)
+    monkeypatch.setattr(delivery, "probe_audio", lambda path: {"ok": True})
+    monkeypatch.setattr(
+        delivery,
+        "convert_wav_to_mp3",
+        lambda source, destination: destination.write_bytes(b"mp3"),
+    )
+    first_provider = Provider()
+    published = delivery.generate_model_reviewed_tts(
+        source,
+        podcast,
+        first_provider,
+        output_root=tmp_path,
+        delivery_dir=tmp_path / "delivery",
+        style_instruction="自然",
+    )
+    marker = published.with_suffix(".learnnest.json")
+    original_published = published.read_bytes()
+    original_marker = marker.read_bytes()
+    (tmp_path / "delivery" / "tts" / "audio.mp3").write_bytes(b"tampered")
+    recovery_provider = Provider()
+
+    with pytest.raises(ValueError, match="cached TTS"):
+        delivery.generate_model_reviewed_tts(
+            source,
+            podcast,
+            recovery_provider,
+            output_root=tmp_path,
+            delivery_dir=tmp_path / "delivery",
+            style_instruction="自然",
+        )
+
+    assert recovery_provider.calls == 0
+    assert published.read_bytes() == original_published
+    assert marker.read_bytes() == original_marker

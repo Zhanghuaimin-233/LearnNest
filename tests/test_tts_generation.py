@@ -637,6 +637,162 @@ def test_tts_publish_recovers_without_a_second_provider_call(
     assert completed_marker["status"] == "completed"
 
 
+def test_tts_recovers_a_raw_wav_persisted_before_validation_without_provider_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.tts_generation as generation
+
+    task_dir = workspace(tmp_path)
+    fake_audio_tools(monkeypatch)
+    original_validate = generation.validate_wav_bytes
+    monkeypatch.setattr(
+        generation,
+        "validate_wav_bytes",
+        lambda content: (_ for _ in ()).throw(KeyboardInterrupt("process stopped")),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="process stopped"):
+        generation.generate_and_activate_tts(
+            task_dir, FakeTtsProvider(wav_bytes()), tmp_path
+        )
+
+    raw_bundles = [
+        path
+        for path in (task_dir / "generated_audio").iterdir()
+        if path.is_dir() and (path / "audio.wav").is_file()
+    ]
+    assert len(raw_bundles) == 1
+    monkeypatch.setattr(generation, "validate_wav_bytes", original_validate)
+    recovery_provider = FakeTtsProvider(error=AssertionError("must not call provider"))
+
+    recovered = generation.generate_and_activate_tts(
+        task_dir, recovery_provider, tmp_path
+    )
+
+    assert recovery_provider.calls == []
+    bundle = task_dir / Path(recovered.artifacts["tts"][0]).parent
+    published = tmp_path / "视频学习音频" / "lesson--a1b2c3d4.mp3"
+    expected_sha256 = json.loads((bundle / "audio.json").read_text(encoding="utf-8"))[
+        "mp3_sha256"
+    ]
+    assert expected_sha256 == hashlib.sha256(published.read_bytes()).hexdigest()
+    assert (
+        json.loads(
+            published.with_suffix(".learnnest.json").read_text(encoding="utf-8")
+        )["mp3_sha256"]
+        == expected_sha256
+    )
+
+
+def test_tts_rejects_tampered_raw_cache_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.tts_generation as generation
+
+    task_dir = workspace(tmp_path)
+    fake_audio_tools(monkeypatch)
+    original_validate = generation.validate_wav_bytes
+    monkeypatch.setattr(
+        generation,
+        "validate_wav_bytes",
+        lambda content: (_ for _ in ()).throw(KeyboardInterrupt("process stopped")),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        generation.generate_and_activate_tts(
+            task_dir, FakeTtsProvider(wav_bytes()), tmp_path
+        )
+    raw_bundle = next(
+        path
+        for path in (task_dir / "generated_audio").iterdir()
+        if path.is_dir() and (path / "audio.wav").is_file()
+    )
+    (raw_bundle / "audio.wav").write_bytes(b"tampered")
+    monkeypatch.setattr(generation, "validate_wav_bytes", original_validate)
+    provider = FakeTtsProvider(error=AssertionError("must not call provider"))
+
+    with pytest.raises(generation.TtsGenerationError, match="cached WAV"):
+        generation.generate_and_activate_tts(task_dir, provider, tmp_path)
+
+    task = load_task(task_dir)
+    assert provider.calls == []
+    assert task.stages["tts"] is not StageStatus.COMPLETED
+    assert task.attempts[-1].status == "failed"
+
+
+def test_tts_rejects_cached_identity_mismatch_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.tts_generation as generation
+
+    task_dir = workspace(tmp_path)
+    fake_audio_tools(monkeypatch)
+    original_validate = generation.validate_wav_bytes
+    monkeypatch.setattr(
+        generation,
+        "validate_wav_bytes",
+        lambda content: (_ for _ in ()).throw(KeyboardInterrupt("process stopped")),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        generation.generate_and_activate_tts(
+            task_dir, FakeTtsProvider(wav_bytes()), tmp_path
+        )
+    raw_bundle = next(
+        path
+        for path in (task_dir / "generated_audio").iterdir()
+        if path.is_dir() and (path / "audio.wav").is_file()
+    )
+    metadata_path = raw_bundle / "audio.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["published_path"] = "视频学习音频/other.mp3"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    monkeypatch.setattr(generation, "validate_wav_bytes", original_validate)
+    provider = FakeTtsProvider(error=AssertionError("must not call provider"))
+
+    with pytest.raises(generation.TtsGenerationError, match="identity does not match"):
+        generation.generate_and_activate_tts(task_dir, provider, tmp_path)
+
+    task = load_task(task_dir)
+    assert provider.calls == []
+    assert task.stages["tts"] is not StageStatus.COMPLETED
+    assert task.attempts[-1].status == "failed"
+
+
+def test_tts_rejects_ambiguous_raw_cache_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.tts_generation as generation
+
+    task_dir = workspace(tmp_path)
+    fake_audio_tools(monkeypatch)
+    original_validate = generation.validate_wav_bytes
+    monkeypatch.setattr(
+        generation,
+        "validate_wav_bytes",
+        lambda content: (_ for _ in ()).throw(KeyboardInterrupt("process stopped")),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        generation.generate_and_activate_tts(
+            task_dir, FakeTtsProvider(wav_bytes()), tmp_path
+        )
+    first = next(
+        path
+        for path in (task_dir / "generated_audio").iterdir()
+        if path.is_dir() and (path / "audio.wav").is_file()
+    )
+    duplicate = first.with_name(first.name + "-duplicate")
+    duplicate.mkdir()
+    for path in first.iterdir():
+        if path.is_file():
+            (duplicate / path.name).write_bytes(path.read_bytes())
+    monkeypatch.setattr(generation, "validate_wav_bytes", original_validate)
+    provider = FakeTtsProvider(error=AssertionError("must not call provider"))
+
+    with pytest.raises(generation.TtsGenerationError, match="ambiguous"):
+        generation.generate_and_activate_tts(task_dir, provider, tmp_path)
+
+    assert provider.calls == []
+
+
 def test_tts_publish_recovers_from_a_legacy_marker_without_provider_call(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

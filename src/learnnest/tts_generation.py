@@ -76,7 +76,9 @@ def _generate_and_activate_tts(
     *,
     style_instruction: str,
 ) -> TaskRecord:
-    recovered = reconcile_completed_tts_publication(task_dir, output_root)
+    recovered = reconcile_completed_tts_publication(
+        task_dir, output_root, provider=provider
+    )
     if recovered is not None:
         return recovered
     context = _load_context(task_dir)
@@ -91,14 +93,6 @@ def _generate_and_activate_tts(
     temporary, final = _prepare_bundle(context.task_dir, run_id)
     try:
         wav = provider.synthesize(context.speech, style_instruction)
-        validate_wav_bytes(wav)
-        _write_bytes(temporary / "audio.wav", wav)
-        _validate_audio_probe(probe_audio(temporary / "audio.wav"), expected_codec=None)
-        convert_wav_to_mp3(temporary / "audio.wav", temporary / "audio.mp3")
-        _validate_audio_probe(
-            probe_audio(temporary / "audio.mp3"),
-            expected_codec="mp3",
-        )
     except Exception as error:
         message = (
             str(error)
@@ -121,6 +115,7 @@ def _generate_and_activate_tts(
     metadata = {
         "schema_version": "1.0",
         "run_id": run_id,
+        "attempt_id": context.task.active_attempt_id,
         "provider": provider.name,
         "model": provider.model,
         "voice": provider.voice,
@@ -128,17 +123,52 @@ def _generate_and_activate_tts(
         "source_fingerprint": context.task.source_fingerprint,
         "podcast_script_sha256": context.script_sha256,
         "speech_sha256": context.speech_sha256,
-        "mp3_sha256": hashlib.sha256(
-            (temporary / "audio.mp3").read_bytes()
-        ).hexdigest(),
+        "response_sha256": hashlib.sha256(wav).hexdigest(),
         "published_path": published_relative.as_posix(),
-        "status": "completed",
+        "status": "raw_wav_persisted",
     }
+    _write_bytes(temporary / "audio.wav", wav)
     _write_text(
         temporary / "audio.json",
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
     )
     os.replace(temporary, final)
+
+    try:
+        validate_wav_bytes(wav)
+        _validate_audio_probe(probe_audio(final / "audio.wav"), expected_codec=None)
+        convert_wav_to_mp3(final / "audio.wav", final / "audio.mp3")
+        _validate_audio_probe(
+            probe_audio(final / "audio.mp3"),
+            expected_codec="mp3",
+        )
+    except Exception as error:
+        message = (
+            str(error)
+            if isinstance(error, (TtsProviderError, TtsGenerationError, ValueError))
+            else f"TTS processing failed: {type(error).__name__}"
+        )
+        _write_text(
+            final / "audio.json",
+            json.dumps(
+                {**metadata, "status": "failed", "errors": [message]},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        _mark_tts_failed(context.task_dir, message)
+        raise TtsGenerationError(final, (message,)) from error
+
+    metadata = {
+        **metadata,
+        "mp3_sha256": hashlib.sha256((final / "audio.mp3").read_bytes()).hexdigest(),
+        "status": "completed",
+    }
+    _write_text(
+        final / "audio.json",
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+    )
 
     try:
         _publish_audio(
@@ -395,8 +425,10 @@ def _activate_tts_bundle(
 def reconcile_completed_tts_publication(
     task_dir: Path,
     output_root: Path,
+    *,
+    provider: TtsProvider,
 ) -> TaskRecord | None:
-    """Recover a generated bundle after publication or final task write failed."""
+    """Recover one identity-bound TTS response without a second Provider call."""
     root = task_dir.resolve()
     task = load_task(root)
     if task.stages.get("tts") not in {
@@ -409,54 +441,99 @@ def reconcile_completed_tts_publication(
     bundles_root = root / "generated_audio"
     if not bundles_root.is_dir():
         return None
-    for bundle in sorted(
-        (path for path in bundles_root.iterdir() if path.is_dir()),
-        key=lambda path: path.name,
-        reverse=True,
-    ):
-        metadata_path = bundle / "audio.json"
-        wav_path = bundle / "audio.wav"
-        mp3_path = bundle / "audio.mp3"
-        if not all(path.is_file() for path in (metadata_path, wav_path, mp3_path)):
-            continue
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            mp3_sha256 = hashlib.sha256(mp3_path.read_bytes()).hexdigest()
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        if (
-            metadata.get("status") != "completed"
-            or metadata.get("task_id") != task.task_id
-            or metadata.get("source_fingerprint") != task.source_fingerprint
-            or metadata.get("podcast_script_sha256") != context.script_sha256
-            or metadata.get("speech_sha256") != context.speech_sha256
-            or metadata.get("mp3_sha256") != mp3_sha256
-        ):
-            continue
-        published_path = metadata.get("published_path")
-        provider_name = metadata.get("provider")
-        model = metadata.get("model")
-        if not all(
-            isinstance(value, str) and value
-            for value in (published_path, provider_name, model)
-        ):
-            continue
-        assert isinstance(published_path, str)
-        destination = (output_root.resolve() / published_path).resolve()
-        if not destination.is_relative_to(output_root.resolve()):
-            continue
-        _publish_audio(task, mp3_path, destination)
-        assert isinstance(provider_name, str)
-        assert isinstance(model, str)
-        activated = _activate_tts_bundle(
-            root,
-            bundle,
-            provider_name=provider_name,
-            model=model,
+    candidates = [
+        path
+        for path in bundles_root.iterdir()
+        if path.is_dir()
+        and any(
+            (path / name).exists() for name in ("audio.json", "audio.wav", "audio.mp3")
         )
-        mp3_path.unlink(missing_ok=True)
-        return activated
-    return None
+    ]
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise TtsGenerationError(bundles_root, ("TTS recovery cache is ambiguous",))
+    bundle = candidates[0]
+    metadata_path = bundle / "audio.json"
+    wav_path = bundle / "audio.wav"
+    mp3_path = bundle / "audio.mp3"
+    if not metadata_path.is_file() or not wav_path.is_file():
+        raise TtsGenerationError(bundle, ("TTS recovery cache is incomplete",))
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        wav = wav_path.read_bytes()
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise TtsGenerationError(
+            bundle, ("TTS recovery metadata is invalid",)
+        ) from error
+    if not isinstance(metadata, dict):
+        raise TtsGenerationError(bundle, ("TTS recovery metadata is invalid",))
+    expected = {
+        "task_id": task.task_id,
+        "source_fingerprint": task.source_fingerprint,
+        "podcast_script_sha256": context.script_sha256,
+        "speech_sha256": context.speech_sha256,
+        "provider": provider.name,
+        "model": provider.model,
+        "voice": provider.voice,
+        "published_path": (
+            Path("视频学习音频") / f"{safe_title(task.title)}--{task.task_id[-8:]}.mp3"
+        ).as_posix(),
+    }
+    if any(metadata.get(key) != value for key, value in expected.items()):
+        raise TtsGenerationError(
+            bundle, ("TTS recovery cache identity does not match",)
+        )
+    attempt_id = metadata.get("attempt_id")
+    known_attempt_ids = {attempt.attempt_id for attempt in task.attempts}
+    if not isinstance(attempt_id, str) or attempt_id not in known_attempt_ids:
+        raise TtsGenerationError(bundle, ("TTS recovery cache attempt does not match",))
+    if metadata.get("response_sha256") != hashlib.sha256(wav).hexdigest():
+        raise TtsGenerationError(bundle, ("cached WAV SHA does not match",))
+    if metadata.get("status") not in {"raw_wav_persisted", "completed"}:
+        raise TtsGenerationError(bundle, ("TTS recovery cache is not resumable",))
+    try:
+        validate_wav_bytes(wav)
+        _validate_audio_probe(probe_audio(wav_path), expected_codec=None)
+    except ValueError as error:
+        raise TtsGenerationError(bundle, ("cached WAV is invalid",)) from error
+    if not mp3_path.is_file():
+        if metadata.get("status") != "raw_wav_persisted":
+            raise TtsGenerationError(bundle, ("TTS recovery cache is incomplete",))
+        convert_wav_to_mp3(wav_path, mp3_path)
+        _validate_audio_probe(probe_audio(mp3_path), expected_codec="mp3")
+        metadata = {
+            **metadata,
+            "mp3_sha256": hashlib.sha256(mp3_path.read_bytes()).hexdigest(),
+            "status": "completed",
+        }
+        _write_text(
+            metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
+        )
+    try:
+        mp3_sha256 = hashlib.sha256(mp3_path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise TtsGenerationError(bundle, ("cached MP3 is unavailable",)) from error
+    if (
+        metadata.get("status") != "completed"
+        or metadata.get("mp3_sha256") != mp3_sha256
+    ):
+        raise TtsGenerationError(bundle, ("cached MP3 SHA does not match",))
+    published_path = metadata.get("published_path")
+    if not isinstance(published_path, str) or not published_path:
+        raise TtsGenerationError(bundle, ("TTS recovery publication path is invalid",))
+    destination = (output_root.resolve() / published_path).resolve()
+    if not destination.is_relative_to(output_root.resolve()):
+        raise TtsGenerationError(bundle, ("TTS recovery publication path is invalid",))
+    _publish_audio(task, mp3_path, destination)
+    activated = _activate_tts_bundle(
+        root,
+        bundle,
+        provider_name=provider.name,
+        model=provider.model,
+    )
+    mp3_path.unlink(missing_ok=True)
+    return activated
 
 
 def _json_bytes(payload: dict[str, object]) -> bytes:

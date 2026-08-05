@@ -196,13 +196,11 @@ def generate_model_reviewed_tts(
     """Make exactly one TTS call and publish a route-labeled MP3."""
     directory = delivery_dir / "tts"
     if directory.exists():
-        metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
-        published = Path(output_root).resolve() / str(metadata["published_path"])
-        audio = directory / "audio.mp3"
-        if metadata.get("status") == "completed" and audio.is_file():
-            _publish_audio(source, audio, published, podcast)
-            return published
-        raise ValueError("model-reviewed TTS artifact is incomplete")
+        published = _validated_cached_tts_destination(
+            directory, source, podcast, output_root
+        )
+        _publish_audio(source, directory / "audio.mp3", published, podcast)
+        return published
     temporary = directory.with_name(".tts")
     temporary.mkdir(parents=True, exist_ok=False)
     try:
@@ -223,6 +221,7 @@ def generate_model_reviewed_tts(
                 **_route_metadata(source, provider=provider, status="completed"),
                 "podcast_script_sha256": podcast.script_sha256,
                 "speech_sha256": podcast.speech_sha256,
+                "mp3_sha256": _sha256((temporary / "audio.mp3").read_bytes()),
                 "published_path": relative.as_posix(),
             },
         )
@@ -239,6 +238,53 @@ def generate_model_reviewed_tts(
         raise
     destination = Path(output_root).resolve() / relative
     _publish_audio(source, directory / "audio.mp3", destination, podcast)
+    return destination
+
+
+def _validated_cached_tts_destination(
+    directory: Path,
+    source: ReviewedMarkdownSource,
+    podcast: PodcastArtifact,
+    output_root: str | Path,
+) -> Path:
+    metadata_path = directory / "metadata.json"
+    audio = directory / "audio.mp3"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        content = audio.read_bytes()
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("cached TTS artifact is invalid") from error
+    if not isinstance(metadata, dict):
+        raise ValueError("cached TTS artifact is invalid")
+    expected = {
+        "schema_version": "1.0",
+        "route": "assisted_draft",
+        "review_status": "model_reviewed",
+        "task_id": source.task_id,
+        "source_fingerprint": source.content_pack.source_fingerprint,
+        "assisted_plan_id": source.plan_id,
+        "dossier_sha256": source.dossier_sha256,
+        "content_pack_sha256": source.content_pack_sha256,
+        "note_content_sha256": source.markdown_sha256,
+        "podcast_script_sha256": podcast.script_sha256,
+        "speech_sha256": podcast.speech_sha256,
+        "status": "completed",
+        "mp3_sha256": _sha256(content),
+        "published_path": (
+            Path("视频学习音频")
+            / "assisted-draft"
+            / f"{safe_title(source.content_pack.task_id)}--{source.task_id[-8:]}.mp3"
+        ).as_posix(),
+    }
+    if any(metadata.get(key) != value for key, value in expected.items()):
+        raise ValueError("cached TTS artifact does not match its identity")
+    published_path = metadata.get("published_path")
+    if not isinstance(published_path, str) or not published_path:
+        raise ValueError("cached TTS publication path is invalid")
+    root = Path(output_root).resolve()
+    destination = (root / published_path).resolve()
+    if not destination.is_relative_to(root):
+        raise ValueError("cached TTS publication path is invalid")
     return destination
 
 

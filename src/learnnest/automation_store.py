@@ -5,16 +5,24 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from learnnest.automation_models import (
+    AutomationAttempt,
     AutomationPolicy,
     AutomationStatus,
     AutomationTaskState,
 )
+from learnnest.locks import automation_lock
+
+
+class ProviderAdmissionError(ValueError):
+    """A paid call was rejected before a Provider object could be constructed."""
 
 
 def automation_directory(output_root: str | Path) -> Path:
@@ -77,10 +85,22 @@ def authorize(
     output_root: str | Path, *, now: datetime | None = None
 ) -> AutomationStatus:
     status = _require_status(output_root)
+    from learnnest.provider_profiles import load_settings, settings_sha256
+
+    settings = load_settings(output_root)
+    current_settings_sha = settings_sha256(settings)
+    from learnnest.automation_models import AutomationBudget
+
     policy = status.policy.model_copy(
         update={
             "enabled": True,
             "authorized_at": (now or datetime.now(UTC)).astimezone(UTC),
+            "provider_settings_sha256": current_settings_sha,
+            "retries_per_stage": settings.retries_per_role,
+            "budget": AutomationBudget(
+                provider_calls_per_day=settings.global_calls_per_day,
+                budget_group_calls_per_day=settings.budget_group_calls_per_day,
+            ),
         }
     )
     return save_policy(output_root, policy)
@@ -128,6 +148,92 @@ def save_task_state(output_root: str | Path, state: AutomationTaskState) -> None
         _task_path(output_root, state.task_id, state.policy_sha256),
         state.model_dump(mode="json"),
     )
+
+
+def admit_provider_call(
+    output_root: str | Path,
+    state: AutomationTaskState,
+    *,
+    stage: str,
+    now: datetime,
+    retries_per_stage: int,
+    global_calls_per_day: int,
+    budget_group_calls_per_day: dict[str, int],
+    lock_held: bool = False,
+) -> tuple[AutomationTaskState, AutomationAttempt]:
+    """Persist one unique running paid-call fact before construction or invocation.
+
+    Every caller uses the same UTC ledger.  ``running`` is deliberately charged
+    so a process loss cannot reopen a paid opportunity.
+    """
+    if stage not in {"writer", "reviewer", "podcast", "tts"}:
+        raise ProviderAdmissionError("unknown paid provider stage")
+    _require_aware(now)
+    group = "note" if stage in {"writer", "reviewer"} else stage
+    try:
+        group_cap = int(budget_group_calls_per_day[group])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ProviderAdmissionError("provider budget policy is invalid") from error
+    context = nullcontext() if lock_held else automation_lock(output_root, timeout=1)
+    with context:
+        current = load_task_state(output_root, state.task_id, state.policy_sha256)
+        current = current or state
+        history = [item for item in current.attempts if item.stage == stage]
+        if any(item.status in {"running", "unknown"} for item in history):
+            raise ProviderAdmissionError("prior provider result is not recoverable")
+        if len(history) >= retries_per_stage + 1:
+            raise ProviderAdmissionError("provider retry limit is exhausted")
+        used, _limit, _remaining = provider_call_usage(
+            output_root,
+            current.policy_sha256,
+            now=now,
+            limit=global_calls_per_day,
+        )
+        group_used = provider_budget_group_call_usage(output_root, group, now=now)
+        if used >= global_calls_per_day or group_used >= group_cap:
+            raise ProviderAdmissionError("provider call limit is exhausted")
+        attempt = AutomationAttempt(
+            call_id=uuid.uuid4().hex,
+            stage=stage,
+            attempt=len(history) + 1,
+            status="running",
+            started_at=now,
+        )
+        updated = current.model_copy(
+            update={"blocked_reason": None, "attempts": [*current.attempts, attempt]}
+        )
+        save_task_state(output_root, updated)
+        return updated, attempt
+
+
+def finish_provider_call(
+    output_root: str | Path,
+    state: AutomationTaskState,
+    attempt: AutomationAttempt,
+    *,
+    outcome: str,
+    now: datetime,
+    safe_summary: str | None = None,
+) -> AutomationTaskState:
+    """Complete a previously admitted fact without exposing provider payloads."""
+    if outcome not in {"completed", "failed", "unknown"}:
+        raise ValueError("provider call outcome is invalid")
+    _require_aware(now)
+    attempts = [
+        item.model_copy(
+            update={
+                "status": outcome,
+                "completed_at": now,
+                "safe_summary": safe_summary,
+            }
+        )
+        if item.call_id == attempt.call_id and item.status == "running"
+        else item
+        for item in state.attempts
+    ]
+    updated = state.model_copy(update={"attempts": attempts})
+    save_task_state(output_root, updated)
+    return updated
 
 
 def list_incomplete_task_ids(
@@ -197,6 +303,86 @@ def provider_call_usage(
             )
     used = len(calls)
     return used, limit, max(0, limit - used)
+
+
+def provider_role_call_usage(
+    output_root: str | Path,
+    role: str,
+    *,
+    now: datetime,
+) -> int:
+    """Count all started paid calls for one product role on the UTC day."""
+    _require_aware(now)
+    stage = {"note_writer": "writer", "note_reviewer": "reviewer"}.get(role, role)
+    if stage not in {"writer", "reviewer", "podcast", "tts", "asr", "ocr"}:
+        raise ValueError("unknown provider role")
+    calls: set[str | tuple[str, str, int, str, int]] = set()
+    directory = automation_directory(output_root) / "tasks"
+    if directory.is_dir():
+        for path in directory.glob("*/*.json"):
+            try:
+                state = AutomationTaskState.model_validate_json(path.read_bytes())
+            except (OSError, UnicodeError, ValidationError, ValueError):
+                continue
+            calls.update(
+                attempt.call_id
+                or (
+                    state.task_id,
+                    attempt.stage,
+                    attempt.attempt,
+                    attempt.started_at.astimezone(UTC).isoformat(),
+                    position,
+                )
+                for position, attempt in enumerate(state.attempts)
+                if attempt.stage == stage
+                and attempt.started_at.astimezone(UTC).date()
+                == now.astimezone(UTC).date()
+            )
+    return len(calls)
+
+
+def provider_budget_group_call_usage(
+    output_root: str | Path,
+    group: str,
+    *,
+    now: datetime,
+) -> int:
+    """Count started paid calls for one frozen product budget group."""
+    _require_aware(now)
+    stages_by_group = {
+        "note": {"writer", "reviewer"},
+        "podcast": {"podcast"},
+        "tts": {"tts"},
+        "asr": set(),
+        "ocr": set(),
+    }
+    try:
+        stages = stages_by_group[group]
+    except KeyError as error:
+        raise ValueError("unknown provider budget group") from error
+    calls: set[str | tuple[str, str, int, str, int]] = set()
+    directory = automation_directory(output_root) / "tasks"
+    if directory.is_dir():
+        for path in directory.glob("*/*.json"):
+            try:
+                state = AutomationTaskState.model_validate_json(path.read_bytes())
+            except (OSError, UnicodeError, ValidationError, ValueError):
+                continue
+            calls.update(
+                attempt.call_id
+                or (
+                    state.task_id,
+                    attempt.stage,
+                    attempt.attempt,
+                    attempt.started_at.astimezone(UTC).isoformat(),
+                    position,
+                )
+                for position, attempt in enumerate(state.attempts)
+                if attempt.stage in stages
+                and attempt.started_at.astimezone(UTC).date()
+                == now.astimezone(UTC).date()
+            )
+    return len(calls)
 
 
 def _require_status(output_root: str | Path) -> AutomationStatus:

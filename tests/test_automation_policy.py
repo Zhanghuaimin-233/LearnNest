@@ -18,7 +18,7 @@ from learnnest.automation_store import (
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.cli import app
 from learnnest.download_queue import DownloadOutcome
-from learnnest.provider_profiles import connect
+from learnnest.provider_profiles import connect, update_limits
 from learnnest.schedule_models import ScheduleRecord
 from learnnest.schedule_store import write_schedule_atomic
 
@@ -92,10 +92,20 @@ def test_cli_configures_retry_limit_without_persisting_secret(tmp_path: Path) ->
     connect(
         tmp_path,
         name="main",
-        preset="openai-compatible",
-        endpoint="https://example.test/v1",
-        model="model-a",
-        secret_env="AUTOMATION_TEST_KEY",
+        preset="mimo",
+        secret_value="automation-test-key",
+    )
+    update_limits(
+        tmp_path,
+        retries_per_role=2,
+        global_calls_per_day=80,
+        budget_group_calls_per_day={
+            "note": 20,
+            "podcast": 20,
+            "tts": 20,
+            "asr": 20,
+            "ocr": 20,
+        },
     )
 
     result = runner.invoke(
@@ -104,8 +114,8 @@ def test_cli_configures_retry_limit_without_persisting_secret(tmp_path: Path) ->
             "automation",
             "configure",
             "douyin-favorites",
-            "--paid-retry-limit",
-            "2",
+            "--writer-connection",
+            "main",
             "--output-root",
             str(tmp_path),
         ],
@@ -119,7 +129,7 @@ def test_cli_configures_retry_limit_without_persisting_secret(tmp_path: Path) ->
     persisted = (tmp_path / ".learnnest" / "automation" / "status.json").read_text(
         encoding="utf-8"
     )
-    assert "AUTOMATION_TEST_KEY" not in persisted
+    assert "automation-test-key" not in persisted
 
 
 def test_cli_requires_explicit_paid_authorization(tmp_path: Path) -> None:
@@ -146,6 +156,18 @@ def test_automation_tick_applies_retry_setting_to_every_local_queue(
     import learnnest.cli as cli
 
     _schedule(tmp_path)
+    update_limits(
+        tmp_path,
+        retries_per_role=0,
+        global_calls_per_day=80,
+        budget_group_calls_per_day={
+            "note": 20,
+            "podcast": 20,
+            "tts": 20,
+            "asr": 20,
+            "ocr": 20,
+        },
+    )
     save_policy(
         tmp_path,
         _policy().model_copy(update={"retries_per_stage": 0}),

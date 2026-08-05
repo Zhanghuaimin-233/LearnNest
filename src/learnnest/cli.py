@@ -64,17 +64,24 @@ from learnnest.note_providers import (
     OpenAICompatibleAssistedNoteProvider,
     OpenAICompatibleChatConfig,
     OpenAICompatibleQualityNoteProvider,
-    probe_openai_compatible_writer,
 )
 from learnnest.provider_profiles import (
     PRESETS,
     ProviderConnection,
-    check_capability,
     connect as connect_provider,
     get_connection,
-    load_settings as load_provider_settings,
+    load_settings,
+    public_settings as public_provider_settings,
     profile_for_connection,
-    set_authorization,
+    set_role_binding,
+)
+from learnnest.provider_service import (
+    AdmittedAssistedProvider,
+    assisted_provider_from_snapshot,
+    assisted_snapshot_from_binding,
+    execute_direct_provider_call,
+    podcast_provider_from_snapshot,
+    tts_provider_from_snapshot,
 )
 from learnnest.quality_execution_models import WriterCapabilitySnapshot
 from learnnest.quality_note_generation import (
@@ -146,7 +153,7 @@ app.add_typer(
 app.add_typer(
     provider_app,
     name="provider",
-    help="Manage local BYOK connections and Writer capability profiles.",
+    help="Manage local BYOK product connections and role bindings.",
 )
 app.add_typer(
     automation_app,
@@ -222,84 +229,41 @@ def main() -> None:
 def provider_connect(
     preset: Annotated[
         str,
-        typer.Argument(
-            help=(
-                "mimo, openai, anthropic, gemini, deepseek, coding-plan, "
-                "or openai-compatible"
-            )
-        ),
+        typer.Argument(help="mimo, deepseek, mimo-tts, local-asr, or local-ocr"),
     ],
     name: Annotated[
         str, typer.Option("--name", help="Stable local connection name.")
     ] = "default",
     endpoint: Annotated[
-        str | None, typer.Option("--endpoint", help="Required for openai-compatible.")
+        str | None, typer.Option("--endpoint", help="Optional HTTPS endpoint override.")
     ] = None,
     model: Annotated[
         str | None, typer.Option("--model", help="Optional advanced model override.")
-    ] = None,
-    secret_env: Annotated[
-        str | None,
-        typer.Option(
-            "--secret-env", help="Secret environment variable for openai-compatible."
-        ),
-    ] = None,
-    provider_name: Annotated[
-        str | None,
-        typer.Option(
-            "--provider-name",
-            help="Optional stable name for an OpenAI-compatible connection.",
-        ),
     ] = None,
     output_root: Annotated[
         Path | None, typer.Option("--output-root", help="Vault root.")
     ] = None,
 ) -> None:
-    """Save a secret-free connection; preset connections prompt only for their key."""
+    """Save a product Provider connection with a CurrentUser-encrypted Key."""
     root = _output_root(output_root)
-    if preset != "openai-compatible" and preset not in PRESETS:
+    if preset not in PRESETS:
         typer.echo("ERROR: unknown provider preset", err=True)
         raise typer.Exit(code=1)
-    if preset == "openai-compatible" and (not endpoint or not model or not secret_env):
-        typer.echo(
-            "ERROR: openai-compatible requires --endpoint, --model, and --secret-env",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    key = typer.prompt("API key", hide_input=True)
-    if not key.strip():
-        typer.echo("ERROR: API key is required", err=True)
-        raise typer.Exit(code=1)
+    key = ""
+    if PRESETS[preset].requires_secret:
+        key = typer.prompt("API key", hide_input=True)
+        if not key.strip():
+            typer.echo("ERROR: API key is required", err=True)
+            raise typer.Exit(code=1)
     try:
         connection = connect_provider(
             root,
             name=name,
             preset=preset,
+            secret_value=key or None,
             endpoint=endpoint,
             model=model,
-            secret_env=secret_env,
-            provider_name=provider_name,
         )
-        _write_local_env_value(Path.cwd() / ".env", connection.secret_env, key)
-        if load_provider_settings(root).authorization == "automatic":
-            if connection.api_family != "openai_chat":
-                raise ValueError(
-                    "native provider capability adapters are not available in this build"
-                )
-            config = OpenAICompatibleChatConfig(
-                provider_name=connection.provider,
-                model=connection.model,
-                base_url=connection.endpoint,
-                api_key=SecretStr(key),
-            )
-            profile = check_capability(
-                root,
-                connection,
-                lambda strategy: probe_openai_compatible_writer(config, strategy),
-            )
-            typer.echo(
-                f"Capability profile: {profile.profile_id} / {profile.status} / {len(profile.attempts)} calls"
-            )
     except (OSError, RuntimeError, ValueError) as error:
         typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(code=1) from error
@@ -314,90 +278,39 @@ def provider_status(
         Path | None, typer.Option("--output-root", help="Vault root.")
     ] = None,
 ) -> None:
-    """Show local connections and profile state without provider calls."""
+    """Show secret-free product connections and bindings without provider calls."""
     root = _output_root(output_root)
     try:
-        settings = load_provider_settings(root)
-        typer.echo(f"Authorization: {settings.authorization}")
-        for name, connection in sorted(settings.connections.items()):
-            profile = profile_for_connection(root, connection)
-            state = profile.status if profile is not None else "unchecked"
-            marker = " (default)" if settings.default_connection == name else ""
+        settings = public_provider_settings(root)
+        typer.echo(f"global_calls_per_day={settings['global_calls_per_day']}")
+        for connection in settings["connections"]:
             typer.echo(
-                f"{name}{marker}: {connection.provider} / {connection.model} / {state}"
+                f"{connection['name']}: {connection['provider']} / {connection['model']} / {connection['secret_status']}"
             )
     except ValueError as error:
         typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(code=1) from error
 
 
-@provider_app.command("authorize")
-def provider_authorize(
-    mode: Annotated[str, typer.Argument(help="automatic or local-only")],
+@provider_app.command("bind")
+def provider_bind(
+    role: Annotated[
+        str,
+        typer.Argument(help="note_writer, note_reviewer, podcast, tts, asr, or ocr"),
+    ],
+    connection_name: Annotated[str, typer.Argument(help="Configured connection name")],
     output_root: Annotated[
         Path | None, typer.Option("--output-root", help="Vault root.")
     ] = None,
 ) -> None:
-    """Set whether connection changes may run the separately counted check."""
-    value = "local_only" if mode == "local-only" else mode
-    if value not in {"local_only", "automatic"}:
-        typer.echo("ERROR: authorization must be automatic or local-only", err=True)
-        raise typer.Exit(code=1)
-    settings = set_authorization(_output_root(output_root), value)  # type: ignore[arg-type]
-    typer.echo(f"Authorization: {settings.authorization}")
-
-
-@provider_app.command("check")
-def provider_check(
-    connection_name: Annotated[
-        str | None,
-        typer.Option(
-            "--connection", help="Connection name; defaults to the configured default."
-        ),
-    ] = None,
-    refresh: Annotated[
-        bool,
-        typer.Option(
-            "--refresh", help="Run again even when a verified profile exists."
-        ),
-    ] = False,
-    output_root: Annotated[
-        Path | None, typer.Option("--output-root", help="Vault root.")
-    ] = None,
-) -> None:
-    """Run at most four separately counted synthetic Writer contract calls."""
+    """Bind one workflow role to a capability-compatible connection."""
     root = _output_root(output_root)
     try:
-        connection = get_connection(root, connection_name)
-        current = profile_for_connection(root, connection)
-        if current is not None and current.status == "verified" and not refresh:
-            typer.echo(f"Capability profile: {current.profile_id} ({current.strategy})")
-            return
-        if connection.api_family != "openai_chat":
-            raise ValueError(
-                "native provider capability adapters are not available in this build"
-            )
-        environment = _runtime_environment()
-        secret = environment.get(connection.secret_env, "").strip()
-        if not secret:
-            raise ValueError(f"{connection.secret_env} is missing")
-        config = OpenAICompatibleChatConfig(
-            provider_name=connection.provider,
-            model=connection.model,
-            base_url=connection.endpoint,
-            api_key=SecretStr(secret),
-        )
-        profile = check_capability(
-            root,
-            connection,
-            lambda strategy: probe_openai_compatible_writer(config, strategy),
-        )
-    except (OSError, RuntimeError, ValueError) as error:
+        set_role_binding(root, role=role, connection_name=connection_name)  # type: ignore[arg-type]
+    except ValueError as error:
         typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(code=1) from error
-    typer.echo(
-        f"Capability profile: {profile.profile_id} / {profile.status} / {profile.strategy or 'none'} / {len(profile.attempts)} calls"
-    )
+    typer.echo(f"Bound {role} to {connection_name}")
 
 
 @app.command()
@@ -577,18 +490,28 @@ def flow_run(
             task_dir = _find_task_dir(task_id, root)
             if with_podcast:
                 with _task_execution_lock(root, task_dir):
-                    secret = _mimo_api_key(runtime_environ)
-                    with _resource_execution(root, "network", "llm"):
-                        generate_and_activate_podcast(
-                            task_dir, MimoPodcastProvider(secret), root
-                        )
+
+                    def invoke_podcast() -> object:
+                        nonlocal secret
+                        provider, secret = _podcast_provider_for_task(root, task_id)
+                        with _resource_execution(root, "network", "llm"):
+                            return generate_and_activate_podcast(
+                                task_dir, provider, root
+                            )
+
+                    execute_direct_provider_call(
+                        str(root), task_id, "podcast", invoke_podcast
+                    )
             if with_tts:
                 with _task_execution_lock(root, task_dir):
-                    secret = _mimo_api_key(runtime_environ)
-                    with _resource_execution(root, "network", "tts", "ffmpeg"):
-                        generate_and_activate_tts(
-                            task_dir, MimoTtsProvider(secret), root
-                        )
+
+                    def invoke_tts() -> object:
+                        nonlocal secret
+                        provider, secret = _tts_provider_for_task(root, task_id)
+                        with _resource_execution(root, "network", "tts", "ffmpeg"):
+                            return generate_and_activate_tts(task_dir, provider, root)
+
+                    execute_direct_provider_call(str(root), task_id, "tts", invoke_tts)
     except LockUnavailable as error:
         typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(code=1) from error
@@ -622,25 +545,6 @@ def automation_configure(
     max_items: Annotated[
         int, typer.Option("--max-items", min=1, max=20, help="Maximum videos per tick.")
     ] = 1,
-    retries_per_stage: Annotated[
-        int,
-        typer.Option(
-            "--retries-per-stage",
-            "--paid-retry-limit",
-            min=0,
-            max=3,
-            help="Automatic retries per stage; 3 retries means 4 total opportunities.",
-        ),
-    ] = 3,
-    provider_calls_per_day: Annotated[
-        int,
-        typer.Option(
-            "--provider-calls-per-day",
-            min=0,
-            max=800,
-            help="Shared UTC-day provider call count (not an amount of money).",
-        ),
-    ] = 80,
     output_root: Annotated[
         Path | None, typer.Option("--output-root", help="Vault root.")
     ] = None,
@@ -655,13 +559,17 @@ def automation_configure(
         reviewer = _assisted_connection_snapshot(
             get_connection(root, reviewer_connection or writer_connection)
         )
+        settings = load_settings(root)
         policy = AutomationPolicy(
             schedule_id=schedule_id,
             writer=writer,
             reviewer=reviewer,
             max_items_per_tick=max_items,
-            retries_per_stage=retries_per_stage,
-            budget=AutomationBudget(provider_calls_per_day=provider_calls_per_day),
+            retries_per_stage=settings.retries_per_role,
+            budget=AutomationBudget(
+                provider_calls_per_day=settings.global_calls_per_day,
+                budget_group_calls_per_day=settings.budget_group_calls_per_day,
+            ),
         )
         status = save_automation_policy(root, policy)
     except (OSError, RuntimeError, ValueError) as error:
@@ -880,13 +788,6 @@ def automation_tick(
             now=tick_now,
         )
         runtime_environ = _runtime_environment()
-        writer, secret = _assisted_note_provider(
-            runtime_environ, root, status.policy.writer
-        )
-        reviewer, secret = _assisted_note_provider(
-            runtime_environ, root, status.policy.reviewer
-        )
-        mimo_secret = _mimo_api_key(runtime_environ)
         _verify_provider_workers(runtime_environ)
         task_ids = tuple(
             dict.fromkeys(
@@ -899,13 +800,10 @@ def automation_tick(
         result = run_automation_tasks(
             root,
             task_ids,
-            AutomationProviders(
-                writer=writer,
-                reviewer=reviewer,
-                podcast=MimoPodcastProvider(mimo_secret),
-                tts=MimoTtsProvider(mimo_secret),
-            ),
             now=tick_now,
+            provider_factory=lambda task_id: _automation_providers_for_task(
+                root, task_id
+            ),
         )
     except LockUnavailable as error:
         typer.echo(f"ERROR: {error}", err=True)
@@ -1796,29 +1694,14 @@ def assisted_note_plan(
         list[str],
         typer.Argument(help="One or more stable task IDs with content packs."),
     ],
-    connection: Annotated[
-        str | None,
-        typer.Option(
-            "--connection", help="Writer connection; defaults to configured default."
-        ),
-    ] = None,
-    reviewer_connection: Annotated[
-        str | None,
-        typer.Option(
-            "--reviewer-connection", help="Optional distinct Reviewer connection."
-        ),
-    ] = None,
     output_root: Annotated[
         Path | None, typer.Option("--output-root", help="Vault root.")
     ] = None,
 ) -> None:
-    """Write an immutable assisted-draft plan without provider calls or checks."""
+    """Write a plan from role bindings frozen in the selected tasks."""
     root = _output_root(output_root)
     try:
-        writer = _assisted_connection_snapshot(get_connection(root, connection))
-        reviewer = _assisted_connection_snapshot(
-            get_connection(root, reviewer_connection or connection)
-        )
+        writer, reviewer = _assisted_snapshots_for_tasks(root, task_ids)
         plan_path = create_assisted_plan(
             root, task_ids, writer=writer, reviewer=reviewer
         )
@@ -1842,8 +1725,23 @@ def assisted_note_generate(
     secret: SecretStr | None = None
     try:
         plan = load_assisted_plan(plan_path)
-        provider, secret = _assisted_note_provider(
-            _runtime_environment(), root, plan.writer
+        task_id_by_dossier_sha256 = _assisted_dossier_task_map(plan)
+
+        def provider_factory() -> object:
+            nonlocal secret
+            provider, secret = _assisted_note_provider(
+                _runtime_environment(), root, plan.writer
+            )
+            return provider
+
+        provider = AdmittedAssistedProvider(
+            str(root),
+            task_id_by_dossier_sha256,
+            "writer",
+            name=plan.writer.provider,
+            model=plan.writer.model,
+            endpoint_identity=plan.writer.endpoint_identity,
+            provider_factory=provider_factory,
         )
         with _resource_execution(root, "network", "llm"):
             state = generate_assisted_plan(plan_path, root, provider)
@@ -1867,8 +1765,23 @@ def assisted_note_review(
     secret: SecretStr | None = None
     try:
         plan = load_assisted_plan(plan_path)
-        provider, secret = _assisted_note_provider(
-            _runtime_environment(), root, plan.reviewer
+        task_id_by_dossier_sha256 = _assisted_dossier_task_map(plan)
+
+        def provider_factory() -> object:
+            nonlocal secret
+            provider, secret = _assisted_note_provider(
+                _runtime_environment(), root, plan.reviewer
+            )
+            return provider
+
+        provider = AdmittedAssistedProvider(
+            str(root),
+            task_id_by_dossier_sha256,
+            "reviewer",
+            name=plan.reviewer.provider,
+            model=plan.reviewer.model,
+            endpoint_identity=plan.reviewer.endpoint_identity,
+            provider_factory=provider_factory,
         )
         with _resource_execution(root, "network", "llm"):
             state = review_assisted_plan(plan_path, root, provider)
@@ -1958,14 +1871,21 @@ def podcast(
                     root,
                 )
             else:
-                secret = _mimo_api_key(_runtime_environment())
-                with _resource_execution(root, "network", "llm"):
-                    task = generate_and_activate_podcast(
-                        task_dir,
-                        MimoPodcastProvider(secret),
-                        root,
-                        **debug_options,
-                    )
+
+                def invoke_provider() -> object:
+                    nonlocal secret
+                    provider, secret = _podcast_provider_for_task(root, task_id)
+                    with _resource_execution(root, "network", "llm"):
+                        return generate_and_activate_podcast(
+                            task_dir,
+                            provider,
+                            root,
+                            **debug_options,
+                        )
+
+                task = execute_direct_provider_call(
+                    str(root), task_id, "podcast", invoke_provider
+                )
     except LockUnavailable as error:
         typer.echo(f"ERROR: task is still running: {task_id}", err=True)
         raise typer.Exit(code=1) from error
@@ -1996,14 +1916,21 @@ def tts(
     typer.echo("正在请求 MiMo TTS，服务端可能需要几分钟；请勿重复执行。")
     try:
         with _task_execution_lock(root, task_dir):
-            secret = _mimo_api_key(_runtime_environment())
-            with _resource_execution(root, "network", "tts", "ffmpeg"):
-                task = generate_and_activate_tts(
-                    task_dir,
-                    MimoTtsProvider(secret),
-                    root,
-                    style_instruction=style,
-                )
+
+            def invoke_provider() -> object:
+                nonlocal secret
+                provider, secret = _tts_provider_for_task(root, task_id)
+                with _resource_execution(root, "network", "tts", "ffmpeg"):
+                    return generate_and_activate_tts(
+                        task_dir,
+                        provider,
+                        root,
+                        style_instruction=style,
+                    )
+
+            task = execute_direct_provider_call(
+                str(root), task_id, "tts", invoke_provider
+            )
     except LockUnavailable as error:
         typer.echo(f"ERROR: task is still running: {task_id}", err=True)
         raise typer.Exit(code=1) from error
@@ -2479,6 +2406,8 @@ def _assisted_connection_snapshot(
         )
     return AssistedConnectionSnapshot(
         connection_name=connection.name,
+        connection_id=connection.connection_id,
+        secret_id=connection.secret_id,
         provider=connection.provider,
         endpoint_identity=connection.endpoint.strip().rstrip("/").lower(),
         model=connection.model,
@@ -2490,24 +2419,99 @@ def _assisted_note_provider(
     environ: Mapping[str, str],
     output_root: Path,
     snapshot: AssistedConnectionSnapshot,
-) -> tuple[OpenAICompatibleAssistedNoteProvider, SecretStr]:
-    connection = get_connection(output_root, snapshot.connection_name)
-    current = _assisted_connection_snapshot(connection)
-    if current != snapshot:
-        raise ValueError(
-            "assisted provider connection no longer matches the immutable plan"
+) -> tuple[OpenAICompatibleAssistedNoteProvider, SecretStr | None]:
+    del environ
+    return assisted_provider_from_snapshot(str(output_root), snapshot), None
+
+
+def _frozen_task_binding(root: Path, task_id: str, role: str):
+    task = load_task(_find_task_dir(task_id, root))
+    try:
+        return task.provider_bindings[role]
+    except KeyError as error:
+        raise ValueError(f"task is missing frozen {role} provider binding") from error
+
+
+def _assisted_dossier_task_map(plan: object) -> dict[str, str]:
+    """Bind immutable reader-dossier identities to their planned task IDs."""
+    mapping: dict[str, str] = {}
+    for task_plan in plan.tasks:
+        dossier_sha256 = task_plan.dossier_sha256
+        if dossier_sha256 in mapping:
+            raise ValueError("assisted plan has duplicate dossier identity")
+        mapping[dossier_sha256] = task_plan.task_id
+    return mapping
+
+
+def _podcast_provider_for_task(
+    root: Path, task_id: str
+) -> tuple[object, SecretStr | None]:
+    task = load_task(_find_task_dir(task_id, root))
+    if "podcast" in task.provider_bindings:
+        return (
+            podcast_provider_from_snapshot(
+                str(root), task.provider_bindings["podcast"]
+            ),
+            None,
         )
-    secret_value = environ.get(connection.secret_env, "").strip()
-    if not secret_value:
-        raise ValueError(f"{connection.secret_env} is missing")
-    config = OpenAICompatibleChatConfig(
-        provider_name=connection.provider,
-        model=connection.model,
-        base_url=connection.endpoint,
-        api_key=SecretStr(secret_value),
-        safe_input_tokens=_note_safe_input_tokens(environ),
+    if task.provider_bindings:
+        raise ValueError("task is missing frozen podcast provider binding")
+    secret = _mimo_api_key(_runtime_environment())
+    return MimoPodcastProvider(secret), secret
+
+
+def _tts_provider_for_task(root: Path, task_id: str) -> tuple[object, SecretStr | None]:
+    task = load_task(_find_task_dir(task_id, root))
+    if "tts" in task.provider_bindings:
+        return (
+            tts_provider_from_snapshot(str(root), task.provider_bindings["tts"]),
+            None,
+        )
+    if task.provider_bindings:
+        raise ValueError("task is missing frozen tts provider binding")
+    secret = _mimo_api_key(_runtime_environment())
+    return MimoTtsProvider(secret), secret
+
+
+def _assisted_snapshots_for_tasks(
+    root: Path, task_ids: list[str]
+) -> tuple[AssistedConnectionSnapshot, AssistedConnectionSnapshot]:
+    if not task_ids:
+        raise ValueError("assisted plan requires at least one task")
+    pairs = [
+        (
+            assisted_snapshot_from_binding(
+                _frozen_task_binding(root, task_id, "note_writer")
+            ),
+            assisted_snapshot_from_binding(
+                _frozen_task_binding(root, task_id, "note_reviewer")
+            ),
+        )
+        for task_id in task_ids
+    ]
+    writer, reviewer = pairs[0]
+    if any(pair != (writer, reviewer) for pair in pairs[1:]):
+        raise ValueError("assisted plan tasks do not share frozen role bindings")
+    return writer, reviewer
+
+
+def _automation_providers_for_task(root: Path, task_id: str) -> AutomationProviders:
+    task = load_task(_find_task_dir(task_id, root))
+    try:
+        writer = task.provider_bindings["note_writer"]
+        reviewer = task.provider_bindings["note_reviewer"]
+        podcast = task.provider_bindings["podcast"]
+        tts = task.provider_bindings["tts"]
+    except KeyError as error:
+        raise ValueError(
+            "automation task is missing frozen Provider role bindings"
+        ) from error
+    return AutomationProviders(
+        writer=assisted_provider_from_snapshot(str(root), writer),
+        reviewer=assisted_provider_from_snapshot(str(root), reviewer),
+        podcast=podcast_provider_from_snapshot(str(root), podcast),
+        tts=tts_provider_from_snapshot(str(root), tts),
     )
-    return OpenAICompatibleAssistedNoteProvider(config), config.api_key
 
 
 def _quality_state_summary(state: object) -> str:

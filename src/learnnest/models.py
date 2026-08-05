@@ -37,6 +37,21 @@ StageName = Literal[
 TaskProfile = Literal["evidence", "note", "full"]
 
 
+class ProviderBindingSnapshot(BaseModel):
+    """Secret-free Provider identity frozen when the task is created."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    capability: Literal["asr", "ocr", "llm", "tts"]
+    connection_id: str = Field(min_length=1)
+    secret_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    provider: str = Field(min_length=1)
+    endpoint: str | None = Field(default=None, min_length=1)
+    model: str = Field(min_length=1)
+    adapter_revision: str = Field(min_length=1, max_length=32)
+    settings_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class TaskRecord(BaseModel):
     """The stable task metadata later persisted as ``task.json``."""
 
@@ -62,6 +77,10 @@ class TaskRecord(BaseModel):
         default_factory=dict
     )
     models: dict[str, Annotated[str, Field(min_length=1)]] = Field(default_factory=dict)
+    provider_bindings: dict[str, ProviderBindingSnapshot] = Field(default_factory=dict)
+    provider_settings_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
     error_summary: str | None = None
     identities: SourceIdentities | None = None
     duplicate_of_task_id: str | None = Field(default=None, min_length=1)
@@ -78,6 +97,19 @@ class TaskRecord(BaseModel):
             self.identities = SourceIdentities(
                 normalized_source=self.source_input or self.source_path
             )
+        snapshot_shas = {
+            item.settings_sha256 for item in self.provider_bindings.values()
+        }
+        if len(snapshot_shas) > 1:
+            raise ValueError("provider binding snapshots must share one settings SHA")
+        if self.provider_bindings and self.provider_settings_sha256 is None:
+            self.provider_settings_sha256 = next(iter(snapshot_shas))
+        if (
+            self.provider_settings_sha256 is not None
+            and snapshot_shas
+            and (snapshot_shas != {self.provider_settings_sha256})
+        ):
+            raise ValueError("provider binding settings SHA is invalid")
         compact_stages = {"transcript", "ocr", "evidence"}
         if any(
             not paths and stage not in compact_stages

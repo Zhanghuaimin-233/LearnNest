@@ -34,6 +34,15 @@ from learnnest.learning_workspace import (
 from learnnest.locks import LockUnavailable, task_lock
 from learnnest.models import TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
+from learnnest.provider_profiles import (
+    ProviderBudgetGroup,
+    ProviderRole,
+    connect as connect_provider,
+    public_settings as public_provider_settings,
+    set_role_binding,
+    update_limits,
+)
+from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
 from learnnest.sources import SourceParseError, collect_sources
 from learnnest.task_store import find_task_by_id, load_task
 
@@ -66,6 +75,30 @@ class DouyinFavoritesSyncRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     session_id: str = Field(min_length=16, max_length=128)
+
+
+class ProviderConnectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    preset: Literal["mimo", "deepseek", "mimo-tts", "local-asr", "local-ocr"]
+    api_key: str | None = Field(default=None, min_length=1, max_length=2048)
+    endpoint: str | None = Field(default=None, max_length=512)
+    model: str | None = Field(default=None, max_length=128)
+
+
+class ProviderRoleBindingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    connection_name: str = Field(min_length=1, max_length=64)
+
+
+class ProviderLimitsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    retries_per_role: int = Field(ge=0, le=3)
+    global_calls_per_day: int = Field(ge=0, le=800)
+    budget_group_calls_per_day: dict[ProviderBudgetGroup, int]
 
 
 @dataclass
@@ -219,6 +252,69 @@ class WebService:
             "last_tick_at": _isoformat(status.last_tick_at),
             "last_tick_summary": _safe_text(status.last_tick_summary),
         }
+
+    def provider_settings(self) -> dict[str, object]:
+        """Return the intentionally public projection, never settings JSON itself."""
+        return public_provider_settings(self.output_root)
+
+    def save_provider_connection(
+        self, request: ProviderConnectionRequest
+    ) -> dict[str, object]:
+        try:
+            connect_provider(
+                self.output_root,
+                name=request.name,
+                preset=request.preset,
+                secret_value=request.api_key,
+                endpoint=request.endpoint,
+                model=request.model,
+            )
+        except ValueError as error:
+            raise ValueError("连接配置无法保存。") from error
+        return self.provider_settings()
+
+    def set_provider_role(
+        self, role: ProviderRole, request: ProviderRoleBindingRequest
+    ) -> dict[str, object]:
+        try:
+            set_role_binding(
+                self.output_root, role=role, connection_name=request.connection_name
+            )
+        except ValueError as error:
+            raise ValueError("连接不能承担这个职责。") from error
+        return self.provider_settings()
+
+    def check_provider_connection(self, name: str) -> dict[str, str]:
+        """Perform a zero-cost DPAPI/configuration check; no Provider call occurs."""
+        settings = public_provider_settings(self.output_root)
+        connection = next(
+            (item for item in settings["connections"] if item["name"] == name), None
+        )
+        if not isinstance(connection, dict):
+            raise KeyError(name)
+        # The public projection hides secret_id, so resolve only to prove that
+        # the current Windows user can decrypt the configured object.
+        from learnnest.provider_profiles import get_connection
+
+        stored = get_connection(self.output_root, name)
+        if stored.secret_id is not None:
+            try:
+                ProviderSecretStore(self.output_root).read(stored.secret_id)
+            except SecretStoreError as error:
+                raise ValueError("连接密钥不可用。") from error
+        return {"name": name, "status": "configured"}
+
+    def save_provider_limits(self, request: ProviderLimitsRequest) -> dict[str, object]:
+        try:
+            update_limits(
+                self.output_root,
+                retries_per_role=request.retries_per_role,
+                global_calls_per_day=request.global_calls_per_day,
+                budget_group_calls_per_day=request.budget_group_calls_per_day,
+            )
+        except ValueError as error:
+            raise ValueError("Provider 限额无效。") from error
+        return self.provider_settings()
 
     def artifact(self, task_id: str, relative_path: str) -> Path:
         found = find_task_by_id(self.output_root, task_id)
@@ -514,6 +610,49 @@ def create_web_app(
         except KeyError as error:
             raise HTTPException(status_code=404, detail="任务不存在。") from error
         return _job_payload(job)
+
+    @app.get("/api/providers/settings")
+    def provider_settings() -> dict[str, object]:
+        try:
+            return service.provider_settings()
+        except ValueError as error:
+            raise HTTPException(
+                status_code=500, detail="Provider 设置无效。"
+            ) from error
+
+    @app.post("/api/providers/connections")
+    def save_provider_connection(
+        request: ProviderConnectionRequest,
+    ) -> dict[str, object]:
+        try:
+            return service.save_provider_connection(request)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/api/providers/roles/{role}")
+    def save_provider_role(
+        role: ProviderRole, request: ProviderRoleBindingRequest
+    ) -> dict[str, object]:
+        try:
+            return service.set_provider_role(role, request)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/api/providers/connections/{name}/check")
+    def check_provider_connection(name: str) -> dict[str, str]:
+        try:
+            return service.check_provider_connection(name)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="连接不存在。") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.put("/api/providers/limits")
+    def save_provider_limits(request: ProviderLimitsRequest) -> dict[str, object]:
+        try:
+            return service.save_provider_limits(request)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/api/automation/status")
     def automation_status() -> dict[str, Any]:

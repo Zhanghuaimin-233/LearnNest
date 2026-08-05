@@ -47,12 +47,17 @@ LearnNest（语栖）是 Windows 上本地优先的个人学习产品，目标�
 
 保留新增 Provider 的接口，但不要实现或宣传其他模型适配。Provider 不自动跨供应商回退。
 
-当前代码仍存在历史耦合：`MIMO_API_KEY` 被笔记、播客和 TTS 共用，自动化也会从同一配置构造相关 Provider；这是一项待清理债务，不是目标设计。新代码不得加深耦合：
+当前实现已将连接、密钥引用、预算和失败域按能力与工作流职责拆分；`.env`
+只保留显式旧 CLI 的迁移兼容入口。新代码必须维持以下合同：
 
-- 各能力配置、凭据、预算、状态分别管理。
-- 输出根保存默认职责绑定；任务开始时冻结绑定，不提供任务级临时覆盖。
+- 各能力配置、凭据引用、预算和状态分别管理；笔记域连接不得跨用到 podcast 或 TTS。
+- 输出根保存默认职责绑定；任务开始时冻结 binding 与 settings SHA，不提供任务级临时覆盖。
+- API Key 只以 Windows CurrentUser DPAPI 密文保存；设置、任务、日志和 API 不得保存或回显明文。
+- 设置更新先校验完整候选，再写 secret 和 settings；不兼容更新必须保持旧状态不变。
 - 自动工作流默认关闭，必须由用户显式开启。
 - 可配置重试 0–3 次，默认重试 1 次；只重试明确的临时错误。
+- synthetic、显式命令和 automation 共用付费准入；在构造 Provider 前先持久化 running 事实。
+- 全局及 note/podcast/TTS/ASR/OCR 五组预算都按冻结策略执行；running 和 unknown 继续计数。
 - 每次尝试都可见、计数并持久化；`unknown`、永久错误和配置错误立即停止。
 - Provider、云 TTS、重试次数或自动来源范围等实质变化会使旧授权失效。
 
@@ -64,11 +69,11 @@ LearnNest（语栖）是 Windows 上本地优先的个人学习产品，目标�
 | WebUI 与应用入口 | `src/learnnest/web_app.py`、相关 service 模块 | 本地页面、来源、任务与成品视图 |
 | 确定性管线 | `pipeline.py`、`stages.py`、`worker.py` | 字幕、帧、OCR、evidence、内容包与重跑 |
 | 任务与批次事实 | `models.py`、`task_store.py`、`batch_*.py` | 稳定 task ID、JSON 事实、可恢复执行 |
-| 笔记 | `note_*.py`、`evidence_*.py`、`quality_*.py`、`rendering.py` | 历史严格路线、效率/质量策略、验证和渲染 |
+| 笔记 | `note_*.py`、`evidence_*.py`、`quality_*.py`、`rendering.py` | 效率/质量策略、历史只读兼容、验证和渲染 |
 | 播客与音频 | `podcast_*.py`、`tts_*.py` | 播客稿、speech、音频与发布 |
 | 来源与下载 | `sources.py`、`downloader.py`、`adapters/` | 本地输入、公开 URL、抖音发现与下载 |
 | 调度与锁 | `scheduler.py`、`locks.py`、`schedule_*.py` | 前台 tick、资源 semaphore 与跨进程锁 |
-| 运行配置 | `runtime_config.py`、`.env.example` | 当前白名单和历史兼容配置 |
+| Provider 与运行配置 | `provider_profiles.py`、`provider_service.py`、`provider_secrets.py`、`runtime_config.py` | 连接、密钥、职责冻结、调用准入和旧 CLI 兼容 |
 | 回归保护 | `tests/` | 行为合同、失败路径和 Provider fake |
 
 文件名和模块会随旧路线清理调整。改动前用 `rg` 定位真实调用链，不用此表替代代码核验。

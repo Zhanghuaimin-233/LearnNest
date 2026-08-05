@@ -16,10 +16,13 @@ class AssistedConnectionSnapshot(_Model):
     """Secret-free identity frozen into an assisted-draft plan."""
 
     connection_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    connection_id: str | None = Field(default=None, min_length=1)
+    secret_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     provider: str = Field(min_length=1)
     endpoint_identity: str = Field(min_length=1)
     model: str = Field(min_length=1)
     adapter_revision: str = Field(min_length=1, max_length=32)
+    settings_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class AssistedTaskPlan(_Model):

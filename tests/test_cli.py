@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -8,9 +9,58 @@ import pytest
 from typer.testing import CliRunner
 
 from learnnest.cli import app
+from learnnest.assisted_note_generation import (
+    create_assisted_plan,
+    generate_assisted_plan,
+    load_assisted_state,
+)
+from learnnest.assisted_note_models import AssistedConnectionSnapshot
+from learnnest.automation_store import load_task_state
+from learnnest.models import ContentPack, Evidence, StageStatus, TaskRecord
+from learnnest.provider_profiles import (
+    ProviderSettings,
+    load_settings,
+    save_settings,
+    settings_sha256,
+)
+from learnnest.provider_service import execute_direct_provider_call
+from learnnest.task_store import write_task_atomic
 
 
 runner = CliRunner()
+
+
+def _write_assisted_cli_task(root: Path, task_id: str, text: str) -> None:
+    task_dir = root / "视频学习素材" / task_id
+    task_dir.mkdir(parents=True)
+    pack = ContentPack(
+        task_id=task_id,
+        source_fingerprint=f"fingerprint-{task_id}",
+        evidence=[
+            Evidence(
+                id="tr_0001",
+                kind="transcript",
+                start_ms=0,
+                end_ms=1_000,
+                text=text,
+                artifact_path="content_pack.json",
+            )
+        ],
+    )
+    (task_dir / "content_pack.json").write_text(
+        pack.model_dump_json(indent=2), encoding="utf-8"
+    )
+    write_task_atomic(
+        task_dir,
+        TaskRecord(
+            task_id=task_id,
+            source_path=f"C:/videos/{task_id}.mp4",
+            source_fingerprint=pack.source_fingerprint,
+            title=task_id,
+            stages={"content_pack": StageStatus.COMPLETED},
+            artifacts={"content_pack": ["content_pack.json"]},
+        ),
+    )
 
 
 def test_help_lists_all_pipeline_commands() -> None:
@@ -38,6 +88,281 @@ def test_help_lists_all_pipeline_commands() -> None:
         "layout",
     ):
         assert command in result.output
+
+
+def test_assisted_cli_admits_the_real_b_dossier_after_a_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.cli as cli
+
+    root = tmp_path / "output"
+    _write_assisted_cli_task(root, "task-a", "A material")
+    _write_assisted_cli_task(root, "task-b", "B material")
+    snapshot = AssistedConnectionSnapshot(
+        connection_name="fake",
+        provider="fake-openai",
+        endpoint_identity="https://example.test/v1",
+        model="fake-1",
+        adapter_revision="1",
+    )
+    plan_path = create_assisted_plan(
+        root,
+        ["task-a", "task-b"],
+        writer=snapshot,
+        reviewer=snapshot,
+        max_role_calls=1,
+        now=datetime(2026, 8, 5, tzinfo=UTC),
+    )
+    state_path = plan_path.parent / "state.json"
+    plan_state = json.loads(state_path.read_text(encoding="utf-8"))
+    first = plan_state["tasks"][0]
+    first["status"] = "writer_failed"
+    first["writer"].update(
+        {"status": "failed", "actual_call_count": 1, "safe_summary": "prior"}
+    )
+    state_path.write_text(json.dumps(plan_state), encoding="utf-8")
+    settings = load_settings(root).model_copy(update={"retries_per_role": 0})
+    save_settings(root, ProviderSettings.model_validate(settings.model_dump()))
+
+    with pytest.raises(RuntimeError, match="prior failure"):
+        execute_direct_provider_call(
+            root,
+            "task-a",
+            "writer",
+            lambda: (_ for _ in ()).throw(RuntimeError("prior failure")),
+        )
+
+    class FakeProvider:
+        name = "fake-openai"
+        model = "fake-1"
+        endpoint_identity = "https://example.test/v1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def write_markdown(self, dossier_json: str) -> str:
+            self.calls += 1
+            assert "B material" in dossier_json
+            return "# task-b\n\nB completed."
+
+    provider = FakeProvider()
+    monkeypatch.setattr(
+        cli, "_assisted_note_provider", lambda *args, **kwargs: (provider, None)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "assisted-note",
+            "generate",
+            str(plan_path),
+            "--output-root",
+            str(root),
+        ],
+    )
+
+    b_fact = load_task_state(
+        root, "manual-writer-task-b", settings_sha256(load_settings(root))
+    )
+    assert result.exit_code == 0, result.output
+    assert provider.calls == 1
+    assert load_assisted_state(plan_path).tasks[1].writer.status == "completed"
+    assert b_fact is not None
+    assert b_fact.attempts[0].status == "completed"
+
+
+def test_assisted_cli_keeps_b_admission_identity_after_a_local_dossier_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.cli as cli
+
+    root = tmp_path / "output"
+    _write_assisted_cli_task(root, "task-a", "A material")
+    _write_assisted_cli_task(root, "task-b", "B material")
+    snapshot = AssistedConnectionSnapshot(
+        connection_name="fake",
+        provider="fake-openai",
+        endpoint_identity="https://example.test/v1",
+        model="fake-1",
+        adapter_revision="1",
+    )
+    plan_path = create_assisted_plan(
+        root,
+        ["task-a", "task-b"],
+        writer=snapshot,
+        reviewer=snapshot,
+        max_role_calls=1,
+        now=datetime(2026, 8, 5, tzinfo=UTC),
+    )
+    a_pack = root / "视频学习素材" / "task-a" / "content_pack.json"
+    a_pack.write_text(a_pack.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    class FakeProvider:
+        name = "fake-openai"
+        model = "fake-1"
+        endpoint_identity = "https://example.test/v1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def write_markdown(self, dossier_json: str) -> str:
+            self.calls += 1
+            assert "B material" in dossier_json
+            return "# task-b\n\nB completed."
+
+    provider = FakeProvider()
+    monkeypatch.setattr(
+        cli, "_assisted_note_provider", lambda *args, **kwargs: (provider, None)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "assisted-note",
+            "generate",
+            str(plan_path),
+            "--output-root",
+            str(root),
+        ],
+    )
+
+    policy_sha = settings_sha256(load_settings(root))
+    assert result.exit_code == 0, result.output
+    assert provider.calls == 1
+    assert load_task_state(root, "manual-writer-task-a", policy_sha) is None
+    assert load_task_state(root, "manual-writer-task-b", policy_sha) is not None
+    state = load_assisted_state(plan_path)
+    assert state.tasks[0].status == "local_recovery_failed"
+    assert state.tasks[1].writer.status == "completed"
+
+
+def test_assisted_cli_reviewer_admits_b_after_a_has_no_draft(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.cli as cli
+
+    root = tmp_path / "output"
+    _write_assisted_cli_task(root, "task-a", "A material")
+    _write_assisted_cli_task(root, "task-b", "B material")
+    snapshot = AssistedConnectionSnapshot(
+        connection_name="fake",
+        provider="fake-openai",
+        endpoint_identity="https://example.test/v1",
+        model="fake-1",
+        adapter_revision="1",
+    )
+    plan_path = create_assisted_plan(
+        root,
+        ["task-a", "task-b"],
+        writer=snapshot,
+        reviewer=snapshot,
+        max_role_calls=1,
+        now=datetime(2026, 8, 5, tzinfo=UTC),
+    )
+
+    class DraftProvider:
+        name = "fake-openai"
+        model = "fake-1"
+        endpoint_identity = "https://example.test/v1"
+
+        def write_markdown(self, dossier_json: str) -> str:
+            return "# Draft\n\nReady for review."
+
+        def review_markdown(self, dossier_json: str, candidate_markdown: str) -> str:
+            assert "B material" in dossier_json
+            assert "Ready for review" in candidate_markdown
+            return "# Reviewed\n\nB reviewed."
+
+    provider = DraftProvider()
+    generate_assisted_plan(plan_path, root, provider)
+    state_path = plan_path.parent / "state.json"
+    plan_state = json.loads(state_path.read_text(encoding="utf-8"))
+    first = plan_state["tasks"][0]
+    first["status"] = "writer_failed"
+    first["writer"].update(
+        {"status": "failed", "actual_call_count": 1, "safe_summary": "no draft"}
+    )
+    state_path.write_text(json.dumps(plan_state), encoding="utf-8")
+    settings = load_settings(root).model_copy(update={"retries_per_role": 0})
+    save_settings(root, ProviderSettings.model_validate(settings.model_dump()))
+    with pytest.raises(RuntimeError, match="prior review failure"):
+        execute_direct_provider_call(
+            root,
+            "task-a",
+            "reviewer",
+            lambda: (_ for _ in ()).throw(RuntimeError("prior review failure")),
+        )
+    monkeypatch.setattr(
+        cli, "_assisted_note_provider", lambda *args, **kwargs: (provider, None)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "assisted-note",
+            "review",
+            str(plan_path),
+            "--output-root",
+            str(root),
+        ],
+    )
+
+    b_fact = load_task_state(
+        root, "manual-reviewer-task-b", settings_sha256(load_settings(root))
+    )
+    assert result.exit_code == 0, result.output
+    assert load_assisted_state(plan_path).tasks[1].reviewer.status == "completed"
+    assert b_fact is not None
+    assert b_fact.attempts[0].status == "completed"
+
+
+def test_assisted_cli_rejects_duplicate_frozen_dossier_before_provider_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.cli as cli
+
+    root = tmp_path / "output"
+    _write_assisted_cli_task(root, "task-a", "A material")
+    _write_assisted_cli_task(root, "task-b", "B material")
+    snapshot = AssistedConnectionSnapshot(
+        connection_name="fake",
+        provider="fake-openai",
+        endpoint_identity="https://example.test/v1",
+        model="fake-1",
+        adapter_revision="1",
+    )
+    plan_path = create_assisted_plan(
+        root,
+        ["task-a", "task-b"],
+        writer=snapshot,
+        reviewer=snapshot,
+        now=datetime(2026, 8, 5, tzinfo=UTC),
+    )
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["tasks"][1]["dossier_sha256"] = payload["tasks"][0]["dossier_sha256"]
+    plan_path.write_text(json.dumps(payload), encoding="utf-8")
+    constructions = 0
+
+    def factory(*args: object, **kwargs: object) -> tuple[object, None]:
+        nonlocal constructions
+        constructions += 1
+        return object(), None
+
+    monkeypatch.setattr(cli, "_assisted_note_provider", factory)
+    result = runner.invoke(
+        app,
+        [
+            "assisted-note",
+            "generate",
+            str(plan_path),
+            "--output-root",
+            str(root),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "duplicate dossier identity" in result.output
+    assert constructions == 0
 
 
 def test_process_uses_current_directory_as_the_default_output_root(

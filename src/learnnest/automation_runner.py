@@ -26,8 +26,11 @@ from learnnest.automation_delivery import (
 )
 from learnnest.automation_models import AutomationAttempt, AutomationTaskState
 from learnnest.automation_store import (
+    ProviderAdmissionError,
+    admit_provider_call,
     load_status,
     load_task_state,
+    provider_budget_group_call_usage,
     provider_call_usage,
     save_task_state,
     save_tick_result,
@@ -35,6 +38,9 @@ from learnnest.automation_store import (
 from learnnest.execution import RETRY_DELAYS, classify_failure
 from learnnest.locks import automation_lock
 from learnnest.podcast_providers import PodcastProvider
+from learnnest.provider_profiles import load_settings, settings_sha256
+from learnnest.provider_service import assisted_snapshot_from_binding
+from learnnest.task_store import find_task_by_id
 from learnnest.tts_generation import DEFAULT_TTS_STYLE
 from learnnest.tts_providers import TtsProvider
 
@@ -57,12 +63,16 @@ class AutomationRunResult:
     failed_task_ids: tuple[str, ...]
 
 
+ProviderFactory = Callable[[str], AutomationProviders]
+
+
 def run_automation_tasks(
     output_root: str | Path,
     task_ids: Iterable[str],
-    providers: AutomationProviders,
+    providers: AutomationProviders | None = None,
     *,
     now: datetime | None = None,
+    provider_factory: ProviderFactory | None = None,
 ) -> AutomationRunResult:
     """Deliver deterministic tasks under one immutable authorized policy.
 
@@ -77,14 +87,30 @@ def run_automation_tasks(
         raise ValueError("automation is not configured")
     if not status.policy.enabled or status.policy.authorized_at is None:
         raise ValueError("automation paid delivery is not authorized")
-    _assert_provider_snapshots(status.policy, providers)
+    authorized_settings_sha = status.policy.provider_settings_sha256
+    if authorized_settings_sha is None or authorized_settings_sha != settings_sha256(
+        load_settings(root)
+    ):
+        raise ValueError(
+            "automation authorization is invalid for current Provider settings"
+        )
+    if (providers is None) == (provider_factory is None):
+        raise ValueError("automation requires exactly one provider construction path")
+    if providers is not None:
+        _assert_provider_snapshots(status.policy, providers)
     selected = tuple(dict.fromkeys(task_ids))[: status.policy.max_items_per_tick]
     completed: list[str] = []
     failed: list[str] = []
     with automation_lock(root, timeout=0):
         for task_id in selected:
             try:
-                if _run_task(root, task_id, providers, selected_now):
+                if _run_task(
+                    root,
+                    task_id,
+                    providers,
+                    selected_now,
+                    provider_factory=provider_factory,
+                ):
                     completed.append(task_id)
                 else:
                     failed.append(task_id)
@@ -109,21 +135,54 @@ def run_automation_tasks(
 def _run_task(
     root: Path,
     task_id: str,
-    providers: AutomationProviders,
+    providers: AutomationProviders | None,
     now: datetime,
+    *,
+    provider_factory: ProviderFactory | None,
 ) -> bool:
     status = load_status(root)
     assert status is not None
     if not status.policy.enabled or status.policy.authorized_at is None:
         return False
     policy = status.policy
+    try:
+        if provider_factory is None:
+            assert providers is not None
+            task_providers = providers
+            writer_snapshot, reviewer_snapshot = policy.writer, policy.reviewer
+        else:
+            task_providers = None
+            writer_snapshot, reviewer_snapshot = _frozen_task_assisted_snapshots(
+                root, task_id
+            )
+    except Exception as error:
+        return _attention(
+            root,
+            AutomationTaskState(task_id=task_id, policy_sha256=status.policy_sha256),
+            "non_retryable_failure",
+            _safe_summary(error),
+        )
+
+    def provider_for_stage(stage: str) -> object:
+        nonlocal task_providers
+        if task_providers is None:
+            assert provider_factory is not None
+            task_providers = provider_factory(task_id)
+            _assert_provider_matches_snapshot(
+                "writer", task_providers.writer, writer_snapshot
+            )
+            _assert_provider_matches_snapshot(
+                "reviewer", task_providers.reviewer, reviewer_snapshot
+            )
+        return getattr(task_providers, stage)
+
     state = load_task_state(root, task_id, status.policy_sha256)
     if state is None:
         plan_path = create_assisted_plan(
             root,
             [task_id],
-            writer=policy.writer,
-            reviewer=policy.reviewer,
+            writer=writer_snapshot,
+            reviewer=reviewer_snapshot,
             max_role_calls=policy.retries_per_stage + 1,
             now=now,
         )
@@ -142,7 +201,7 @@ def _run_task(
     plan_path = root / state.plan_path
     try:
         plan = load_assisted_plan(plan_path)
-        _assert_plan_snapshots(plan, policy)
+        _assert_plan_snapshots(plan, writer_snapshot, reviewer_snapshot)
         # This path is deliberately local-only.  It can promote a persisted
         # response or candidate without consuming a new provider opportunity.
         recover_assisted_plan(plan_path, root)
@@ -167,7 +226,7 @@ def _run_task(
             now,
             plan_path,
             lambda retry: generate_assisted_plan(
-                plan_path, root, providers.writer, retry_failed=retry
+                plan_path, root, provider_for_stage("writer"), retry_failed=retry
             ),
         )
         assisted = load_assisted_state(plan_path).tasks[0]
@@ -182,7 +241,7 @@ def _run_task(
             now,
             plan_path,
             lambda retry: review_assisted_plan(
-                plan_path, root, providers.reviewer, retry_failed=retry
+                plan_path, root, provider_for_stage("reviewer"), retry_failed=retry
             ),
         )
         assisted = load_assisted_state(plan_path).tasks[0]
@@ -212,10 +271,10 @@ def _run_task(
         "podcast",
         now,
         invoke=lambda: generate_model_reviewed_podcast(
-            source, providers.podcast, delivery_dir=delivery_dir
+            source, provider_for_stage("podcast"), delivery_dir=delivery_dir
         ),
         recover=lambda: _recover_podcast(
-            source, providers.podcast, delivery_dir=delivery_dir
+            source, provider_for_stage("podcast"), delivery_dir=delivery_dir
         ),
     )
     if not podcast_ok or podcast is None:
@@ -229,7 +288,7 @@ def _run_task(
         invoke=lambda: generate_model_reviewed_tts(
             source,
             podcast,
-            providers.tts,
+            provider_for_stage("tts"),
             output_root=root,
             delivery_dir=delivery_dir,
             style_instruction=DEFAULT_TTS_STYLE,
@@ -237,7 +296,7 @@ def _run_task(
         recover=lambda: _recover_tts(
             source,
             podcast,
-            providers.tts,
+            provider_for_stage("tts"),
             root,
             delivery_dir,
         ),
@@ -271,11 +330,25 @@ def _run_assisted_role(
         return state
     if readiness != "ready":
         return _apply_readiness_block(root, state, stage, readiness)
-    if not _budget_available(root, now, status.policy.budget, status.policy_sha256):
+    if not _budget_available(
+        root, now, status.policy.budget, status.policy_sha256, stage
+    ):
         return _apply_readiness_block(root, state, stage, "budget_exhausted")
 
-    attempt = _stage_attempts(state, stage) + 1
-    state = _begin_attempt(root, state, stage, attempt, now)
+    try:
+        state, admitted = admit_provider_call(
+            root,
+            state,
+            stage=stage,
+            now=now,
+            retries_per_stage=status.policy.retries_per_stage,
+            global_calls_per_day=status.policy.budget.provider_calls_per_day,
+            budget_group_calls_per_day=status.policy.budget.budget_group_calls_per_day,
+            lock_held=True,
+        )
+    except ProviderAdmissionError:
+        return _apply_readiness_block(root, state, stage, "budget_exhausted")
+    attempt = admitted.attempt
     try:
         invoke(attempt > 1)
     except Exception as error:
@@ -351,14 +424,32 @@ def _run_paid_stage(
     if readiness != "ready":
         return None, _apply_readiness_block(root, state, stage, readiness), False
 
-    if not _budget_available(root, now, status.policy.budget, status.policy_sha256):
+    if not _budget_available(
+        root, now, status.policy.budget, status.policy_sha256, stage
+    ):
         return (
             None,
             _apply_readiness_block(root, state, stage, "budget_exhausted"),
             False,
         )
-    attempt = _stage_attempts(state, stage) + 1
-    state = _begin_attempt(root, state, stage, attempt, now)
+    try:
+        state, admitted = admit_provider_call(
+            root,
+            state,
+            stage=stage,
+            now=now,
+            retries_per_stage=status.policy.retries_per_stage,
+            global_calls_per_day=status.policy.budget.provider_calls_per_day,
+            budget_group_calls_per_day=status.policy.budget.budget_group_calls_per_day,
+            lock_held=True,
+        )
+    except ProviderAdmissionError:
+        return (
+            None,
+            _apply_readiness_block(root, state, stage, "budget_exhausted"),
+            False,
+        )
+    attempt = admitted.attempt
     try:
         result = invoke()
     except Exception as error:
@@ -649,12 +740,18 @@ def _budget_available(
     now: datetime,
     budget: object,
     policy_sha: str,
+    stage: str,
 ) -> bool:
     allowed = int(getattr(budget, "provider_calls_per_day"))
     used, _limit, _remaining = provider_call_usage(
         root, policy_sha, now=now, limit=allowed
     )
-    return used < allowed
+    group = "note" if stage in {"writer", "reviewer"} else stage
+    group_cap = int(getattr(budget, "budget_group_calls_per_day")[group])
+    return (
+        used < allowed
+        and provider_budget_group_call_usage(root, group, now=now) < group_cap
+    )
 
 
 def _assert_provider_snapshots(policy: object, providers: AutomationProviders) -> None:
@@ -670,9 +767,40 @@ def _assert_provider_snapshots(policy: object, providers: AutomationProviders) -
             raise ValueError(f"automation {role} provider no longer matches policy")
 
 
-def _assert_plan_snapshots(plan: object, policy: object) -> None:
-    if plan.writer != policy.writer or plan.reviewer != policy.reviewer:
+def _assert_plan_snapshots(
+    plan: object,
+    writer: object,
+    reviewer: object,
+) -> None:
+    if plan.writer != writer or plan.reviewer != reviewer:
         raise ValueError("automation plan provider snapshot no longer matches policy")
+
+
+def _frozen_task_assisted_snapshots(root: Path, task_id: str) -> tuple[object, object]:
+    found = find_task_by_id(root, task_id)
+    if found is None:
+        raise ValueError("automation task is missing")
+    _task_dir, task = found
+    try:
+        return (
+            assisted_snapshot_from_binding(task.provider_bindings["note_writer"]),
+            assisted_snapshot_from_binding(task.provider_bindings["note_reviewer"]),
+        )
+    except KeyError as error:
+        raise ValueError(
+            "automation task is missing frozen note role bindings"
+        ) from error
+
+
+def _assert_provider_matches_snapshot(
+    role: str, provider: object, snapshot: object
+) -> None:
+    if (
+        getattr(provider, "name", None) != snapshot.provider
+        or getattr(provider, "model", None) != snapshot.model
+        or getattr(provider, "endpoint_identity", None) != snapshot.endpoint_identity
+    ):
+        raise ValueError(f"automation {role} provider no longer matches frozen task")
 
 
 def _is_unknown_failure(error: Exception) -> bool:

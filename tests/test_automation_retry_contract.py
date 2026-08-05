@@ -41,6 +41,8 @@ from learnnest.execution import (
 )
 from learnnest.models import ContentPack, Evidence, StageStatus, TaskRecord
 from learnnest.pipeline import _record_failure, _run_stage
+from learnnest.provider_profiles import update_limits
+from learnnest.provider_service import execute_direct_provider_call
 from learnnest.queue_runner import run_failure_queue
 from learnnest.task_store import load_task, write_task_atomic
 
@@ -94,6 +96,18 @@ def _root(tmp_path: Path, task_id: str = "20260728-retry") -> Path:
 
 
 def _configure(root: Path, *, budget: int = 80, retries: int = 3) -> str:
+    update_limits(
+        root,
+        retries_per_role=retries,
+        global_calls_per_day=budget,
+        budget_group_calls_per_day={
+            "note": 20,
+            "podcast": 20,
+            "tts": 20,
+            "asr": 20,
+            "ocr": 20,
+        },
+    )
     snapshot = _snapshot()
     save_policy(
         root,
@@ -412,7 +426,7 @@ def test_legacy_policy_and_task_state_are_migrated_without_losing_state(
     assert status is not None
     assert status.policy.schema_version == "1.1"
     assert status.policy.retries_per_stage == 1
-    assert status.policy.budget.provider_calls_per_day == 80
+    assert status.policy.budget.provider_calls_per_day == 20
     migrated = load_task_state(root, "old-task", status.policy_sha256)
     assert migrated is not None
     assert migrated.policy_sha256 == status.policy_sha256
@@ -420,8 +434,8 @@ def test_legacy_policy_and_task_state_are_migrated_without_losing_state(
         root,
         status.policy_sha256,
         now=BASE_TIME,
-        limit=80,
-    ) == (1, 80, 79)
+        limit=20,
+    ) == (1, 20, 19)
 
 
 def test_daily_provider_usage_is_shared_across_two_task_facts(tmp_path: Path) -> None:
@@ -664,3 +678,59 @@ def test_exhausted_provider_budget_leaves_task_pending_without_a_call(
     assert state is not None
     assert state.attempts == []
     assert state.blocked_reason == "provider_budget_exhausted"
+
+
+def test_manual_call_consumes_the_same_frozen_cap_as_automation(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _configure(root, budget=1, retries=0)
+    manual_calls = 0
+
+    def manual_writer() -> None:
+        nonlocal manual_calls
+        manual_calls += 1
+
+    execute_direct_provider_call(
+        root, "manual-source", "writer", manual_writer, now=BASE_TIME
+    )
+    provider = _WriterReviewer()
+    result = run_automation_tasks(
+        root, ["20260728-retry"], _providers(provider), now=BASE_TIME
+    )
+
+    assert manual_calls == 1
+    assert result.failed_task_ids == ("20260728-retry",)
+    assert provider.writer_calls == 0
+
+
+def test_reauthorization_freezes_webui_retry_zero_before_the_first_fake_failure(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    _configure(root, retries=1)
+    update_limits(
+        root,
+        retries_per_role=0,
+        global_calls_per_day=80,
+        budget_group_calls_per_day={
+            "note": 20,
+            "podcast": 20,
+            "tts": 20,
+            "asr": 20,
+            "ocr": 20,
+        },
+    )
+    authorize(root, now=BASE_TIME)
+    provider = _WriterReviewer(failures=1)
+
+    first = run_automation_tasks(
+        root, ["20260728-retry"], _providers(provider), now=BASE_TIME
+    )
+    second = run_automation_tasks(
+        root,
+        ["20260728-retry"],
+        _providers(provider),
+        now=BASE_TIME + timedelta(hours=1),
+    )
+
+    assert first.failed_task_ids == second.failed_task_ids == ("20260728-retry",)
+    assert provider.writer_calls == 1

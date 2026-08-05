@@ -30,6 +30,23 @@ const loginMessage = document.querySelector("#douyin-login-message");
 const loginCountdown = document.querySelector("#douyin-countdown");
 const refreshDouyinButton = document.querySelector("#refresh-douyin");
 const cancelDouyinButton = document.querySelector("#cancel-douyin");
+const providerForm = document.querySelector("#provider-connection-form");
+const providerList = document.querySelector("#provider-connection-list");
+const providerState = document.querySelector("#provider-settings-state");
+const providerBudget = document.querySelector("#provider-budget");
+const providerRoleForm = document.querySelector("#provider-role-form");
+const providerRoleConnection = document.querySelector("#provider-role-connection");
+const providerLimitsForm = document.querySelector("#provider-limits-form");
+const providerRoleFeedback = document.querySelector("#provider-role-feedback");
+const providerRoleList = document.querySelector("#provider-role-list");
+const providerRoleLabels = {
+  note_writer: "笔记 Writer", note_reviewer: "笔记 Reviewer", podcast: "播客",
+  tts: "TTS", asr: "ASR", ocr: "OCR",
+};
+const providerRoleCapabilities = {
+  note_writer: "llm", note_reviewer: "llm", podcast: "llm",
+  tts: "tts", asr: "asr", ocr: "ocr",
+};
 const stateLabel = {
   queued: "等待整理",
   organizing: "正在整理",
@@ -61,6 +78,58 @@ let loginRefreshInFlight = false;
 
 function say(message) { notice.textContent = message; }
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value ?? ""; return node.innerHTML; }
+
+function renderProviderSettings(settings) {
+  const configured = settings.connections.filter((item) => item.configured).length;
+  providerState.textContent = configured ? `已配置 ${configured} 个` : "未配置";
+  providerState.className = `status-pill ${configured ? "connected" : ""}`;
+  providerBudget.textContent = `每个职责自动重试 ${settings.retries_per_role} 次；UTC 每日最多 ${settings.global_calls_per_day} 次调用。`;
+  renderProviderRoleOptions(settings);
+  providerLimitsForm.elements.retries_per_role.value = settings.retries_per_role;
+  providerLimitsForm.elements.global_calls_per_day.value = settings.global_calls_per_day;
+  for (const group of ["note", "podcast", "tts", "asr", "ocr"]) providerLimitsForm.elements[`${group}_calls_per_day`].value = settings.budget_group_calls_per_day[group];
+  providerList.innerHTML = settings.connections.length
+    ? settings.connections.map((item) => `<div class="provider-row"><span>${escapeHtml(item.name)}</span><span>${escapeHtml(item.provider)} · ${escapeHtml(item.model)}</span><span>${item.secret_status === "configured" || item.capability === "asr" || item.capability === "ocr" ? "已配置" : "未配置"}</span><button type="button" data-check-connection="${escapeHtml(item.name)}">检查</button></div>`).join("")
+    : '<p class="empty">还没有学习连接。</p>';
+  providerList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", async () => {
+    try {
+      await api(`/api/providers/connections/${encodeURIComponent(button.dataset.checkConnection)}/check`, { method: "POST" });
+      say("连接配置可用；这次检查没有调用 Provider。");
+    } catch (error) { say(error.message); }
+  }));
+  const connections = new Map(settings.connections.map((item) => [item.name, item]));
+  const bindings = Object.entries(settings.role_bindings);
+  providerRoleList.innerHTML = bindings.length
+    ? bindings.map(([role, name]) => {
+      const connection = connections.get(name);
+      return `<div class="provider-role-summary"><span>${escapeHtml(providerRoleLabels[role] || role)}</span><span>${escapeHtml(name)} · ${escapeHtml(connection?.provider || "连接不可用")} · ${escapeHtml(connection?.model || "")}</span><strong>已绑定</strong></div>`;
+    }).join("")
+    : '<p class="empty">尚未绑定职责。</p>';
+}
+
+function renderProviderRoleOptions(settings) {
+  const role = providerRoleForm.elements.role.value;
+  const expectedCapability = providerRoleCapabilities[role];
+  const current = settings.role_bindings[role];
+  const matching = settings.connections.filter((item) => item.capability === expectedCapability);
+  providerRoleConnection.innerHTML = matching.map((item) => `<option value="${escapeHtml(item.name)}" ${item.name === current ? "selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.provider)} · ${escapeHtml(item.model)}</option>`).join("");
+  providerRoleFeedback.textContent = matching.length
+    ? "选择连接后保存；已绑定职责会显示在下方。"
+    : `还没有可用于${providerRoleLabels[role] || "此职责"}的连接。`;
+}
+
+async function loadProviderSettings() {
+  try { renderProviderSettings(await api("/api/providers/settings")); } catch (error) { providerState.textContent = "无法读取"; }
+}
+
+function providerSettingsFormActive() {
+  const active = document.activeElement;
+  return [providerForm, providerRoleForm, providerLimitsForm].some((form) => form.contains(active));
+}
+
+async function refreshProviderSettingsWhenIdle() {
+  if (!providerSettingsFormActive()) await loadProviderSettings();
+}
 
 function renderList(target, items, empty) {
   if (!items.length) {
@@ -300,7 +369,7 @@ async function refresh(force = false) {
       revision = snapshot.revision;
       render(snapshot);
     }
-    await loadFavorites();
+    await Promise.all([loadFavorites(), refreshProviderSettingsWhenIdle()]);
   } catch (error) {
     say(error.message);
   } finally {
@@ -344,10 +413,55 @@ document.querySelector("#add-form").addEventListener("submit", async (event) => 
   }
 });
 
+providerForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const preset = String(form.get("preset"));
+  const key = String(form.get("api_key") || "").trim();
+  try {
+    const settings = await api("/api/providers/connections", {
+      method: "POST",
+      body: JSON.stringify({
+        name: form.get("name"), preset,
+        ...(key ? { api_key: key } : {}),
+      }),
+    });
+    event.currentTarget.reset();
+    renderProviderSettings(settings);
+    say("连接已保存；密钥不会显示在页面中。");
+  } catch (error) { say(error.message); }
+});
+
+providerRoleForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  try {
+    const settings = await api(`/api/providers/roles/${encodeURIComponent(form.get("role"))}`, { method: "POST", body: JSON.stringify({ connection_name: form.get("connection_name") }) });
+    renderProviderSettings(settings);
+    const connection = settings.connections.find((item) => item.name === form.get("connection_name"));
+    const detail = `${providerRoleLabels[form.get("role")]} → ${connection.provider} · ${connection.model}`;
+    providerRoleFeedback.textContent = `已绑定：${detail}`;
+    say(`职责已绑定：${detail}`);
+  } catch (error) { say(error.message); }
+});
+
+providerRoleForm.elements.role.addEventListener("change", () => loadProviderSettings());
+
+providerLimitsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  try {
+    const current = await api("/api/providers/settings");
+    renderProviderSettings(await api("/api/providers/limits", { method: "PUT", body: JSON.stringify({ retries_per_role: Number(form.get("retries_per_role")), global_calls_per_day: Number(form.get("global_calls_per_day")), budget_group_calls_per_day: Object.fromEntries(["note", "podcast", "tts", "asr", "ocr"].map((group) => [group, Number(form.get(`${group}_calls_per_day`))])) }) }));
+    say("调用限额已保存；自动授权已需要按新设置重新确认。");
+  } catch (error) { say(error.message); }
+});
+
 connectDouyinButton.addEventListener("click", connectDouyin);
 refreshDouyinButton.addEventListener("click", refreshDouyinQr);
 cancelDouyinButton.addEventListener("click", cancelDouyin);
 syncFavoritesButton.addEventListener("click", syncFavorites);
 document.addEventListener("visibilitychange", () => refresh(true));
 restoreDouyinLogin();
+loadProviderSettings();
 refresh(true);

@@ -29,24 +29,31 @@ class TtsProvider(Protocol):
     def synthesize(self, speech_text: str, style_instruction: str) -> bytes: ...
 
 
-class MimoTtsProvider:
-    name = "xiaomi-mimo"
-    model = _MIMO_TTS_MODEL
+class OpenAICompatibleTtsProvider:
+    """One explicit OpenAI-compatible transport for a frozen TTS role."""
+
     voice = _DEFAULT_VOICE
 
     def __init__(
         self,
         api_key: SecretStr,
         *,
+        provider_name: str,
+        model: str,
+        base_url: str,
         client_factory: Callable[..., Any] = OpenAI,
     ) -> None:
         secret = api_key.get_secret_value()
         if not secret.strip():
-            raise TtsProviderError("MIMO_API_KEY is missing")
+            raise TtsProviderError("TTS provider secret is unavailable")
+        if not provider_name.strip() or not model.strip() or not base_url.strip():
+            raise TtsProviderError("TTS provider snapshot is invalid")
+        self.name = provider_name
+        self.model = model
         self._api_key = api_key
         self._client = client_factory(
             api_key=secret,
-            base_url=_MIMO_BASE_URL,
+            base_url=base_url,
             max_retries=0,
         )
 
@@ -73,8 +80,7 @@ class MimoTtsProvider:
             )
         except Exception as error:
             raise TtsProviderError(
-                "MiMo TTS provider failed: "
-                f"{safe_provider_diagnostic(error, self._api_key)}"
+                f"TTS provider failed: {safe_provider_diagnostic(error, self._api_key)}"
             ) from error
         if not isinstance(data, str) or not data.strip():
             raise TtsProviderError("MiMo returned no audio data")
@@ -85,3 +91,24 @@ class MimoTtsProvider:
         if not decoded:
             raise TtsProviderError("MiMo returned empty audio data")
         return decoded
+
+
+class MimoTtsProvider(OpenAICompatibleTtsProvider):
+    """Compatibility wrapper for the explicit legacy MiMo TTS CLI entrypoint."""
+
+    def __init__(
+        self,
+        api_key: SecretStr,
+        *,
+        client_factory: Callable[..., Any] = OpenAI,
+    ) -> None:
+        if not api_key.get_secret_value().strip():
+            raise TtsProviderError("MIMO_API_KEY is missing")
+        super().__init__(
+            api_key,
+            provider_name="xiaomi-mimo-tts",
+            model=_MIMO_TTS_MODEL,
+            base_url=_MIMO_BASE_URL,
+            client_factory=client_factory,
+        )
+        self.name = "xiaomi-mimo"

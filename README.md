@@ -20,9 +20,9 @@ LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面�
 | 公开 URL | 通过本机 `yt-dlp` 尽力下载视频与平台字幕 |
 | 抖音收藏 | 支持隔离官方窗口登录、默认收藏同步、待下载队列与本地缩略图 |
 | 材料提取 | 支持 ASR、关键帧、OCR、evidence 和 `content_pack.json` |
-| 学习笔记 | 已有严格笔记、效率笔记和质量实验链路；效率路线是后续唯一默认产品路线 |
+| 学习笔记 | 效率笔记是唯一默认产品路线；质量模式保留为开发调试链路 |
 | 播客与音频 | 已能从笔记生成播客稿、`speech.txt` 和音频 |
-| WebUI | 已有本地收件箱、来源添加、任务与成品查看；统一设置与自动工作流仍在收敛 |
+| WebUI | 已有本地收件箱、来源添加、任务与成品查看，以及 Provider、职责、重试和预算设置 |
 | 恢复与事实 | 任务/批次 JSON 保存事实，SQLite 作为可重建查询投影 |
 
 抖音图文目前只下载为本地素材和 `image_text.json`，尚未进入视频的 ASR、关键帧、证据包和笔记流程。
@@ -52,10 +52,10 @@ LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面�
 - **效率模式**：`assisted-note` 的 Writer + Reviewer 路线，后续作为默认笔记产品路径。
 - **质量模式**：`quality-note`，仍处于开发调试阶段，成功率较低，不属于稳定承诺。
 - **严格生成路线**：已退出运行时；历史 V2/V3 产物只保留必要的只读兼容，不应反向影响标准笔记合同。
-- **Provider 范围**：稳定 LLM 承诺将收敛到 MiMo 和 DeepSeek，同时保留新增 Provider 的模块接口。
-- **TTS 边界**：后续默认使用 Windows 系统 TTS，MiMo TTS 作为可选云端方案；当前配置和编排尚未完成这项解耦。
+- **Provider 范围**：产品连接注册表只包含 MiMo、DeepSeek、MiMo TTS、本地 ASR 和本地 OCR；保留新增 Provider 的模块接口。
+- **TTS 边界**：MiMo TTS 已作为独立连接、密钥引用、预算和失败域；Windows 系统 TTS 将在后续阶段成为默认音频方案。
 
-这些是当前产品方向，不代表所有收敛工作已经在代码中完成。
+阶段 0–3 已完成机器验收；Windows TTS、WebUI 统一自动工作流和真实稳定性验收仍未完成。
 
 ## 快速开始
 
@@ -109,13 +109,20 @@ uv run learnnest podcast --help
 uv run learnnest tts --help
 ```
 
-当前版本仍保留历史配置和 Provider 兼容路径，具体可用参数以命令帮助和 [`.env.example`](.env.example) 为准。不要把计划中的 MiMo/DeepSeek 注册表、职责绑定或 Windows TTS 默认值误认为已经实现。
+MiMo、DeepSeek、MiMo TTS、本地 ASR 和本地 OCR 连接可通过 WebUI 或
+`learnnest provider` 管理；任务开始时冻结职责绑定，设置变化不会改写运行中任务。
+`.env` 只保留显式旧 CLI 的迁移兼容入口，具体参数以命令帮助和
+[`.env.example`](.env.example) 为准。Windows TTS 尚未实现。
 
-自动工作流必须默认关闭，并由用户显式授权。自动重试只能处理明确的临时错误，所有尝试必须可见并计数；结果为 `unknown` 时停止，不能跨 Provider 自动切换。
+自动工作流默认关闭，并由用户显式授权。授权冻结重试、全局预算和
+note/podcast/TTS/ASR/OCR 五组预算；所有远程调用在构造 Provider 前先写入
+running 调用事实。自动重试只能处理明确的临时错误，所有尝试必须可见并计数；
+结果为 `unknown` 时停止，不能跨 Provider 自动切换。
 
 ## 本地优先与安全
 
 - API Key、Cookie、原始 Provider 请求、模型、媒体和运行产物不进入 Git。
+- Provider API Key 使用 Windows 当前用户 DPAPI 加密在对应输出根下；设置 API、任务、日志和页面只保存或显示状态与引用，不回显 Key。
 - WebUI 的抖音登录态使用 Windows 当前用户 DPAPI 加密，保存在对应输出根的 `.learnnest/douyin/session.dpapi`。
 - 程序不读取日常浏览器配置，不把解密 Cookie 写回 `.env`、任务、日志或 SQLite。
 - 请只处理你有权访问、下载和使用的内容，并遵守目标平台规则和适用法律。

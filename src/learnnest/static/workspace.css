@@ -76,6 +76,11 @@ button:disabled { cursor: wait; opacity: .6; }
 .favorite-link { color: var(--lake); font-size: .86rem; font-weight: 700; text-decoration: none; }
 .favorite-link:hover { color: var(--indigo); text-decoration: underline; }
 .connection-card { max-width: 690px; padding: 26px; background: var(--paper); border-left: 8px solid var(--lake); box-shadow: 0 10px 26px rgba(23, 50, 77, .06); }
+.provider-settings-card { margin-top: 22px; border-left-color: var(--bookmark); }
+.provider-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+.provider-form label { color: var(--ink-soft); font-size: .82rem; }.provider-form input, .provider-form select { width: 100%; margin-top: 6px; }.provider-form button { align-self: end; }
+.provider-list { border-top: 1px solid var(--line); }.provider-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto auto; gap: 10px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--line); color: var(--ink-soft); font-size: .82rem; }.provider-row span:first-child { color: var(--indigo); font-weight: 700; }.provider-row button { padding: 6px 9px; font-size: .78rem; }.provider-roles { margin-top: 18px; }.provider-roles p:last-child { margin-bottom: 0; line-height: 1.75; }
+.provider-role-list { border-top: 1px solid var(--line); }.provider-role-summary { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.5fr) auto; gap: 10px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--line); color: var(--ink-soft); font-size: .82rem; }.provider-role-summary span:first-child { color: var(--indigo); font-weight: 700; }.provider-role-summary strong { color: #1e694e; font-size: .76rem; }
 .connection-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .connection-heading h3 { margin-bottom: 12px; font: 700 1.25rem var(--display); }
 .status-pill { display: inline-flex; align-items: center; min-height: 30px; padding: 5px 11px; color: var(--ink-soft); background: var(--mist); border-radius: 99px; font-size: .78rem; font-weight: 700; white-space: nowrap; }
@@ -92,6 +97,7 @@ button:disabled { cursor: wait; opacity: .6; }
   .favorites-heading { margin-top: 28px; padding-top: 24px; }
   .favorite-grid { grid-template-columns: 1fr; }
   .connection-card { padding: 22px 18px; }
+  .provider-form, .provider-row, .provider-role-summary { grid-template-columns: 1fr; }
   .login-panel { grid-template-columns: 1fr; gap: 18px; }
   .qr-image { width: min(100%, 220px); height: auto; aspect-ratio: 1; }
   .connection-heading { align-items: flex-start; }

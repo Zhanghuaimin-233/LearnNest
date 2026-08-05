@@ -25,6 +25,17 @@ class AutomationBudget(_Model):
     reviewer_per_day: int = Field(default=20, ge=0, le=200, exclude=True)
     podcast_per_day: int = Field(default=20, ge=0, le=200, exclude=True)
     tts_per_day: int = Field(default=20, ge=0, le=200, exclude=True)
+    budget_group_calls_per_day: dict[
+        Literal["note", "podcast", "tts", "asr", "ocr"], int
+    ] = Field(
+        default_factory=lambda: {
+            "note": 20,
+            "podcast": 20,
+            "tts": 20,
+            "asr": 20,
+            "ocr": 20,
+        }
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -32,15 +43,36 @@ class AutomationBudget(_Model):
         if not isinstance(value, Mapping):
             return value
         data = dict(value)
+        has_explicit_groups = "budget_group_calls_per_day" in data
+        has_legacy_groups = any(
+            field in data
+            for field in (
+                "writer_per_day",
+                "reviewer_per_day",
+                "podcast_per_day",
+                "tts_per_day",
+            )
+        )
+        if not has_explicit_groups:
+            data["budget_group_calls_per_day"] = {
+                "note": min(
+                    int(data.get("writer_per_day", 20)),
+                    int(data.get("reviewer_per_day", 20)),
+                ),
+                "podcast": int(data.get("podcast_per_day", 20)),
+                "tts": int(data.get("tts_per_day", 20)),
+                "asr": 20,
+                "ocr": 20,
+            }
+        groups = data["budget_group_calls_per_day"]
+        if not isinstance(groups, Mapping):
+            raise ValueError("legacy provider budget groups are invalid")
+        strictest_group_cap = min(int(value) for value in groups.values())
         if "provider_calls_per_day" not in data:
-            data["provider_calls_per_day"] = sum(
-                int(data.get(field, default))
-                for field, default in (
-                    ("writer_per_day", 20),
-                    ("reviewer_per_day", 20),
-                    ("podcast_per_day", 20),
-                    ("tts_per_day", 20),
-                )
+            data["provider_calls_per_day"] = strictest_group_cap
+        elif has_legacy_groups:
+            data["provider_calls_per_day"] = min(
+                int(data["provider_calls_per_day"]), strictest_group_cap
             )
         return data
 
@@ -54,6 +86,9 @@ class AutomationPolicy(_Model):
     schedule_id: str = Field(min_length=1, max_length=64)
     writer: AssistedConnectionSnapshot
     reviewer: AssistedConnectionSnapshot
+    provider_settings_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
     dossier_schema_version: Literal["1.1"] = "1.1"
     max_items_per_tick: int = Field(default=1, ge=1, le=20)
     retries_per_stage: int = Field(default=3, ge=0, le=3)

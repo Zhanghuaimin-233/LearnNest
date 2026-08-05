@@ -9,7 +9,12 @@ from pathlib import Path
 
 from learnnest.execution_models import SourceIdentities
 from learnnest.identities import identity_keys, normalize_local_source, stream_sha256
-from learnnest.models import StageStatus, TaskProfile, TaskRecord
+from learnnest.models import (
+    ProviderBindingSnapshot,
+    StageStatus,
+    TaskProfile,
+    TaskRecord,
+)
 from learnnest.note_types import ConcreteNoteType
 
 
@@ -24,6 +29,7 @@ def create_task(
     title: str,
     profile: TaskProfile = "evidence",
     note_type_override: ConcreteNoteType | None = None,
+    provider_bindings: dict[str, ProviderBindingSnapshot] | None = None,
 ) -> TaskRecord:
     """Create a task record from stable source metadata."""
     return TaskRecord(
@@ -36,6 +42,10 @@ def create_task(
         title=title,
         profile=profile,
         note_type_override=note_type_override,
+        provider_bindings={
+            role: binding.model_dump(mode="python")
+            for role, binding in (provider_bindings or {}).items()
+        },
     )
 
 

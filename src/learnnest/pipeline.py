@@ -37,6 +37,7 @@ from learnnest.models import (
     TranscriptSegment,
 )
 from learnnest.publication import atomic_replace_bytes, note_belongs_to_task
+from learnnest.provider_profiles import freeze_role_bindings
 from learnnest.rendering import (
     render_note,
     render_note_manifest,
@@ -314,6 +315,7 @@ def process_source(
         title=title,
         profile=profile,
         note_type_override=source_item.note_type,
+        provider_bindings=freeze_role_bindings(root),
     ).model_copy(
         update={
             "identities": identities,

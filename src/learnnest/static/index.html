@@ -113,6 +113,31 @@
               </div>
             </div>
           </div>
+          <div class="connection-card provider-settings-card">
+            <div class="connection-heading">
+              <div>
+                <p class="chapter-label">学习连接</p>
+                <h3>Provider 设置</h3>
+              </div>
+              <span id="provider-settings-state" class="status-pill">未配置</span>
+            </div>
+            <p class="section-note">分别为笔记、播客、语音、字幕和识字选择连接。密钥只由 Windows 当前用户加密保存，页面不会再次显示。</p>
+            <form id="provider-connection-form" class="provider-form">
+              <label>连接名称<input name="name" required autocomplete="off" placeholder="例如 mimo-note" /></label>
+              <label>Provider<select name="preset"><option value="mimo">MiMo（LLM）</option><option value="deepseek">DeepSeek（LLM）</option><option value="mimo-tts">MiMo TTS</option><option value="local-asr">本地 ASR</option><option value="local-ocr">本地 OCR</option></select></label>
+              <label>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="本地 ASR/OCR 无需填写" /></label>
+              <button type="submit">保存连接</button>
+            </form>
+            <div id="provider-connection-list" class="provider-list"></div>
+            <div class="provider-roles" aria-label="职责绑定">
+              <p class="chapter-label">职责绑定</p>
+              <form id="provider-role-form" class="provider-form"><label>职责<select name="role"><option value="note_writer">笔记 Writer</option><option value="note_reviewer">笔记 Reviewer</option><option value="podcast">播客</option><option value="tts">TTS</option><option value="asr">ASR</option><option value="ocr">OCR</option></select></label><label>连接<select name="connection_name" id="provider-role-connection"></select></label><button type="submit">绑定职责</button></form>
+              <p id="provider-role-feedback" class="section-note" aria-live="polite">选择职责和连接后保存。</p>
+              <div id="provider-role-list" class="provider-role-list" aria-live="polite"></div>
+            </div>
+            <form id="provider-limits-form" class="provider-form"><label>自动重试次数<input name="retries_per_role" type="number" min="0" max="3" value="1" /></label><label>UTC 每日调用上限<input name="global_calls_per_day" type="number" min="0" max="800" value="80" /></label><label>笔记每日上限<input name="note_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>播客每日上限<input name="podcast_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>TTS 每日上限<input name="tts_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>ASR 每日上限<input name="asr_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>OCR 每日上限<input name="ocr_calls_per_day" type="number" min="0" max="800" value="20" /></label><button type="submit">保存限额</button></form>
+            <p id="provider-budget" class="section-note">重试 1 次；每日调用上限将在这里显示。</p>
+          </div>
         </section>
       </section>
     </main>

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -102,3 +104,62 @@ def test_mimo_tts_provider_rejects_blank_key_and_scrubs_errors() -> None:
         provider.synthesize("正文", "平静")
     assert secret not in str(captured.value)
     assert "RuntimeError" in str(captured.value)
+
+
+def test_windows_tts_uses_file_arguments_and_selects_a_stable_zh_cn_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import learnnest.tts_providers as providers
+
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if "-Mode" in args and args[args.index("-Mode") + 1] == "voices":
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps(
+                    [
+                        {"name": "Zulu English", "culture": "en-US"},
+                        {"name": "Huihui Desktop", "culture": "zh-CN"},
+                        {"name": "Ava Chinese", "culture": "zh-CN"},
+                    ]
+                ),
+                "",
+            )
+        output = args[args.index("-OutputPath") + 1]
+        with open(output, "wb") as stream:
+            stream.write(b"RIFFfakeWAVEdata")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(providers.subprocess, "run", fake_run)
+
+    assert providers.default_windows_tts_voice() == "Ava Chinese"
+    provider = providers.WindowsTtsProvider("Ava Chinese")
+    assert provider.synthesize('恶意 " 字符; $(whoami)', "自然") == b"RIFFfakeWAVEdata"
+
+    synth_call = calls[-1]
+    assert "-Command" not in synth_call
+    assert "-File" in synth_call
+    assert synth_call[synth_call.index("-Voice") + 1] == "Ava Chinese"
+    assert "恶意" not in " ".join(synth_call)
+
+
+def test_windows_tts_failure_is_sanitized_and_never_returns_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import learnnest.tts_providers as providers
+
+    monkeypatch.setattr(
+        providers.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(
+            args, 1, "", "untrusted C:\\private\\speech.txt"
+        ),
+    )
+    with pytest.raises(
+        providers.TtsProviderError, match="Windows TTS synthesis failed"
+    ) as error:
+        providers.WindowsTtsProvider("Huihui Desktop").synthesize("正文", "自然")
+    assert "private" not in str(error.value)

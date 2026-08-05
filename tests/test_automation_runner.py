@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from learnnest.automation_models import AutomationBudget, AutomationPolicy
 from learnnest.automation_runner import AutomationProviders, run_automation_tasks
 from learnnest.automation_store import (
@@ -184,3 +186,84 @@ def test_runner_rejects_disabled_policy_before_provider_calls(tmp_path: Path) ->
     else:
         raise AssertionError("disabled policy must not invoke a provider")
     assert provider.writer_calls == provider.reviewer_calls == 0
+
+
+def test_automation_tts_recovers_persisted_audio_without_a_second_provider_call(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import learnnest.automation_delivery as delivery
+    from learnnest.automation_delivery import PodcastArtifact, ReviewedMarkdownSource
+
+    pack = ContentPack(
+        task_id="20260805-automation-audio",
+        source_fingerprint="audio-fingerprint",
+        evidence=[],
+    )
+    source = ReviewedMarkdownSource(
+        task_id=pack.task_id,
+        task_dir=tmp_path / "task",
+        content_pack=pack,
+        content_pack_sha256="pack",
+        markdown="# reviewed\n",
+        markdown_sha256="markdown",
+        plan_id="plan",
+        dossier_sha256="dossier",
+    )
+    podcast = PodcastArtifact(
+        directory=tmp_path / "podcast",
+        script=None,  # type: ignore[arg-type]
+        speech="同一份已验证的 speech.txt。",
+        script_sha256="script",
+        speech_sha256="speech",
+    )
+
+    class Provider:
+        name = "fake"
+        model = "fake"
+        voice = "fake"
+        calls = 0
+
+        def synthesize(self, speech: str, style: str) -> bytes:
+            assert speech == podcast.speech
+            self.calls += 1
+            return b"wav"
+
+    provider = Provider()
+    monkeypatch.setattr(delivery, "validate_wav_bytes", lambda content: None)
+    monkeypatch.setattr(delivery, "probe_audio", lambda path: {"ok": True})
+    monkeypatch.setattr(
+        delivery,
+        "convert_wav_to_mp3",
+        lambda source, destination: destination.write_bytes(b"mp3"),
+    )
+    original_publish = delivery._publish_audio
+    monkeypatch.setattr(
+        delivery,
+        "_publish_audio",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("interrupted publish")),
+    )
+
+    with pytest.raises(OSError, match="interrupted publish"):
+        delivery.generate_model_reviewed_tts(
+            source,
+            podcast,
+            provider,
+            output_root=tmp_path,
+            delivery_dir=tmp_path / "delivery",
+            style_instruction="自然",
+        )
+
+    monkeypatch.setattr(delivery, "_publish_audio", original_publish)
+    recovered = delivery.generate_model_reviewed_tts(
+        source,
+        podcast,
+        provider,
+        output_root=tmp_path,
+        delivery_dir=tmp_path / "delivery",
+        style_instruction="自然",
+    )
+
+    assert provider.calls == 1
+    assert recovered.is_file()
+    marker = recovered.with_suffix(".learnnest.json")
+    assert '"status": "completed"' in marker.read_text(encoding="utf-8")

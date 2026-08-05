@@ -42,6 +42,11 @@ from learnnest.provider_profiles import (
     set_role_binding,
     update_limits,
 )
+from learnnest.tts_providers import (
+    TtsProviderError,
+    default_windows_tts_voice,
+    list_windows_tts_voices,
+)
 from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
 from learnnest.sources import SourceParseError, collect_sources
 from learnnest.task_store import find_task_by_id, load_task
@@ -81,10 +86,13 @@ class ProviderConnectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-    preset: Literal["mimo", "deepseek", "mimo-tts", "local-asr", "local-ocr"]
+    preset: Literal[
+        "windows-tts", "mimo", "deepseek", "mimo-tts", "local-asr", "local-ocr"
+    ]
     api_key: str | None = Field(default=None, min_length=1, max_length=2048)
     endpoint: str | None = Field(default=None, max_length=512)
     model: str | None = Field(default=None, max_length=128)
+    voice: str | None = Field(default=None, max_length=256)
 
 
 class ProviderRoleBindingRequest(BaseModel):
@@ -268,10 +276,24 @@ class WebService:
                 secret_value=request.api_key,
                 endpoint=request.endpoint,
                 model=request.model,
+                voice=request.voice,
             )
         except ValueError as error:
             raise ValueError("连接配置无法保存。") from error
         return self.provider_settings()
+
+    def windows_tts_voices(self) -> dict[str, object]:
+        try:
+            voices = list_windows_tts_voices()
+            default = default_windows_tts_voice()
+        except TtsProviderError as error:
+            raise ValueError("Windows 语音暂不可用。") from error
+        return {
+            "voices": [
+                {"name": voice.name, "culture": voice.culture} for voice in voices
+            ],
+            "default_voice": default,
+        }
 
     def set_provider_role(
         self, role: ProviderRole, request: ProviderRoleBindingRequest
@@ -628,6 +650,13 @@ def create_web_app(
             return service.save_provider_connection(request)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/api/providers/windows-tts/voices")
+    def windows_tts_voices() -> dict[str, object]:
+        try:
+            return service.windows_tts_voices()
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.post("/api/providers/roles/{role}")
     def save_provider_role(

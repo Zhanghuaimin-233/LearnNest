@@ -1108,19 +1108,35 @@ def test_podcast_external_script_does_not_require_mimo_key(
     assert result.exit_code == 0
 
 
-def test_tts_command_passes_secret_provider_and_output_root(
+def test_tts_command_uses_a_frozen_mimo_provider_and_output_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import learnnest.cli as cli
-    from pydantic import SecretStr
+    from learnnest.provider_profiles import (
+        connect,
+        freeze_role_bindings,
+        set_role_binding,
+    )
+    from learnnest.task_store import load_task, write_task_atomic
 
-    _write_cli_task(tmp_path)
+    task_dir = _write_cli_task(tmp_path)
+    connection = connect(
+        tmp_path, name="mimo-tts", preset="mimo-tts", secret_value="test-secret"
+    )
+    set_role_binding(tmp_path, role="tts", connection_name=connection.name)
+    task = load_task(task_dir).model_copy(
+        update={"provider_bindings": freeze_role_bindings(tmp_path)}
+    )
+    write_task_atomic(task_dir, task)
     recorded: dict[str, object] = {}
-    monkeypatch.setenv("MIMO_API_KEY", "test-secret-not-real")
 
-    def fake_provider(secret):
-        recorded["secret"] = secret
-        return object()
+    class FakeProvider:
+        billing = "paid"
+
+    def fake_provider(root, binding):
+        recorded["root"] = root
+        recorded["binding"] = binding
+        return FakeProvider()
 
     def fake_generate(task_dir, provider, output_root, *, style_instruction):
         recorded.update(
@@ -1133,7 +1149,7 @@ def test_tts_command_passes_secret_provider_and_output_root(
         )
         return type("Task", (), {"task_id": "20260711-a1b2c3d4"})()
 
-    monkeypatch.setattr(cli, "MimoTtsProvider", fake_provider, raising=False)
+    monkeypatch.setattr(cli, "tts_provider_from_snapshot", fake_provider)
     monkeypatch.setattr(cli, "generate_and_activate_tts", fake_generate, raising=False)
 
     result = runner.invoke(
@@ -1150,47 +1166,119 @@ def test_tts_command_passes_secret_provider_and_output_root(
 
     assert result.exit_code == 0
     assert "正在请求 MiMo TTS" in result.stdout
-    assert isinstance(recorded["secret"], SecretStr)
+    assert recorded["binding"].model_dump(mode="json") == task.provider_bindings[
+        "tts"
+    ].model_dump(mode="json")
     assert recorded["output_root"] == tmp_path
     assert recorded["style"] == "平静清晰"
 
 
-def test_tts_command_loads_mimo_key_from_the_local_runtime_env(
+def test_tts_command_rejects_legacy_runtime_key_without_a_frozen_binding(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import learnnest.cli as cli
-    from pydantic import SecretStr
-
     _write_cli_task(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("MIMO_API_KEY", raising=False)
     (tmp_path / ".env").write_text(
         "MIMO_API_KEY=from-local-runtime-file\n", encoding="utf-8"
     )
-    recorded: dict[str, object] = {}
+    result = runner.invoke(
+        app,
+        ["tts", "20260711-a1b2c3d4", "--output-root", str(tmp_path)],
+    )
 
-    def fake_provider(secret: SecretStr) -> object:
-        recorded["secret"] = secret
-        return object()
+    assert result.exit_code == 1
+    assert "frozen tts provider binding" in result.output
+    assert "from-local-runtime-file" not in result.output
 
-    monkeypatch.setattr(cli, "MimoTtsProvider", fake_provider, raising=False)
+
+def test_tts_command_windows_binding_bypasses_paid_admission(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.cli as cli
+    from learnnest.provider_profiles import (
+        connect,
+        freeze_role_bindings,
+        set_role_binding,
+    )
+    from learnnest.task_store import load_task, write_task_atomic
+
+    task_dir = _write_cli_task(tmp_path)
+    connection = connect(
+        tmp_path,
+        name="windows-voice",
+        preset="windows-tts",
+        voice="Huihui Desktop",
+    )
+    set_role_binding(tmp_path, role="tts", connection_name=connection.name)
+    write_task_atomic(
+        task_dir,
+        load_task(task_dir).model_copy(
+            update={"provider_bindings": freeze_role_bindings(tmp_path)}
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "execute_direct_provider_call",
+        lambda *args, **kwargs: pytest.fail("Windows TTS must bypass paid admission"),
+    )
     monkeypatch.setattr(
         cli,
         "generate_and_activate_tts",
         lambda task_dir, provider, output_root, *, style_instruction: type(
             "Task", (), {"task_id": "20260711-a1b2c3d4"}
         )(),
-        raising=False,
     )
 
     result = runner.invoke(
-        app,
-        ["tts", "20260711-a1b2c3d4", "--output-root", str(tmp_path)],
+        app, ["tts", "20260711-a1b2c3d4", "--output-root", str(tmp_path)]
     )
 
-    assert result.exit_code == 0, result.output
-    assert recorded["secret"] == SecretStr("from-local-runtime-file")
-    assert "from-local-runtime-file" not in result.output
+    assert result.exit_code == 0
+    assert "Windows 本地语音" in result.stdout
+
+
+def test_tts_command_mimo_zero_cap_blocks_before_adapter_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.cli as cli
+    from learnnest.provider_profiles import (
+        ProviderSettings,
+        connect,
+        freeze_role_bindings,
+        load_settings,
+        save_settings,
+        set_role_binding,
+    )
+    from learnnest.task_store import load_task, write_task_atomic
+
+    task_dir = _write_cli_task(tmp_path)
+    connection = connect(
+        tmp_path, name="mimo-tts", preset="mimo-tts", secret_value="test-secret"
+    )
+    set_role_binding(tmp_path, role="tts", connection_name=connection.name)
+    write_task_atomic(
+        task_dir,
+        load_task(task_dir).model_copy(
+            update={"provider_bindings": freeze_role_bindings(tmp_path)}
+        ),
+    )
+    settings = load_settings(tmp_path).model_copy(update={"global_calls_per_day": 0})
+    save_settings(tmp_path, ProviderSettings.model_validate(settings.model_dump()))
+    constructions = 0
+
+    def fail_factory(*args, **kwargs):
+        nonlocal constructions
+        constructions += 1
+        raise AssertionError("MiMo adapter must not be constructed at cap zero")
+
+    monkeypatch.setattr(cli, "tts_provider_from_snapshot", fail_factory)
+    result = runner.invoke(
+        app, ["tts", "20260711-a1b2c3d4", "--output-root", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1
+    assert constructions == 0
 
 
 @pytest.mark.parametrize(
@@ -1233,7 +1321,29 @@ def test_paid_commands_acquire_cross_process_resource_slots(
             lambda task_dir, provider, output_root: task,
         )
     else:
-        monkeypatch.setattr(cli, "MimoTtsProvider", lambda secret: object())
+        from learnnest.provider_profiles import (
+            connect,
+            freeze_role_bindings,
+            set_role_binding,
+        )
+        from learnnest.task_store import load_task, write_task_atomic
+
+        task_dir = tmp_path / "视频学习素材" / "lesson--a1b2c3d4"
+        connection = connect(
+            tmp_path, name="mimo-tts", preset="mimo-tts", secret_value="test-secret"
+        )
+        set_role_binding(tmp_path, role="tts", connection_name=connection.name)
+        task_with_binding = load_task(task_dir).model_copy(
+            update={"provider_bindings": freeze_role_bindings(tmp_path)}
+        )
+        write_task_atomic(task_dir, task_with_binding)
+
+        class FakeProvider:
+            billing = "paid"
+
+        monkeypatch.setattr(
+            cli, "tts_provider_from_snapshot", lambda root, binding: FakeProvider()
+        )
         monkeypatch.setattr(
             cli,
             "generate_and_activate_tts",

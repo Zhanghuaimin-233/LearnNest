@@ -298,6 +298,7 @@ def provider_call_usage(
                 )
                 for position, attempt in enumerate(state.attempts)
                 if attempt.stage in {"writer", "reviewer", "podcast", "tts"}
+                and attempt.billing == "paid"
                 and attempt.started_at.astimezone(UTC).date()
                 == now.astimezone(UTC).date()
             )
@@ -335,6 +336,7 @@ def provider_role_call_usage(
                 )
                 for position, attempt in enumerate(state.attempts)
                 if attempt.stage == stage
+                and attempt.billing == "paid"
                 and attempt.started_at.astimezone(UTC).date()
                 == now.astimezone(UTC).date()
             )
@@ -379,6 +381,7 @@ def provider_budget_group_call_usage(
                 )
                 for position, attempt in enumerate(state.attempts)
                 if attempt.stage in stages
+                and attempt.billing == "paid"
                 and attempt.started_at.astimezone(UTC).date()
                 == now.astimezone(UTC).date()
             )

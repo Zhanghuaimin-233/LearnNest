@@ -429,6 +429,26 @@ def test_local_asr_and_ocr_bindings_freeze_without_secrets(tmp_path: Path) -> No
     assert frozen["ocr"].endpoint == "local://ocr"
 
 
+def test_windows_tts_voice_is_secret_free_public_and_frozen_exactly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.provider_profiles as profiles
+
+    monkeypatch.setattr(profiles, "default_windows_tts_voice", lambda: "Huihui Desktop")
+    windows = connect(tmp_path, name="windows-voice", preset="windows-tts")
+    set_role_binding(tmp_path, role="tts", connection_name=windows.name)
+
+    frozen = freeze_role_bindings(tmp_path)
+    public = profiles.public_settings(tmp_path)
+
+    assert windows.secret_id is None
+    assert frozen["tts"].provider == "windows-tts"
+    assert frozen["tts"].endpoint == "local://windows-tts/Huihui%20Desktop"
+    assert public["connections"][0]["configured"] is True
+    assert public["connections"][0]["voice"] == "Huihui Desktop"
+    assert public["connections"][0]["secret_status"] == "local_configured"
+
+
 def test_mimo_and_deepseek_connections_have_no_fallback_or_shared_secret_object(
     tmp_path: Path,
 ) -> None:

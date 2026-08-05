@@ -198,7 +198,9 @@ def generate_model_reviewed_tts(
     if directory.exists():
         metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
         published = Path(output_root).resolve() / str(metadata["published_path"])
-        if metadata.get("status") == "completed" and published.is_file():
+        audio = directory / "audio.mp3"
+        if metadata.get("status") == "completed" and audio.is_file():
+            _publish_audio(source, audio, published, podcast)
             return published
         raise ValueError("model-reviewed TTS artifact is incomplete")
     temporary = directory.with_name(".tts")
@@ -215,8 +217,6 @@ def generate_model_reviewed_tts(
             / "assisted-draft"
             / f"{safe_title(source.content_pack.task_id)}--{source.task_id[-8:]}.mp3"
         )
-        destination = Path(output_root).resolve() / relative
-        _publish_audio(source, temporary / "audio.mp3", destination, podcast)
         _write_json(
             temporary / "metadata.json",
             {
@@ -227,7 +227,6 @@ def generate_model_reviewed_tts(
             },
         )
         os.replace(temporary, directory)
-        return destination
     except Exception:
         _write_json(
             temporary / "metadata.json",
@@ -238,6 +237,9 @@ def generate_model_reviewed_tts(
             failed = delivery_dir / "tts-failed-latest"
         os.replace(temporary, failed)
         raise
+    destination = Path(output_root).resolve() / relative
+    _publish_audio(source, directory / "audio.mp3", destination, podcast)
+    return destination
 
 
 def _publish_audio(
@@ -249,21 +251,20 @@ def _publish_audio(
     content = audio_path.read_bytes()
     marker = destination.with_suffix(".learnnest.json")
     marker.parent.mkdir(parents=True, exist_ok=True)
-    _write_json(
-        marker,
-        {
-            "schema_version": "1.0",
-            "route": "assisted_draft",
-            "review_status": "model_reviewed",
-            "task_id": source.task_id,
-            "assisted_plan_id": source.plan_id,
-            "note_content_sha256": source.markdown_sha256,
-            "podcast_script_sha256": podcast.script_sha256,
-            "mp3_sha256": _sha256(content),
-            "status": "completed",
-        },
-    )
+    pending = {
+        "schema_version": "1.0",
+        "route": "assisted_draft",
+        "review_status": "model_reviewed",
+        "task_id": source.task_id,
+        "assisted_plan_id": source.plan_id,
+        "note_content_sha256": source.markdown_sha256,
+        "podcast_script_sha256": podcast.script_sha256,
+        "mp3_sha256": _sha256(content),
+        "status": "pending",
+    }
+    _write_json(marker, pending)
     _write_bytes(destination, content)
+    _write_json(marker, {**pending, "status": "completed"})
 
 
 def _route_metadata(

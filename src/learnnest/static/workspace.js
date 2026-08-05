@@ -39,6 +39,9 @@ const providerRoleConnection = document.querySelector("#provider-role-connection
 const providerLimitsForm = document.querySelector("#provider-limits-form");
 const providerRoleFeedback = document.querySelector("#provider-role-feedback");
 const providerRoleList = document.querySelector("#provider-role-list");
+const windowsVoiceField = document.querySelector("#windows-voice-field");
+const windowsVoice = document.querySelector("#windows-voice");
+let windowsVoicesLoaded = false;
 const providerRoleLabels = {
   note_writer: "笔记 Writer", note_reviewer: "笔记 Reviewer", podcast: "播客",
   tts: "TTS", asr: "ASR", ocr: "OCR",
@@ -89,7 +92,7 @@ function renderProviderSettings(settings) {
   providerLimitsForm.elements.global_calls_per_day.value = settings.global_calls_per_day;
   for (const group of ["note", "podcast", "tts", "asr", "ocr"]) providerLimitsForm.elements[`${group}_calls_per_day`].value = settings.budget_group_calls_per_day[group];
   providerList.innerHTML = settings.connections.length
-    ? settings.connections.map((item) => `<div class="provider-row"><span>${escapeHtml(item.name)}</span><span>${escapeHtml(item.provider)} · ${escapeHtml(item.model)}</span><span>${item.secret_status === "configured" || item.capability === "asr" || item.capability === "ocr" ? "已配置" : "未配置"}</span><button type="button" data-check-connection="${escapeHtml(item.name)}">检查</button></div>`).join("")
+    ? settings.connections.map((item) => `<div class="provider-row"><span>${escapeHtml(item.name)}</span><span>${escapeHtml(item.provider)} · ${escapeHtml(item.voice || item.model)}</span><span>${item.secret_status === "local_configured" ? "本地已配置" : item.configured ? "已配置" : "未配置"}</span><button type="button" data-check-connection="${escapeHtml(item.name)}">检查</button></div>`).join("")
     : '<p class="empty">还没有学习连接。</p>';
   providerList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", async () => {
     try {
@@ -107,6 +110,18 @@ function renderProviderSettings(settings) {
     : '<p class="empty">尚未绑定职责。</p>';
 }
 
+async function refreshWindowsVoices() {
+  if (providerForm.elements.preset.value !== "windows-tts") {
+    windowsVoiceField.hidden = true;
+    return;
+  }
+  windowsVoiceField.hidden = false;
+  if (windowsVoicesLoaded) return;
+  const payload = await api("/api/providers/windows-tts/voices");
+  windowsVoice.innerHTML = payload.voices.map((voice) => `<option value="${escapeHtml(voice.name)}" ${voice.name === payload.default_voice ? "selected" : ""}>${escapeHtml(voice.name)} · ${escapeHtml(voice.culture)}</option>`).join("");
+  windowsVoicesLoaded = true;
+}
+
 function renderProviderRoleOptions(settings) {
   const role = providerRoleForm.elements.role.value;
   const expectedCapability = providerRoleCapabilities[role];
@@ -119,7 +134,7 @@ function renderProviderRoleOptions(settings) {
 }
 
 async function loadProviderSettings() {
-  try { renderProviderSettings(await api("/api/providers/settings")); } catch (error) { providerState.textContent = "无法读取"; }
+  try { renderProviderSettings(await api("/api/providers/settings")); await refreshWindowsVoices(); } catch (error) { providerState.textContent = "无法读取"; }
 }
 
 function providerSettingsFormActive() {
@@ -424,12 +439,18 @@ providerForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({
         name: form.get("name"), preset,
         ...(key ? { api_key: key } : {}),
+        ...(preset === "windows-tts" ? { voice: form.get("voice") } : {}),
       }),
     });
     event.currentTarget.reset();
     renderProviderSettings(settings);
     say("连接已保存；密钥不会显示在页面中。");
   } catch (error) { say(error.message); }
+});
+
+providerForm.elements.preset.addEventListener("change", () => {
+  windowsVoicesLoaded = false;
+  refreshWindowsVoices().catch((error) => say(error.message));
 });
 
 providerRoleForm.addEventListener("submit", async (event) => {

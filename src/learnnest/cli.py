@@ -66,7 +66,7 @@ from learnnest.note_providers import (
     OpenAICompatibleQualityNoteProvider,
 )
 from learnnest.provider_profiles import (
-    PRESETS,
+    connection_presets,
     ProviderConnection,
     connect as connect_provider,
     get_connection,
@@ -124,7 +124,7 @@ from learnnest.tts_generation import (
     DEFAULT_TTS_STYLE,
     generate_and_activate_tts,
 )
-from learnnest.tts_providers import MimoTtsProvider
+from learnnest.tts_providers import TtsProvider
 from learnnest.web_app import serve_web_app
 from learnnest.validation import validate_task
 
@@ -246,11 +246,12 @@ def provider_connect(
 ) -> None:
     """Save a product Provider connection with a CurrentUser-encrypted Key."""
     root = _output_root(output_root)
-    if preset not in PRESETS:
+    presets = connection_presets()
+    if preset not in presets:
         typer.echo("ERROR: unknown provider preset", err=True)
         raise typer.Exit(code=1)
     key = ""
-    if PRESETS[preset].requires_secret:
+    if presets[preset].requires_secret:
         key = typer.prompt("API key", hide_input=True)
         if not key.strip():
             typer.echo("ERROR: API key is required", err=True)
@@ -1913,14 +1914,18 @@ def tts(
     root = _output_root(output_root)
     task_dir = _find_task_dir(task_id, root)
     secret: SecretStr | None = None
-    typer.echo("正在请求 MiMo TTS，服务端可能需要几分钟；请勿重复执行。")
     try:
         with _task_execution_lock(root, task_dir):
+            binding = _frozen_task_binding(root, task_id, "tts")
+            local_tts = binding.provider == "windows-tts"
 
             def invoke_provider() -> object:
                 nonlocal secret
                 provider, secret = _tts_provider_for_task(root, task_id)
-                with _resource_execution(root, "network", "tts", "ffmpeg"):
+                resources = (
+                    ("tts", "ffmpeg") if local_tts else ("network", "tts", "ffmpeg")
+                )
+                with _resource_execution(root, *resources):
                     return generate_and_activate_tts(
                         task_dir,
                         provider,
@@ -1928,9 +1933,14 @@ def tts(
                         style_instruction=style,
                     )
 
-            task = execute_direct_provider_call(
-                str(root), task_id, "tts", invoke_provider
-            )
+            if local_tts:
+                typer.echo("正在使用 Windows 本地语音生成音频。")
+                task = invoke_provider()
+            else:
+                typer.echo("正在请求 MiMo TTS，服务端可能需要几分钟；请勿重复执行。")
+                task = execute_direct_provider_call(
+                    str(root), task_id, "tts", invoke_provider
+                )
     except LockUnavailable as error:
         typer.echo(f"ERROR: task is still running: {task_id}", err=True)
         raise typer.Exit(code=1) from error
@@ -2460,17 +2470,15 @@ def _podcast_provider_for_task(
     return MimoPodcastProvider(secret), secret
 
 
-def _tts_provider_for_task(root: Path, task_id: str) -> tuple[object, SecretStr | None]:
+def _tts_provider_for_task(
+    root: Path, task_id: str
+) -> tuple[TtsProvider, SecretStr | None]:
     task = load_task(_find_task_dir(task_id, root))
-    if "tts" in task.provider_bindings:
-        return (
-            tts_provider_from_snapshot(str(root), task.provider_bindings["tts"]),
-            None,
-        )
-    if task.provider_bindings:
-        raise ValueError("task is missing frozen tts provider binding")
-    secret = _mimo_api_key(_runtime_environment())
-    return MimoTtsProvider(secret), secret
+    try:
+        binding = task.provider_bindings["tts"]
+    except KeyError as error:
+        raise ValueError("task is missing frozen tts provider binding") from error
+    return tts_provider_from_snapshot(str(root), binding), None
 
 
 def _assisted_snapshots_for_tasks(
@@ -2510,8 +2518,30 @@ def _automation_providers_for_task(root: Path, task_id: str) -> AutomationProvid
         writer=assisted_provider_from_snapshot(str(root), writer),
         reviewer=assisted_provider_from_snapshot(str(root), reviewer),
         podcast=podcast_provider_from_snapshot(str(root), podcast),
-        tts=tts_provider_from_snapshot(str(root), tts),
+        tts=(
+            tts_provider_from_snapshot(str(root), tts)
+            if tts.provider == "windows-tts"
+            else _LazyFrozenTtsProvider(root, tts)
+        ),
     )
+
+
+class _LazyFrozenTtsProvider:
+    """Delay cloud client construction until the paid TTS attempt is admitted."""
+
+    billing = "paid"
+    voice = "冰糖"
+
+    def __init__(self, root: Path, binding: object) -> None:
+        self._root = root
+        self._binding = binding
+        self.name = str(getattr(binding, "provider"))
+        self.model = str(getattr(binding, "model"))
+
+    def synthesize(self, speech_text: str, style_instruction: str) -> bytes:
+        provider = tts_provider_from_snapshot(str(self._root), self._binding)  # type: ignore[arg-type]
+        self.voice = provider.voice
+        return provider.synthesize(speech_text, style_instruction)
 
 
 def _quality_state_summary(state: object) -> str:

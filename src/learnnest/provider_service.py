@@ -31,7 +31,11 @@ from learnnest.provider_profiles import (
     settings_sha256,
 )
 from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
-from learnnest.tts_providers import OpenAICompatibleTtsProvider
+from learnnest.tts_providers import (
+    OpenAICompatibleTtsProvider,
+    WindowsTtsProvider,
+    windows_tts_voice_from_endpoint,
+)
 
 
 class ProviderConnectionCheckError(ValueError):
@@ -210,9 +214,18 @@ def tts_provider_from_snapshot(
     binding: FrozenBinding,
     *,
     client_factory: Callable[..., Any] = OpenAI,
-) -> OpenAICompatibleTtsProvider:
-    """Construct only the independently configured MiMo TTS role."""
-    if binding.capability != "tts" or binding.provider != "xiaomi-mimo-tts":
+) -> OpenAICompatibleTtsProvider | WindowsTtsProvider:
+    """Construct exactly the frozen MiMo or local Windows TTS adapter."""
+    if binding.capability != "tts":
+        raise ValueError("frozen binding cannot perform TTS")
+    if binding.provider == "windows-tts":
+        if binding.model != "system-speech":
+            raise ValueError("frozen binding has an unsupported Windows TTS model")
+        voice = windows_tts_voice_from_endpoint(binding.endpoint)
+        if voice is None:
+            raise ValueError("frozen binding has no Windows TTS voice")
+        return WindowsTtsProvider(voice)
+    if binding.provider != "xiaomi-mimo-tts":
         raise ValueError("frozen binding cannot perform MiMo TTS")
     if binding.model != "mimo-v2.5-tts":
         raise ValueError("frozen binding has an unsupported MiMo TTS model")

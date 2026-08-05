@@ -124,7 +124,8 @@
             <p class="section-note">分别为笔记、播客、语音、字幕和识字选择连接。密钥只由 Windows 当前用户加密保存，页面不会再次显示。</p>
             <form id="provider-connection-form" class="provider-form">
               <label>连接名称<input name="name" required autocomplete="off" placeholder="例如 mimo-note" /></label>
-              <label>Provider<select name="preset"><option value="mimo">MiMo（LLM）</option><option value="deepseek">DeepSeek（LLM）</option><option value="mimo-tts">MiMo TTS</option><option value="local-asr">本地 ASR</option><option value="local-ocr">本地 OCR</option></select></label>
+              <label>Provider<select name="preset"><option value="windows-tts">Windows 系统语音（本地）</option><option value="mimo">MiMo（LLM）</option><option value="deepseek">DeepSeek（LLM）</option><option value="mimo-tts">MiMo TTS</option><option value="local-asr">本地 ASR</option><option value="local-ocr">本地 OCR</option></select></label>
+              <label id="windows-voice-field">Windows 语音<select name="voice" id="windows-voice"></select></label>
               <label>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="本地 ASR/OCR 无需填写" /></label>
               <button type="submit">保存连接</button>
             </form>

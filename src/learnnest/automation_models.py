@@ -127,6 +127,7 @@ class AutomationAttempt(_Model):
     """A secret-free paid-stage attempt retained for cost and recovery decisions."""
 
     call_id: str | None = Field(default=None, min_length=1)
+    billing: Literal["paid", "local"] = "paid"
     stage: Literal["writer", "reviewer", "podcast", "tts"]
     attempt: int = Field(ge=1, le=4)
     status: Literal["running", "completed", "failed", "unknown"]

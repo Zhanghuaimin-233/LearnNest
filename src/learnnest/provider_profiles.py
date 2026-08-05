@@ -10,6 +10,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote, unquote
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -24,6 +25,7 @@ ProviderRole = Literal["note_writer", "note_reviewer", "podcast", "tts", "asr", 
 ProviderBudgetGroup = Literal["note", "podcast", "tts", "asr", "ocr"]
 AuthorizationMode = Literal["local_only", "automatic"]
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_WINDOWS_TTS_PREFIX = "local://windows-tts/"
 _ROLE_CAPABILITIES: dict[ProviderRole, Capability] = {
     "note_writer": "llm",
     "note_reviewer": "llm",
@@ -100,6 +102,22 @@ PRESETS: dict[str, ProviderPreset] = {
         api_family="local",
         endpoint="local://ocr",
         default_model="local-installed",
+        requires_secret=False,
+    ),
+}
+
+# ``PRESETS`` remains the pre-existing public product registry consumed by
+# legacy CLI compatibility. Windows voice selection is a local connection-only
+# choice exposed by the settings service, not a cloud Provider product option.
+_CONNECTION_PRESETS: dict[str, ProviderPreset] = {
+    **PRESETS,
+    "windows-tts": ProviderPreset(
+        preset="windows-tts",
+        capability="tts",
+        provider="windows-tts",
+        api_family="local",
+        endpoint="local://windows-tts",
+        default_model="system-speech",
         requires_secret=False,
     ),
 }
@@ -195,7 +213,7 @@ class ProviderSettings(_Model):
         for name, connection in self.connections.items():
             if name != connection.name or name != connection.connection_id:
                 raise ValueError("provider connection identity is invalid")
-            if connection.preset not in PRESETS:
+            if connection.preset not in _CONNECTION_PRESETS:
                 raise ValueError("unsupported provider")
         if set(self.budget_group_calls_per_day) != set(_ROLE_BUDGET_GROUPS.values()):
             raise ValueError("provider budget group caps must be complete")
@@ -265,6 +283,32 @@ def provider_directory(output_root: str | Path) -> Path:
     return Path(output_root).resolve() / ".learnnest" / "providers"
 
 
+def connection_presets() -> dict[str, ProviderPreset]:
+    """Return the settings connection choices, including local Windows TTS."""
+    return dict(_CONNECTION_PRESETS)
+
+
+def default_windows_tts_voice() -> str:
+    # Kept lazy because note providers import this settings module while the
+    # TTS transport imports the shared diagnostic helper from note providers.
+    from learnnest.tts_providers import default_windows_tts_voice as select_voice
+
+    return select_voice()
+
+
+def _windows_tts_endpoint(voice: str) -> str:
+    if not voice.strip():
+        raise ValueError("Windows TTS voice is unavailable")
+    return _WINDOWS_TTS_PREFIX + quote(voice, safe="")
+
+
+def _windows_tts_voice_from_endpoint(endpoint: str | None) -> str | None:
+    if not isinstance(endpoint, str) or not endpoint.startswith(_WINDOWS_TTS_PREFIX):
+        return None
+    voice = unquote(endpoint.removeprefix(_WINDOWS_TTS_PREFIX))
+    return voice if voice.strip() else None
+
+
 def load_settings(output_root: str | Path) -> ProviderSettings:
     path = provider_directory(output_root) / "settings.json"
     if not path.is_file():
@@ -295,12 +339,13 @@ def connect(
     secret_value: str | None = None,
     endpoint: str | None = None,
     model: str | None = None,
+    voice: str | None = None,
     now: datetime | None = None,
 ) -> ProviderConnection:
     if not _NAME.fullmatch(name):
         raise ValueError("provider connection name is invalid")
     try:
-        base = PRESETS[preset]
+        base = _CONNECTION_PRESETS[preset]
     except KeyError as error:
         raise ValueError("unsupported provider") from error
     selected_endpoint = endpoint or base.endpoint
@@ -313,6 +358,12 @@ def connect(
         raise ValueError("provider endpoint is invalid")
     if base.requires_secret and not (secret_value and secret_value.strip()):
         raise ValueError("provider secret is required")
+    if base.preset == "windows-tts":
+        if endpoint is not None or model is not None:
+            raise ValueError("Windows TTS connection is fixed to System.Speech")
+        selected_endpoint = _windows_tts_endpoint(voice or default_windows_tts_voice())
+    elif voice is not None:
+        raise ValueError("voice selection is only available for Windows TTS")
     settings = load_settings(output_root)
     old_connection = settings.connections.get(name)
     if old_connection is not None and old_connection.capability != base.capability:
@@ -481,9 +532,16 @@ def public_settings(output_root: str | Path) -> dict[str, object]:
                 "provider": item.provider,
                 "model": item.model,
                 "configured": item.secret_id is not None or item.api_family == "local",
-                "secret_status": "configured"
-                if item.secret_id is not None
-                else "unconfigured",
+                "secret_status": (
+                    "configured"
+                    if item.secret_id is not None
+                    else "local_configured"
+                    if item.api_family == "local"
+                    else "unconfigured"
+                ),
+                "voice": _windows_tts_voice_from_endpoint(item.endpoint)
+                if item.provider == "windows-tts"
+                else None,
             }
             for item in sorted(
                 settings.connections.values(), key=lambda item: item.name

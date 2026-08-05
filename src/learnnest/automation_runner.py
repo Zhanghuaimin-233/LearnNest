@@ -6,7 +6,6 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-import uuid
 
 from learnnest.assisted_note_generation import (
     create_assisted_plan,
@@ -280,7 +279,13 @@ def _run_task(
     if not podcast_ok or podcast is None:
         return False
 
-    _tts_path, state, tts_ok = _run_paid_stage(
+    tts_provider = provider_for_stage("tts")
+    run_tts_stage = (
+        _run_local_stage
+        if getattr(tts_provider, "billing", "paid") == "local"
+        else _run_paid_stage
+    )
+    _tts_path, state, tts_ok = run_tts_stage(
         root,
         state,
         "tts",
@@ -288,7 +293,7 @@ def _run_task(
         invoke=lambda: generate_model_reviewed_tts(
             source,
             podcast,
-            provider_for_stage("tts"),
+            tts_provider,  # type: ignore[arg-type]
             output_root=root,
             delivery_dir=delivery_dir,
             style_instruction=DEFAULT_TTS_STYLE,
@@ -296,7 +301,7 @@ def _run_task(
         recover=lambda: _recover_tts(
             source,
             podcast,
-            provider_for_stage("tts"),
+            tts_provider,  # type: ignore[arg-type]
             root,
             delivery_dir,
         ),
@@ -459,6 +464,76 @@ def _run_paid_stage(
     return result, state, True
 
 
+def _run_local_stage(
+    root: Path,
+    state: AutomationTaskState,
+    stage: str,
+    now: datetime,
+    *,
+    invoke: Callable[[], object],
+    recover: Callable[[], object],
+) -> tuple[object | None, AutomationTaskState, bool]:
+    """Persist local TTS attempts without consuming the paid-call ledger."""
+    status = load_status(root)
+    assert status is not None
+    readiness = _stage_readiness(
+        state,
+        stage,
+        now,
+        max_attempts=status.policy.retries_per_stage + 1,
+    )
+    if readiness == "completed":
+        try:
+            return recover(), state, True
+        except Exception as error:
+            return (
+                None,
+                _attention(root, state, "non_retryable_failure", _safe_summary(error)),
+                False,
+            )
+    running = _latest_attempt(state, stage, status="running")
+    if running is not None:
+        try:
+            recovered = recover()
+        except Exception:
+            recovered = None
+        if recovered is None:
+            state = _finish_attempt(
+                root,
+                state,
+                stage,
+                running.attempt,
+                "unknown",
+                now=now,
+                safe_summary="local audio result could not be confirmed",
+            )
+            return None, _attention(root, state, "unknown_result"), False
+        state = _finish_attempt(
+            root, state, stage, running.attempt, "completed", now=now
+        )
+        return recovered, state, True
+    if readiness != "ready":
+        return None, _apply_readiness_block(root, state, stage, readiness), False
+    state = _begin_attempt(root, state, stage, _stage_attempts(state, stage) + 1, now)
+    try:
+        result = invoke()
+    except Exception as error:
+        return (
+            None,
+            _finish_provider_failure(
+                root, state, stage, _stage_attempts(state, stage), now, error
+            ),
+            False,
+        )
+    return (
+        result,
+        _finish_attempt(
+            root, state, stage, _stage_attempts(state, stage), "completed", now=now
+        ),
+        True,
+    )
+
+
 def _recover_running_note_attempts(
     root: Path,
     state: AutomationTaskState,
@@ -581,7 +656,7 @@ def _begin_attempt(
             "attempts": [
                 *state.attempts,
                 AutomationAttempt(
-                    call_id=uuid.uuid4().hex,
+                    billing="local",
                     stage=stage,
                     attempt=attempt,
                     status="running",

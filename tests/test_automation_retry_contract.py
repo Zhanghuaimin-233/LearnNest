@@ -734,3 +734,32 @@ def test_reauthorization_freezes_webui_retry_zero_before_the_first_fake_failure(
 
     assert first.failed_task_ids == second.failed_task_ids == ("20260728-retry",)
     assert provider.writer_calls == 1
+
+
+def test_local_tts_attempt_is_observable_but_not_a_paid_usage_fact(
+    tmp_path: Path,
+) -> None:
+    policy_sha = "a" * 64
+    state = AutomationTaskState(
+        task_id="local-tts",
+        policy_sha256=policy_sha,
+        attempts=[
+            AutomationAttempt(
+                stage="tts",
+                billing="local",
+                attempt=1,
+                status="completed",
+                started_at=BASE_TIME,
+                completed_at=BASE_TIME,
+            )
+        ],
+    )
+    save_task_state(tmp_path, state)
+
+    used, limit, remaining = provider_call_usage(
+        tmp_path, policy_sha, now=BASE_TIME, limit=1
+    )
+
+    assert used == 0
+    assert limit == 1
+    assert remaining == 1

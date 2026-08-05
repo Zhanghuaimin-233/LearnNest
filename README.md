@@ -21,7 +21,7 @@ LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面�
 | 抖音收藏 | 支持隔离官方窗口登录、默认收藏同步、待下载队列与本地缩略图 |
 | 材料提取 | 支持 ASR、关键帧、OCR、evidence 和 `content_pack.json` |
 | 学习笔记 | 效率笔记是唯一默认产品路线；质量模式保留为开发调试链路 |
-| 播客与音频 | 已能从笔记生成播客稿、`speech.txt` 和音频 |
+| 播客与音频 | 已能从笔记生成播客稿、`speech.txt`，并通过 Windows 系统语音或可选 MiMo TTS 生成音频 |
 | WebUI | 已有本地收件箱、来源添加、任务与成品查看，以及 Provider、职责、重试和预算设置 |
 | 恢复与事实 | 任务/批次 JSON 保存事实，SQLite 作为可重建查询投影 |
 
@@ -53,9 +53,10 @@ LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面�
 - **质量模式**：`quality-note`，仍处于开发调试阶段，成功率较低，不属于稳定承诺。
 - **严格生成路线**：已退出运行时；历史 V2/V3 产物只保留必要的只读兼容，不应反向影响标准笔记合同。
 - **Provider 范围**：产品连接注册表只包含 MiMo、DeepSeek、MiMo TTS、本地 ASR 和本地 OCR；保留新增 Provider 的模块接口。
-- **TTS 边界**：MiMo TTS 已作为独立连接、密钥引用、预算和失败域；Windows 系统 TTS 将在后续阶段成为默认音频方案。
+- **TTS 边界**：Windows System.Speech 是默认本地方案，可在设置页选择并保存精确 voice；MiMo TTS 是独立的可选云端连接、密钥引用、预算和失败域。
 
-阶段 0–3 已完成机器验收；Windows TTS、WebUI 统一自动工作流和真实稳定性验收仍未完成。
+阶段 0–4 已完成：Windows 与 MiMo TTS 已使用同一份口播稿完成机器和人工听音验收。WebUI
+统一自动工作流与多来源真实稳定性验收仍未完成。
 
 ## 快速开始
 
@@ -109,10 +110,10 @@ uv run learnnest podcast --help
 uv run learnnest tts --help
 ```
 
-MiMo、DeepSeek、MiMo TTS、本地 ASR 和本地 OCR 连接可通过 WebUI 或
-`learnnest provider` 管理；任务开始时冻结职责绑定，设置变化不会改写运行中任务。
+MiMo、DeepSeek、MiMo TTS、本地 ASR 和本地 OCR 连接可通过 WebUI 或相应 CLI 入口维护；
+Windows TTS 的精确 voice 当前通过 WebUI 选择。任务开始时冻结职责绑定，设置变化不会改写运行中任务。
 `.env` 只保留显式旧 CLI 的迁移兼容入口，具体参数以命令帮助和
-[`.env.example`](.env.example) 为准。Windows TTS 尚未实现。
+[`.env.example`](.env.example) 为准。
 
 自动工作流默认关闭，并由用户显式授权。授权冻结重试、全局预算和
 note/podcast/TTS/ASR/OCR 五组预算；所有远程调用在构造 Provider 前先写入

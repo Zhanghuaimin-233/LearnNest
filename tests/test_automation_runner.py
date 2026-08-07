@@ -12,7 +12,14 @@ from learnnest.automation_store import (
     save_policy,
 )
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
-from learnnest.models import ContentPack, Evidence, StageStatus, TaskRecord
+from learnnest.models import (
+    ContentPack,
+    Evidence,
+    ProviderBindingSnapshot,
+    StageStatus,
+    TaskRecord,
+)
+from learnnest.provider_profiles import load_settings, settings_sha256
 from learnnest.task_store import write_task_atomic
 
 
@@ -88,6 +95,72 @@ def _snapshot() -> AssistedConnectionSnapshot:
         model="fake-1",
         adapter_revision="1",
     )
+
+
+def _binding(
+    name: str, settings_sha: str, *, capability: str = "llm"
+) -> ProviderBindingSnapshot:
+    return ProviderBindingSnapshot(
+        capability=capability,  # type: ignore[arg-type]
+        connection_id=name,
+        provider="fake-openai" if capability == "llm" else "windows-tts",
+        endpoint="https://example.test/v1" if capability == "llm" else "voice=Test",
+        model="fake-1" if capability == "llm" else "system-speech",
+        adapter_revision="1",
+        settings_sha256=settings_sha,
+    )
+
+
+def _snapshot_named(name: str, settings_sha: str) -> AssistedConnectionSnapshot:
+    return AssistedConnectionSnapshot(
+        connection_name=name,
+        connection_id=name,
+        provider="fake-openai",
+        endpoint_identity="https://example.test/v1",
+        model="fake-1",
+        adapter_revision="1",
+        settings_sha256=settings_sha,
+    )
+
+
+def _write_frozen_task(
+    root: Path, bindings: dict[str, ProviderBindingSnapshot]
+) -> None:
+    task_dir = root / "视频学习素材" / "automation-task"
+    task = TaskRecord(
+        task_id="20260728-automation",
+        source_path="C:/videos/automation.mp4",
+        source_fingerprint="automation-fingerprint",
+        title="自动化测试",
+        stages={"content_pack": StageStatus.COMPLETED},
+        artifacts={"content_pack": ["content_pack.json"]},
+        provider_bindings=bindings,
+    )
+    write_task_atomic(task_dir, task)
+
+
+def _assert_pre_provider_attention(
+    root: Path, policy: AutomationPolicy, factory_calls: list[str]
+) -> None:
+    result = run_automation_tasks(
+        root,
+        ["20260728-automation"],
+        provider_factory=lambda task_id: factory_calls.append(task_id),  # type: ignore[arg-type]
+    )
+    status = load_status(root)
+    assert status is not None
+    state = load_task_state(root, "20260728-automation", status.policy_sha256)
+    assert result.failed_task_ids == ("20260728-automation",)
+    assert factory_calls == []
+    assert state is not None
+    assert state.status == "needs_attention"
+    assert state.blocked_reason == "non_retryable_failure"
+    assert state.default_output == policy.default_output
+    summaries = " ".join(attempt.safe_summary or "" for attempt in state.attempts)
+    assert "C:/videos" not in summaries
+    assert "fake-secret" not in summaries
+    assert "connection-a" not in summaries
+    assert "connection-b" not in summaries
 
 
 def test_authorized_runner_retries_writer_on_the_next_due_tick_and_preserves_attempt_facts(
@@ -186,6 +259,77 @@ def test_runner_rejects_disabled_policy_before_provider_calls(tmp_path: Path) ->
     else:
         raise AssertionError("disabled policy must not invoke a provider")
     assert provider.writer_calls == provider.reviewer_calls == 0
+
+
+def test_runner_rejects_same_sha_but_different_frozen_note_connection_before_factory(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    current_sha = settings_sha256(load_settings(root))
+    policy = AutomationPolicy(
+        writer=_snapshot_named("connection-a", current_sha),
+        reviewer=_snapshot_named("connection-a", current_sha),
+        default_output="complete_note",
+    )
+    save_policy(root, policy)
+    authorized = authorize(root, now=datetime(2026, 8, 7, tzinfo=UTC)).policy
+    _write_frozen_task(
+        root,
+        {
+            "note_writer": _binding("connection-b", current_sha),
+            "note_reviewer": _binding("connection-b", current_sha),
+        },
+    )
+    factory_calls: list[str] = []
+
+    _assert_pre_provider_attention(root, authorized, factory_calls)
+
+
+def test_runner_rejects_old_frozen_settings_sha_before_factory(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    current_sha = settings_sha256(load_settings(root))
+    old_sha = "a" * 64
+    policy = AutomationPolicy(
+        writer=_snapshot_named("connection-a", current_sha),
+        reviewer=_snapshot_named("connection-a", current_sha),
+        default_output="complete_note",
+    )
+    save_policy(root, policy)
+    authorized = authorize(root, now=datetime(2026, 8, 7, tzinfo=UTC)).policy
+    _write_frozen_task(
+        root,
+        {
+            "note_writer": _binding("connection-a", old_sha),
+            "note_reviewer": _binding("connection-a", old_sha),
+        },
+    )
+    factory_calls: list[str] = []
+
+    _assert_pre_provider_attention(root, authorized, factory_calls)
+
+
+def test_runner_rejects_audio_policy_without_frozen_audio_bindings_before_factory(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    current_sha = settings_sha256(load_settings(root))
+    policy = AutomationPolicy(
+        writer=_snapshot_named("connection-a", current_sha),
+        reviewer=_snapshot_named("connection-a", current_sha),
+        default_output="complete_note_with_audio",
+    )
+    save_policy(root, policy)
+    authorized = authorize(root, now=datetime(2026, 8, 7, tzinfo=UTC)).policy
+    _write_frozen_task(
+        root,
+        {
+            "note_writer": _binding("connection-a", current_sha),
+            "note_reviewer": _binding("connection-a", current_sha),
+        },
+    )
+    factory_calls: list[str] = []
+
+    _assert_pre_provider_attention(root, authorized, factory_calls)
 
 
 def test_automation_tts_recovers_persisted_audio_without_a_second_provider_call(

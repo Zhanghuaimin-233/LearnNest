@@ -12,6 +12,7 @@ from learnnest.automation_store import (
     authorize,
     disable,
     load_status,
+    policy_sha256,
     save_policy,
     save_tick_result,
 )
@@ -85,6 +86,27 @@ def test_policy_change_does_not_reuse_a_prior_tick_summary(tmp_path: Path) -> No
 
     assert updated.last_tick_at is None
     assert updated.last_tick_summary is None
+
+
+def test_policy_migrates_legacy_schedule_and_freezes_default_output() -> None:
+    legacy = _policy().model_dump(mode="json")
+    legacy["schema_version"] = "1.1"
+    legacy.pop("default_output")
+
+    migrated = AutomationPolicy.model_validate(legacy)
+    note_only = AutomationPolicy(
+        schedule_id=None,
+        writer=_snapshot(),
+        reviewer=_snapshot(),
+        default_output="complete_note",
+    )
+    note_with_audio = note_only.model_copy(
+        update={"default_output": "complete_note_with_audio"}
+    )
+
+    assert migrated.schedule_id == "douyin-favorites"
+    assert migrated.default_output == "complete_note_with_audio"
+    assert policy_sha256(note_only) != policy_sha256(note_with_audio)
 
 
 def test_cli_configures_retry_limit_without_persisting_secret(tmp_path: Path) -> None:

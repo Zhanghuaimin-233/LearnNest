@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from collections.abc import AsyncIterable
 import re
 import threading
 import uuid
@@ -13,13 +14,20 @@ from typing import Any, Callable, Literal
 from urllib.parse import quote, urlsplit
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from markdown_it import MarkdownIt
 from pydantic import BaseModel, ConfigDict, Field
 
-from learnnest.automation_store import load_status as load_automation_status
+from learnnest.assisted_note_models import AssistedConnectionSnapshot
+from learnnest.automation_models import AutomationBudget, AutomationPolicy
+from learnnest.automation_store import (
+    authorize as authorize_automation,
+    disable as disable_automation,
+    load_status as load_automation_status,
+    save_policy as save_automation_policy,
+)
 from learnnest.adapters.douyin_http import DouyinAuthenticationError
 from learnnest.douyin_favorites import DouyinFavoritesStore
 from learnnest.douyin_cookie_store import DouyinCookieStore
@@ -38,8 +46,11 @@ from learnnest.provider_profiles import (
     ProviderBudgetGroup,
     ProviderRole,
     connect as connect_provider,
+    get_connection,
+    load_settings,
     public_settings as public_provider_settings,
     set_role_binding,
+    settings_sha256,
     update_limits,
 )
 from learnnest.tts_providers import (
@@ -55,6 +66,7 @@ _STATIC_DIRECTORY = Path(__file__).parent / "static"
 _WINDOWS_PATH = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n]*")
 _MARKDOWN = MarkdownIt("commonmark", {"html": False})
 _IMAGE_SUFFIXES = {".avif", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
+_VIDEO_SUFFIXES = {".avi", ".mkv", ".mov", ".mp4", ".mpeg", ".webm"}
 
 
 class ProcessRequest(BaseModel):
@@ -82,6 +94,12 @@ class DouyinFavoritesSyncRequest(BaseModel):
     session_id: str = Field(min_length=16, max_length=128)
 
 
+class DouyinFavoritesSelectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    aweme_ids: list[str] = Field(min_length=1, max_length=20)
+
+
 class ProviderConnectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -107,6 +125,21 @@ class ProviderLimitsRequest(BaseModel):
     retries_per_role: int = Field(ge=0, le=3)
     global_calls_per_day: int = Field(ge=0, le=800)
     budget_group_calls_per_day: dict[ProviderBudgetGroup, int]
+
+
+class AutomationConfigureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    default_output: Literal["complete_note", "complete_note_with_audio"]
+    auto_organize_new_favorites: bool = False
+    check_interval_seconds: int = Field(ge=30, le=3600)
+    max_items_per_tick: int = Field(ge=1, le=20)
+
+
+class AutomationAuthorizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm_paid: Literal[True]
 
 
 @dataclass
@@ -248,18 +281,112 @@ class WebService:
 
         return self.jobs.submit("recover", runner)
 
+    async def save_uploaded_video(
+        self, name: str, chunks: AsyncIterable[bytes]
+    ) -> Path:
+        """Stream a browser upload into this root before any task is created."""
+        uploaded_name = Path(name)
+        if (
+            not name
+            or uploaded_name.name != name
+            or uploaded_name.suffix.lower() not in _VIDEO_SUFFIXES
+        ):
+            raise ValueError("请选择支持的视频文件。")
+        directory = self.output_root / ".learnnest" / "uploads"
+        directory.mkdir(parents=True, exist_ok=True)
+        final = directory / f"{uuid.uuid4().hex}{uploaded_name.suffix.lower()}"
+        partial = final.with_suffix(final.suffix + ".partial")
+        written = 0
+        try:
+            with partial.open("xb") as stream:
+                async for chunk in chunks:
+                    if not isinstance(chunk, bytes) or not chunk:
+                        continue
+                    stream.write(chunk)
+                    written += len(chunk)
+                stream.flush()
+            if written == 0:
+                raise ValueError("上传的视频为空。")
+            partial.replace(final)
+        except (OSError, ValueError) as error:
+            partial.unlink(missing_ok=True)
+            raise ValueError("视频上传未完成，请重新选择文件。") from error
+        return final
+
     def automation_status(self) -> dict[str, Any]:
         status = load_automation_status(self.output_root)
         if status is None:
             return {"configured": False, "enabled": False}
+        authorization_valid = (
+            status.policy.enabled
+            and status.policy.authorized_at is not None
+            and status.policy.provider_settings_sha256
+            == settings_sha256(load_settings(self.output_root))
+        )
         return {
             "configured": True,
-            "enabled": status.policy.enabled,
+            "enabled": authorization_valid,
+            "needs_authorization": status.policy.enabled and not authorization_valid,
             "schedule_id": status.policy.schedule_id,
+            "default_output": status.policy.default_output,
+            "auto_organize_new_favorites": status.policy.auto_organize_new_favorites,
+            "check_interval_seconds": status.policy.check_interval_seconds,
+            "max_items_per_tick": status.policy.max_items_per_tick,
             "authorized_at": _isoformat(status.policy.authorized_at),
             "last_tick_at": _isoformat(status.last_tick_at),
             "last_tick_summary": _safe_text(status.last_tick_summary),
         }
+
+    def configure_automation(
+        self, request: AutomationConfigureRequest
+    ) -> dict[str, Any]:
+        try:
+            settings = load_settings(self.output_root)
+            writer_binding = settings.role_bindings["note_writer"]
+            reviewer_binding = settings.role_bindings["note_reviewer"]
+            writer = _automation_connection_snapshot(
+                get_connection(self.output_root, writer_binding.connection_id)
+            )
+            reviewer = _automation_connection_snapshot(
+                get_connection(self.output_root, reviewer_binding.connection_id)
+            )
+            save_automation_policy(
+                self.output_root,
+                AutomationPolicy(
+                    schedule_id=None,
+                    writer=writer,
+                    reviewer=reviewer,
+                    default_output=request.default_output,
+                    auto_organize_new_favorites=request.auto_organize_new_favorites,
+                    check_interval_seconds=request.check_interval_seconds,
+                    max_items_per_tick=request.max_items_per_tick,
+                    retries_per_stage=settings.retries_per_role,
+                    budget=AutomationBudget(
+                        provider_calls_per_day=settings.global_calls_per_day,
+                        budget_group_calls_per_day=settings.budget_group_calls_per_day,
+                    ),
+                ),
+            )
+        except ValueError as error:
+            raise ValueError("自动处理设置无法保存。") from error
+        return self.automation_status()
+
+    def authorize_automation(
+        self, request: AutomationAuthorizeRequest
+    ) -> dict[str, Any]:
+        assert request.confirm_paid is True
+        try:
+            authorize_automation(self.output_root)
+        except ValueError as error:
+            raise ValueError("自动处理尚未完成设置。") from error
+        return self.automation_status()
+
+    def disable_automation(self) -> dict[str, Any]:
+        try:
+            disable_automation(self.output_root)
+        except ValueError as error:
+            raise ValueError("自动处理尚未完成设置。") from error
+        return self.automation_status()
 
     def provider_settings(self) -> dict[str, object]:
         """Return the intentionally public projection, never settings JSON itself."""
@@ -382,6 +509,19 @@ class WebService:
 
     def douyin_thumbnail(self, relative_path: str) -> Path:
         return self.douyin_favorites.thumbnail_file(relative_path)
+
+    def select_douyin_favorites(self, aweme_ids: list[str]) -> list[WebJob]:
+        selected = set(aweme_ids)
+        if len(selected) != len(aweme_ids) or not all(
+            item.isdigit() for item in selected
+        ):
+            raise ValueError("请选择有效且不重复的收藏。")
+        favorites = {
+            item.aweme_id: item for item in self.douyin_favorites.read_snapshot().items
+        }
+        if any(item_id not in favorites for item_id in aweme_ids):
+            raise ValueError("选择的收藏已不存在，请重新同步。")
+        return [self.submit_process(favorites[item_id].url) for item_id in aweme_ids]
 
     def shutdown(self) -> None:
         self.douyin_login.shutdown()
@@ -519,6 +659,20 @@ def create_web_app(
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="缩略图不存在。") from error
 
+    @app.post("/api/douyin/favorites/select", status_code=202)
+    def select_douyin_favorites(
+        request: DouyinFavoritesSelectRequest,
+    ) -> dict[str, list[dict[str, str | None]]]:
+        try:
+            return {
+                "jobs": [
+                    _job_payload(job)
+                    for job in service.select_douyin_favorites(request.aweme_ids)
+                ]
+            }
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     @app.get("/api/learning/snapshot")
     def learning_snapshot(revision: str | None = None) -> dict[str, Any]:
         return _learning_snapshot_payload(workspace.snapshot(revision))
@@ -533,6 +687,15 @@ def create_web_app(
             }
         except LearningWorkspaceError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/api/learning/uploads", status_code=202)
+    async def upload_learning_video(request: Request, name: str) -> dict[str, Any]:
+        try:
+            uploaded = await service.save_uploaded_video(name, request.stream())
+            job = service.submit_process(str(uploaded))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return _job_payload(job)
 
     @app.get("/api/learning/items/{item_ref}")
     def learning_item(item_ref: str) -> dict[str, Any]:
@@ -692,6 +855,29 @@ def create_web_app(
                 status_code=500, detail="自动化状态文件无效。"
             ) from error
 
+    @app.post("/api/automation/configure")
+    def configure_automation(request: AutomationConfigureRequest) -> dict[str, Any]:
+        try:
+            return service.configure_automation(request)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/api/automation/authorize")
+    def authorize_automation_endpoint(
+        request: AutomationAuthorizeRequest,
+    ) -> dict[str, Any]:
+        try:
+            return service.authorize_automation(request)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/api/automation/disable")
+    def disable_automation_endpoint() -> dict[str, Any]:
+        try:
+            return service.disable_automation()
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
     return app
 
 
@@ -842,6 +1028,23 @@ def _resolve_note_image(note_path: Path, task_dir: Path, source: str) -> Path:
     ):
         raise LearningWorkspaceError("笔记图片无法安全读取。")
     return candidate
+
+
+def _automation_connection_snapshot(connection: object) -> AssistedConnectionSnapshot:
+    if getattr(connection, "api_family", None) != "openai_chat":
+        raise ValueError("connection cannot generate learning notes")
+    return AssistedConnectionSnapshot(
+        connection_name=str(getattr(connection, "name")),
+        connection_id=str(getattr(connection, "connection_id")),
+        secret_id=getattr(connection, "secret_id"),
+        provider=str(getattr(connection, "provider")),
+        endpoint_identity=str(getattr(connection, "endpoint"))
+        .strip()
+        .rstrip("/")
+        .lower(),
+        model=str(getattr(connection, "model")),
+        adapter_revision=str(getattr(connection, "adapter_revision")),
+    )
 
 
 def _safe_error_message(error: Exception) -> str:

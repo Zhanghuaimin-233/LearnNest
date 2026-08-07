@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import time
+import asyncio
 from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
+import pytest
 from typer.testing import CliRunner
 
 import learnnest.cli as cli
@@ -13,6 +15,7 @@ import learnnest.web_app as web_app
 from learnnest.execution import RecoveryPlan
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.task_store import create_task, write_task_atomic
+from learnnest.provider_profiles import connect, set_role_binding
 
 
 def _task(root: Path, *, error_summary: str | None = None) -> tuple[Path, TaskRecord]:
@@ -204,6 +207,127 @@ def test_web_app_exposes_automation_as_read_only_status(tmp_path: Path) -> None:
         "configured": False,
         "enabled": False,
     }
+
+
+def test_web_app_configures_authorizes_and_disables_automation_without_calls(
+    tmp_path: Path,
+) -> None:
+    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    set_role_binding(tmp_path, role="note_writer", connection_name="note")
+    set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
+    client = _client(tmp_path)
+
+    configured = client.post(
+        "/api/automation/configure",
+        json={
+            "default_output": "complete_note",
+            "auto_organize_new_favorites": False,
+            "check_interval_seconds": 300,
+            "max_items_per_tick": 1,
+        },
+    )
+    authorized = client.post("/api/automation/authorize", json={"confirm_paid": True})
+    disabled = client.post("/api/automation/disable")
+
+    assert configured.status_code == 200
+    assert configured.json()["enabled"] is False
+    assert configured.json()["default_output"] == "complete_note"
+    assert authorized.json()["enabled"] is True
+    assert disabled.json()["enabled"] is False
+    assert "fake-key" not in configured.text + authorized.text + disabled.text
+
+
+def test_web_automation_authorization_requires_explicit_paid_confirmation(
+    tmp_path: Path,
+) -> None:
+    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    set_role_binding(tmp_path, role="note_writer", connection_name="note")
+    set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
+    client = _client(tmp_path)
+    client.post(
+        "/api/automation/configure",
+        json={
+            "default_output": "complete_note",
+            "auto_organize_new_favorites": False,
+            "check_interval_seconds": 300,
+            "max_items_per_tick": 1,
+        },
+    )
+
+    for payload in ({}, {"confirm_paid": False}, {"confirm_paid": True, "extra": 1}):
+        assert client.post("/api/automation/authorize", json=payload).status_code == 422
+    assert client.get("/api/automation/status").json()["enabled"] is False
+
+
+def test_web_upload_uses_controlled_storage_and_rejects_unsafe_names(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _, task = _task(tmp_path)
+    observed: dict[str, Any] = {}
+
+    def fake_process_video(source: Path, output_root: Path, profile: str) -> TaskRecord:
+        observed.update(source=source, output_root=output_root, profile=profile)
+        return task
+
+    monkeypatch.setattr(web_app, "process_video", fake_process_video)
+    client = _client(tmp_path)
+
+    rejected = client.post(
+        "/api/learning/uploads?name=..%2Fprivate.mp4", content=b"video"
+    )
+    uploaded = client.post("/api/learning/uploads?name=lesson.mp4", content=b"video")
+    job = _wait_for_job(client, uploaded.json()["job_id"])
+
+    assert rejected.status_code == 400
+    assert "private" not in rejected.text
+    assert job["status"] == "completed"
+    assert observed["source"].is_relative_to(tmp_path / ".learnnest" / "uploads")
+    assert observed["source"].read_bytes() == b"video"
+    assert "uploads" not in uploaded.text
+
+
+def test_web_upload_removes_partial_file_when_stream_fails(tmp_path: Path) -> None:
+    async def broken_stream():
+        yield b"partial"
+        raise OSError("connection interrupted")
+
+    service = web_app.WebService(tmp_path)
+
+    with pytest.raises(ValueError):
+        asyncio.run(service.save_uploaded_video("lesson.mp4", broken_stream()))
+
+    assert not list((tmp_path / ".learnnest" / "uploads").glob("*.partial"))
+
+
+def test_selected_douyin_favorites_use_the_existing_source_job_path(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from learnnest.douyin_favorites import DouyinFavoritesStore
+
+    _, task = _task(tmp_path)
+    store = DouyinFavoritesStore(tmp_path)
+    store.directory.mkdir(parents=True)
+    store.facts_path.write_text(
+        '{"synced_at":"now","items":[{"aweme_id":"123","title":"收藏","url":"https://www.douyin.com/video/123","synced_at":"now","thumbnail_path":null}]}',
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def fake_process_source(source: Any, root: Path, profile: str) -> TaskRecord:
+        calls.append(source.input)
+        assert root == tmp_path.resolve()
+        assert profile == "evidence"
+        return task
+
+    monkeypatch.setattr(web_app, "process_source", fake_process_source)
+    client = _client(tmp_path)
+
+    response = client.post("/api/douyin/favorites/select", json={"aweme_ids": ["123"]})
+    job = _wait_for_job(client, response.json()["jobs"][0]["job_id"])
+
+    assert response.status_code == 202
+    assert job["status"] == "completed"
+    assert calls == ["https://www.douyin.com/video/123"]
 
 
 def test_web_server_is_fixed_to_loopback(tmp_path: Path, monkeypatch: Any) -> None:

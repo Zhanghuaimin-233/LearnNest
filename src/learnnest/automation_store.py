@@ -55,7 +55,7 @@ def load_status(output_root: str | Path) -> AutomationStatus | None:
                     Path(output_root).resolve(), stored_sha, current_sha
                 )
             status = status.model_copy(
-                update={"schema_version": "1.1", "policy_sha256": current_sha}
+                update={"schema_version": "1.2", "policy_sha256": current_sha}
             )
             _write_json(path, status.model_dump(mode="json"))
         return status
@@ -68,7 +68,7 @@ def save_policy(output_root: str | Path, policy: AutomationPolicy) -> Automation
     current_sha = policy_sha256(policy)
     same_policy = previous is not None and previous.policy_sha256 == current_sha
     status = AutomationStatus(
-        schema_version="1.1",
+        schema_version="1.2",
         policy=policy,
         policy_sha256=current_sha,
         last_tick_at=previous.last_tick_at if same_policy else None,

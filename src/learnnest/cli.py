@@ -58,6 +58,7 @@ from learnnest.index import (
     rebuild_index,
 )
 from learnnest.locks import LockUnavailable, schedule_lock, task_lock
+from learnnest.launcher import LauncherCancelled, LauncherConfigError, launch_web_app
 from learnnest.note_providers import (
     DEFAULT_NOTE_SAFE_INPUT_TOKENS,
     MimoQualityNoteProvider,
@@ -528,8 +529,8 @@ def flow_run(
 @automation_app.command("configure")
 def automation_configure(
     schedule_id: Annotated[
-        str, typer.Argument(help="Default Douyin monitor schedule ID.")
-    ],
+        str | None, typer.Argument(help="Optional Douyin monitor schedule ID.")
+    ] = None,
     writer_connection: Annotated[
         str | None,
         typer.Option(
@@ -553,9 +554,10 @@ def automation_configure(
     """Persist a disabled, secret-free automatic-delivery policy without calls."""
     root = _output_root(output_root)
     try:
-        schedule = load_schedule(schedule_path(root, schedule_id))
-        if schedule.source.kind != "douyin":
-            raise ValueError("automation currently supports only a Douyin schedule")
+        if schedule_id is not None:
+            schedule = load_schedule(schedule_path(root, schedule_id))
+            if schedule.source.kind != "douyin":
+                raise ValueError("automation monitor must be a Douyin schedule")
         writer = _assisted_connection_snapshot(get_connection(root, writer_connection))
         reviewer = _assisted_connection_snapshot(
             get_connection(root, reviewer_connection or writer_connection)
@@ -578,7 +580,7 @@ def automation_configure(
         raise typer.Exit(code=1) from error
     typer.echo(
         "Automation configured: disabled "
-        f"schedule={status.policy.schedule_id} "
+        f"schedule={status.policy.schedule_id or 'none'} "
         f"retries_per_stage={status.policy.retries_per_stage} "
         f"opportunities_per_stage={status.policy.retries_per_stage + 1} "
         f"provider_calls_per_day={status.policy.budget.provider_calls_per_day} "
@@ -1034,6 +1036,24 @@ def web_serve(
 ) -> None:
     """Run the local, deterministic task workspace at 127.0.0.1."""
     serve_web_app(_output_root(output_root), port=port)
+
+
+@web_app.command("launch")
+def web_launch(
+    port: Annotated[
+        int,
+        typer.Option(min=1, max=65535, help="Local loopback port."),
+    ] = 8765,
+) -> None:
+    """Choose one output root on first run, then open the local WebUI."""
+    try:
+        launch_web_app(port=port)
+    except LauncherCancelled as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+    except LauncherConfigError as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
 
 
 @app.command()

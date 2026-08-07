@@ -39,7 +39,7 @@ from learnnest.locks import automation_lock
 from learnnest.podcast_providers import PodcastProvider
 from learnnest.provider_profiles import load_settings, settings_sha256
 from learnnest.provider_service import assisted_snapshot_from_binding
-from learnnest.task_store import find_task_by_id
+from learnnest.task_store import find_task_by_id, load_task
 from learnnest.tts_generation import DEFAULT_TTS_STYLE
 from learnnest.tts_providers import TtsProvider
 
@@ -152,15 +152,20 @@ def _run_task(
         else:
             task_providers = None
             writer_snapshot, reviewer_snapshot = _frozen_task_assisted_snapshots(
-                root, task_id
+                root, task_id, status.policy
             )
     except Exception as error:
-        return _attention(
+        _attention(
             root,
-            AutomationTaskState(task_id=task_id, policy_sha256=status.policy_sha256),
+            AutomationTaskState(
+                task_id=task_id,
+                policy_sha256=status.policy_sha256,
+                default_output=policy.default_output,
+            ),
             "non_retryable_failure",
             _safe_summary(error),
         )
+        return False
 
     def provider_for_stage(stage: str) -> object:
         nonlocal task_providers
@@ -189,6 +194,7 @@ def _run_task(
             task_id=task_id,
             policy_sha256=status.policy_sha256,
             plan_path=plan_path.resolve().relative_to(root).as_posix(),
+            default_output=policy.default_output,
         )
         save_task_state(root, state)
     if state.status == "completed":
@@ -262,6 +268,13 @@ def _run_task(
         )
     except Exception as error:
         return _attention(root, state, "non_retryable_failure", _safe_summary(error))
+
+    if state.default_output == "complete_note":
+        save_task_state(
+            root,
+            state.model_copy(update={"status": "completed", "blocked_reason": None}),
+        )
+        return True
 
     delivery_dir = source.task_dir / "automated-delivery" / status.policy_sha256[:16]
     podcast, state, podcast_ok = _run_paid_stage(
@@ -851,20 +864,49 @@ def _assert_plan_snapshots(
         raise ValueError("automation plan provider snapshot no longer matches policy")
 
 
-def _frozen_task_assisted_snapshots(root: Path, task_id: str) -> tuple[object, object]:
+def _frozen_task_assisted_snapshots(
+    root: Path, task_id: str, policy: object
+) -> tuple[object, object]:
     found = find_task_by_id(root, task_id)
     if found is None:
         raise ValueError("automation task is missing")
-    _task_dir, task = found
+    task_dir, _task = found
+    task = load_task(task_dir)
     try:
-        return (
-            assisted_snapshot_from_binding(task.provider_bindings["note_writer"]),
-            assisted_snapshot_from_binding(task.provider_bindings["note_reviewer"]),
+        writer = assisted_snapshot_from_binding(task.provider_bindings["note_writer"])
+        reviewer = assisted_snapshot_from_binding(
+            task.provider_bindings["note_reviewer"]
         )
     except KeyError as error:
         raise ValueError(
             "automation task is missing frozen note role bindings"
         ) from error
+    authorized_sha = getattr(policy, "provider_settings_sha256", None)
+    if (
+        not isinstance(authorized_sha, str)
+        or task.provider_settings_sha256 != authorized_sha
+        or writer.settings_sha256 != authorized_sha
+        or reviewer.settings_sha256 != authorized_sha
+        or writer != getattr(policy, "writer", None)
+        or reviewer != getattr(policy, "reviewer", None)
+    ):
+        raise ValueError(
+            "automation task frozen note bindings do not match authorization"
+        )
+    if getattr(policy, "default_output", None) == "complete_note_with_audio":
+        try:
+            podcast = task.provider_bindings["podcast"]
+            tts = task.provider_bindings["tts"]
+        except KeyError as error:
+            raise ValueError(
+                "automation audio task is missing frozen provider bindings"
+            ) from error
+        if (
+            podcast.settings_sha256 != authorized_sha
+            or tts.settings_sha256 != authorized_sha
+        ):
+            raise ValueError("automation audio bindings do not match authorization")
+    return writer, reviewer
 
 
 def _assert_provider_matches_snapshot(

@@ -80,10 +80,10 @@ class AutomationBudget(_Model):
 class AutomationPolicy(_Model):
     """One versioned, explicitly authorized automatic delivery policy."""
 
-    schema_version: Literal["1.1"] = "1.1"
+    schema_version: Literal["1.1", "1.2"] = "1.2"
     enabled: bool = False
     authorized_at: datetime | None = None
-    schedule_id: str = Field(min_length=1, max_length=64)
+    schedule_id: str | None = Field(default=None, min_length=1, max_length=64)
     writer: AssistedConnectionSnapshot
     reviewer: AssistedConnectionSnapshot
     provider_settings_sha256: str | None = Field(
@@ -91,6 +91,11 @@ class AutomationPolicy(_Model):
     )
     dossier_schema_version: Literal["1.1"] = "1.1"
     max_items_per_tick: int = Field(default=1, ge=1, le=20)
+    default_output: Literal["complete_note", "complete_note_with_audio"] = (
+        "complete_note_with_audio"
+    )
+    auto_organize_new_favorites: bool = False
+    check_interval_seconds: int = Field(default=300, ge=30, le=3600)
     retries_per_stage: int = Field(default=3, ge=0, le=3)
     # Compatibility input/accessor for callers written against policy 1.0.
     # It is never written to new JSON and is kept synchronized by model_copy.
@@ -103,10 +108,13 @@ class AutomationPolicy(_Model):
         if not isinstance(value, Mapping):
             return value
         data = dict(value)
+        legacy = data.get("schema_version") == "1.1"
         retries = data.get("retries_per_stage", data.get("paid_retry_limit", 3))
         data["retries_per_stage"] = retries
         data["paid_retry_limit"] = retries
-        data["schema_version"] = "1.1"
+        if legacy and "default_output" not in data:
+            data["default_output"] = "complete_note_with_audio"
+        data["schema_version"] = "1.2"
         return data
 
     def model_copy(
@@ -152,6 +160,9 @@ class AutomationTaskState(_Model):
     task_id: str = Field(min_length=1)
     policy_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     plan_path: str | None = None
+    default_output: Literal["complete_note", "complete_note_with_audio"] = (
+        "complete_note_with_audio"
+    )
     attempts: list[AutomationAttempt] = Field(default_factory=list)
     status: Literal[
         "pending",
@@ -176,7 +187,7 @@ class AutomationTaskState(_Model):
 
 
 class AutomationStatus(_Model):
-    schema_version: Literal["1.1"] = "1.1"
+    schema_version: Literal["1.1", "1.2"] = "1.2"
     policy: AutomationPolicy
     policy_sha256: str
     last_tick_at: datetime | None = None

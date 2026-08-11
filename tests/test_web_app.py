@@ -13,6 +13,7 @@ import learnnest.cli as cli
 import learnnest.learning_workspace as learning_workspace
 import learnnest.web_app as web_app
 from learnnest.execution import RecoveryPlan
+from learnnest.automation_store import load_intake
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.task_store import create_task, write_task_atomic
 from learnnest.provider_profiles import connect, set_role_binding
@@ -166,6 +167,9 @@ def test_web_app_processes_one_source_in_background_with_evidence_profile(
         "output_root": tmp_path.resolve(),
         "profile": "evidence",
     }
+    intake = load_intake(tmp_path, task.task_id)
+    assert intake.source_kind == "local_video"
+    assert intake.default_output == "complete_note_with_audio"
 
 
 def test_web_app_recover_rejects_paid_stage_without_rerunning(
@@ -476,6 +480,22 @@ def test_douyin_webui_keeps_login_and_favorite_vocabulary_human_facing(
     assert 'api("/api/douyin/login/browser"' in script
     assert 'api("/api/douyin/login/current"' in script
     assert 'type="tel"' not in page
+
+
+def test_webui_preserves_favorite_selection_and_gives_automation_toggle_its_own_row(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    page = client.get("/").text
+    script = client.get("/static/workspace.js").text
+    stylesheet = client.get("/static/workspace.css").text
+
+    assert "let selectedFavoriteIdsState = new Set();" in script
+    assert "selectedFavoriteIdsState.has(item.aweme_id)" in script
+    assert "selectedFavoriteIdsState.clear();" in script
+    assert 'class="checkbox-label automation-favorite-option"' in page
+    assert ".automation-favorite-option {" in stylesheet
+    assert "grid-column: 1 / -1" in stylesheet
 
 
 def test_learning_snapshot_observes_external_atomic_task_update(tmp_path: Path) -> None:

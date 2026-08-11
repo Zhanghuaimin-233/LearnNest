@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterable
 import re
@@ -22,6 +23,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.automation_models import AutomationBudget, AutomationPolicy
+from learnnest.automation_coordinator import (
+    AutomationCoordinator,
+    create_intake_for_task,
+)
 from learnnest.automation_store import (
     authorize as authorize_automation,
     disable as disable_automation,
@@ -29,7 +34,7 @@ from learnnest.automation_store import (
     save_policy as save_automation_policy,
 )
 from learnnest.adapters.douyin_http import DouyinAuthenticationError
-from learnnest.douyin_favorites import DouyinFavoritesStore
+from learnnest.douyin_favorites import DouyinFavoritesError, DouyinFavoritesStore
 from learnnest.douyin_cookie_store import DouyinCookieStore
 from learnnest.douyin_login import DouyinLoginError, DouyinLoginSessionManager
 from learnnest.execution import plan_recovery
@@ -142,6 +147,12 @@ class AutomationAuthorizeRequest(BaseModel):
     confirm_paid: Literal[True]
 
 
+class LearningSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source: str = Field(min_length=1, max_length=4096)
+
+
 @dataclass
 class WebJob:
     """In-memory status for one process or recovery operation."""
@@ -213,6 +224,14 @@ class WebService:
             self.output_root
         )
 
+    def default_automation_output(
+        self,
+    ) -> Literal["complete_note", "complete_note_with_audio"]:
+        status = load_automation_status(self.output_root)
+        if status is None:
+            return "complete_note_with_audio"
+        return status.policy.default_output
+
     def list_tasks(self) -> list[dict[str, Any]]:
         task_root = self.output_root / "视频学习素材"
         if not task_root.is_dir():
@@ -237,7 +256,13 @@ class WebService:
             "artifacts": _public_artifacts(task_dir, task),
         }
 
-    def submit_process(self, source: str) -> WebJob:
+    def submit_process(
+        self,
+        source: str,
+        *,
+        source_kind: Literal["local_video", "public_url", "douyin_favorite"]
+        | None = None,
+    ) -> WebJob:
         try:
             source_item = collect_sources(input_value=source)[0]
             if source_item.input_type == "url":
@@ -254,6 +279,13 @@ class WebService:
                 )
             else:
                 task = process_source(source_item, self.output_root, "evidence")
+            create_intake_for_task(
+                self.output_root,
+                task_id=task.task_id,
+                source_kind=source_kind
+                or ("public_url" if source_item.input_type == "url" else "local_video"),
+                default_output=self.default_automation_output(),
+            )
             return task.task_id
 
         return self.jobs.submit("process", runner)
@@ -500,11 +532,27 @@ class WebService:
         return self.douyin_favorites.read_snapshot().payload()
 
     def sync_douyin_favorites(self, session_id: str) -> dict[str, Any]:
+        previous = self.douyin_favorites.read_snapshot()
         cookie = self.douyin_login.cookie_for(session_id)
         snapshot = self.douyin_favorites.sync(
             cookie,
             on_authentication_failure=lambda: self.douyin_login.invalidate(session_id),
         )
+        status = load_automation_status(self.output_root)
+        can_organize = (
+            previous.synced_at is not None
+            and status is not None
+            and status.policy.enabled
+            and status.policy.authorized_at is not None
+            and status.policy.auto_organize_new_favorites
+            and status.policy.provider_settings_sha256
+            == settings_sha256(load_settings(self.output_root))
+        )
+        if can_organize:
+            known = {item.aweme_id for item in previous.items}
+            for favorite in snapshot.items:
+                if favorite.aweme_id not in known:
+                    self.submit_process(favorite.url, source_kind="douyin_favorite")
         return snapshot.payload()
 
     def douyin_thumbnail(self, relative_path: str) -> Path:
@@ -521,7 +569,24 @@ class WebService:
         }
         if any(item_id not in favorites for item_id in aweme_ids):
             raise ValueError("选择的收藏已不存在，请重新同步。")
-        return [self.submit_process(favorites[item_id].url) for item_id in aweme_ids]
+        return [
+            self.submit_process(favorites[item_id].url, source_kind="douyin_favorite")
+            for item_id in aweme_ids
+        ]
+
+    def startup_sync(self) -> None:
+        """Refresh only an already-connected local Douyin session on app start."""
+        if self.douyin_favorites.read_snapshot().synced_at is None:
+            # The first visible sync is a user-controlled historical baseline.
+            return
+        current = self.douyin_login.current_session()
+        session_id = current.get("session_id")
+        if current.get("status") != "connected" or not isinstance(session_id, str):
+            return
+        try:
+            self.sync_douyin_favorites(session_id)
+        except (DouyinAuthenticationError, DouyinLoginError, DouyinFavoritesError):
+            return
 
     def shutdown(self) -> None:
         self.douyin_login.shutdown()
@@ -540,11 +605,17 @@ def create_web_app(
         douyin_favorites=douyin_favorites,
     )
     workspace = LearningWorkspace(output_root)
+    coordinator = AutomationCoordinator(output_root)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> Any:
-        yield
-        service.shutdown()
+        await asyncio.to_thread(service.startup_sync)
+        await coordinator.start()
+        try:
+            yield
+        finally:
+            await coordinator.shutdown()
+            service.shutdown()
 
     app = FastAPI(
         title="语栖学习收件箱",
@@ -554,6 +625,7 @@ def create_web_app(
     )
     app.state.web_service = service
     app.state.learning_workspace = workspace
+    app.state.automation_coordinator = coordinator
     app.mount("/static", StaticFiles(directory=_STATIC_DIRECTORY), name="static")
 
     @app.get("/", include_in_schema=False)
@@ -675,7 +747,7 @@ def create_web_app(
 
     @app.get("/api/learning/snapshot")
     def learning_snapshot(revision: str | None = None) -> dict[str, Any]:
-        return _learning_snapshot_payload(workspace.snapshot(revision))
+        return _learning_snapshot_payload(workspace.snapshot(revision), workspace)
 
     @app.post("/api/learning/items", status_code=201)
     def add_learning_item(request: LearningItemRequest) -> dict[str, Any]:
@@ -686,6 +758,13 @@ def create_web_app(
                 )
             }
         except LearningWorkspaceError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/api/learning/submit", status_code=202)
+    def submit_learning_item(request: LearningSubmitRequest) -> dict[str, str | None]:
+        try:
+            return _job_payload(service.submit_process(request.source))
+        except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.post("/api/learning/uploads", status_code=202)
@@ -716,6 +795,15 @@ def create_web_app(
             raise HTTPException(status_code=404, detail="内容不存在。") from error
         except LearningWorkspaceError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.get("/api/learning/items/{item_ref}/audio")
+    def learning_audio(item_ref: str) -> FileResponse:
+        try:
+            return FileResponse(workspace.audio(item_ref), media_type="audio/mpeg")
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="学习内容不存在。") from error
+        except LearningWorkspaceError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
 
     @app.get("/api/learning/items/{item_ref}/note")
     def learning_note(item_ref: str) -> HTMLResponse:
@@ -963,8 +1051,10 @@ def _job_payload(job: WebJob) -> dict[str, str | None]:
     }
 
 
-def _learning_item_payload(item: LearningItem) -> dict[str, str | None]:
-    return {
+def _learning_item_payload(
+    item: LearningItem, workspace: LearningWorkspace | None = None
+) -> dict[str, str | None]:
+    payload = {
         "item_ref": item.item_ref,
         "title": item.title,
         "source": item.source,
@@ -972,15 +1062,31 @@ def _learning_item_payload(item: LearningItem) -> dict[str, str | None]:
         "message": item.message,
         "action": item.action,
     }
+    if workspace is not None:
+        try:
+            workspace.audio(item.item_ref)
+        except (KeyError, LearningWorkspaceError):
+            payload["audio_href"] = None
+        else:
+            payload["audio_href"] = (
+                f"/api/learning/items/{quote(item.item_ref, safe='')}/audio"
+            )
+    return payload
 
 
-def _learning_snapshot_payload(snapshot: Any) -> dict[str, Any]:
+def _learning_snapshot_payload(
+    snapshot: Any, workspace: LearningWorkspace | None = None
+) -> dict[str, Any]:
     return {
         "revision": snapshot.revision,
         "unchanged": snapshot.unchanged,
-        "inbox": [_learning_item_payload(item) for item in snapshot.inbox],
-        "processing": [_learning_item_payload(item) for item in snapshot.processing],
-        "library": [_learning_item_payload(item) for item in snapshot.library],
+        "inbox": [_learning_item_payload(item, workspace) for item in snapshot.inbox],
+        "processing": [
+            _learning_item_payload(item, workspace) for item in snapshot.processing
+        ],
+        "library": [
+            _learning_item_payload(item, workspace) for item in snapshot.library
+        ],
     }
 
 

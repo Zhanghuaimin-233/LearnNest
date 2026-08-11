@@ -25,7 +25,8 @@ from learnnest.automation_store import (
     provider_call_usage,
     save_policy as save_automation_policy,
 )
-from learnnest.automation_runner import AutomationProviders, run_automation_tasks
+from learnnest.automation_coordinator import automation_providers_for_task
+from learnnest.automation_runner import run_automation_tasks
 from learnnest.automation_scheduler import (
     install as install_automation_scheduler,
     status as automation_scheduler_status,
@@ -804,7 +805,7 @@ def automation_tick(
             root,
             task_ids,
             now=tick_now,
-            provider_factory=lambda task_id: _automation_providers_for_task(
+            provider_factory=lambda task_id: automation_providers_for_task(
                 root, task_id
             ),
         )
@@ -2521,47 +2522,6 @@ def _assisted_snapshots_for_tasks(
     if any(pair != (writer, reviewer) for pair in pairs[1:]):
         raise ValueError("assisted plan tasks do not share frozen role bindings")
     return writer, reviewer
-
-
-def _automation_providers_for_task(root: Path, task_id: str) -> AutomationProviders:
-    task = load_task(_find_task_dir(task_id, root))
-    try:
-        writer = task.provider_bindings["note_writer"]
-        reviewer = task.provider_bindings["note_reviewer"]
-        podcast = task.provider_bindings["podcast"]
-        tts = task.provider_bindings["tts"]
-    except KeyError as error:
-        raise ValueError(
-            "automation task is missing frozen Provider role bindings"
-        ) from error
-    return AutomationProviders(
-        writer=assisted_provider_from_snapshot(str(root), writer),
-        reviewer=assisted_provider_from_snapshot(str(root), reviewer),
-        podcast=podcast_provider_from_snapshot(str(root), podcast),
-        tts=(
-            tts_provider_from_snapshot(str(root), tts)
-            if tts.provider == "windows-tts"
-            else _LazyFrozenTtsProvider(root, tts)
-        ),
-    )
-
-
-class _LazyFrozenTtsProvider:
-    """Delay cloud client construction until the paid TTS attempt is admitted."""
-
-    billing = "paid"
-    voice = "冰糖"
-
-    def __init__(self, root: Path, binding: object) -> None:
-        self._root = root
-        self._binding = binding
-        self.name = str(getattr(binding, "provider"))
-        self.model = str(getattr(binding, "model"))
-
-    def synthesize(self, speech_text: str, style_instruction: str) -> bytes:
-        provider = tts_provider_from_snapshot(str(self._root), self._binding)  # type: ignore[arg-type]
-        self.voice = provider.voice
-        return provider.synthesize(speech_text, style_instruction)
 
 
 def _quality_state_summary(state: object) -> str:

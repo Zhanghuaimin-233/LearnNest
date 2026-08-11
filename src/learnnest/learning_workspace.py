@@ -5,17 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 from ipaddress import ip_address
+import json
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
 from learnnest.execution import plan_recovery
+from learnnest.automation_store import find_intake
 from learnnest.locks import LockUnavailable, task_lock
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
-from learnnest.publication import note_belongs_to_task
+from learnnest.publication import note_belongs_to_task, read_audio_ownership_marker
 from learnnest.sources import SourceParseError, collect_sources
 from learnnest.task_store import find_task_by_id, load_task
+from learnnest.tts_generation import probe_audio
 
 DesiredOutput = Literal["readable_note", "materials_only"]
 LearningState = Literal[
@@ -188,6 +191,34 @@ class LearningWorkspace:
             ) from error
         return LearningNote(self._item(task_dir, task), task_dir, note_path, markdown)
 
+    def audio(self, item_ref: str) -> Path:
+        """Return only this task's validated, ownership-bound published MP3."""
+        found = find_task_by_id(self.output_root, item_ref)
+        if found is None:
+            raise KeyError(item_ref)
+        task_dir, task = found
+        if task.stages.get("tts") is not StageStatus.COMPLETED:
+            raise LearningWorkspaceError("音频暂时不能播放；已保留现有内容。")
+        metadata = _audio_metadata(task_dir, task)
+        published = _safe_published_audio(self.output_root, metadata)
+        try:
+            marker = read_audio_ownership_marker(published)
+            expected_sha = metadata["mp3_sha256"]
+            if (
+                marker is None
+                or marker.get("task_id") != task.task_id
+                or marker.get("mp3_sha256") != expected_sha
+                or marker.get("status") != "completed"
+                or sha256(published.read_bytes()).hexdigest() != expected_sha
+                or not _is_decodable_mp3(probe_audio(published))
+            ):
+                raise ValueError("audio ownership is invalid")
+        except (OSError, ValueError, TypeError) as error:
+            raise LearningWorkspaceError(
+                "音频暂时不能播放；已保留现有内容。"
+            ) from error
+        return published
+
     def _source_item(self, source: str):
         try:
             items = collect_sources(input_value=source)
@@ -233,8 +264,50 @@ class LearningWorkspace:
                 task.title,
                 _safe_source_label(task),
                 "ready",
-                "可阅读。",
+                (
+                    "可播放。"
+                    if task.stages.get("tts") is StageStatus.COMPLETED
+                    else "可阅读。"
+                ),
                 "打开笔记",
+            )
+        try:
+            intake = find_intake(self.output_root, task.task_id)
+        except ValueError:
+            return LearningItem(
+                task.task_id,
+                task.title,
+                _safe_source_label(task),
+                "needs_action",
+                "需要你处理；已保留完成的内容。",
+                None,
+            )
+        if intake is not None and intake.status == "needs_attention":
+            return LearningItem(
+                task.task_id,
+                task.title,
+                _safe_source_label(task),
+                "needs_action",
+                "需要你处理；已保留完成的内容。",
+                None,
+            )
+        if intake is not None and intake.status == "pending":
+            return LearningItem(
+                task.task_id,
+                task.title,
+                _safe_source_label(task),
+                "queued",
+                "等待整理。",
+                None,
+            )
+        if intake is not None and intake.status == "claimed":
+            return LearningItem(
+                task.task_id,
+                task.title,
+                _safe_source_label(task),
+                "organizing",
+                "处理中。",
+                None,
             )
         if task.error_summary:
             return LearningItem(
@@ -251,7 +324,7 @@ class LearningWorkspace:
                 task.title,
                 _safe_source_label(task),
                 "materials_ready",
-                "材料已整理，正在准备学习笔记。",
+                "等待整理。",
                 None,
             )
         if task.active_attempt_id is not None or any(
@@ -359,3 +432,54 @@ def _safe_workspace_error(error: Exception) -> LearningWorkspaceError:
             "处理暂时无法继续；已保留完成的内容，请稍后再试。"
         )
     return LearningWorkspaceError("暂时无法完成操作；已保留现有内容，请稍后再试。")
+
+
+def _audio_metadata(task_dir: Path, task: TaskRecord) -> dict[str, str]:
+    root = task_dir.resolve()
+    candidates = [
+        (task_dir / relative).resolve()
+        for relative in task.artifacts.get("tts", ())
+        if Path(relative).name == "audio.json" and not Path(relative).is_absolute()
+    ]
+    if len(candidates) != 1 or not candidates[0].is_relative_to(root):
+        raise LearningWorkspaceError("音频暂时不能播放；已保留现有内容。")
+    try:
+        payload = json.loads(candidates[0].read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise LearningWorkspaceError("音频暂时不能播放；已保留现有内容。") from error
+    if not isinstance(payload, dict) or any(
+        not isinstance(payload.get(key), str)
+        for key in ("published_path", "mp3_sha256")
+    ):
+        raise LearningWorkspaceError("音频暂时不能播放；已保留现有内容。")
+    return {
+        "published_path": str(payload["published_path"]),
+        "mp3_sha256": str(payload["mp3_sha256"]),
+    }
+
+
+def _safe_published_audio(output_root: Path, metadata: dict[str, str]) -> Path:
+    relative = Path(metadata["published_path"])
+    if relative.is_absolute() or relative.suffix.lower() != ".mp3":
+        raise LearningWorkspaceError("音频暂时不能播放；已保留现有内容。")
+    candidate = (output_root.resolve() / relative).resolve()
+    if not candidate.is_relative_to(output_root.resolve()) or not candidate.is_file():
+        raise LearningWorkspaceError("音频暂时不能播放；已保留现有内容。")
+    return candidate
+
+
+def _is_decodable_mp3(probe: object) -> bool:
+    if not isinstance(probe, dict):
+        return False
+    streams = probe.get("streams")
+    if not isinstance(streams, list) or not any(
+        isinstance(item, dict)
+        and item.get("codec_type") == "audio"
+        and item.get("codec_name") == "mp3"
+        for item in streams
+    ):
+        return False
+    try:
+        return float(probe.get("format", {}).get("duration", 0)) > 0
+    except (TypeError, ValueError, AttributeError):
+        return False

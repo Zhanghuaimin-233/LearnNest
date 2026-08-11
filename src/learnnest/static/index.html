@@ -32,20 +32,21 @@
             <p class="chapter-label">新内容</p>
             <h2 id="add-title">添加内容</h2>
           </div>
-          <form id="add-form">
-            <label for="source">本地视频或公开链接</label>
+          <form id="upload-form" class="source-form">
+            <label for="local-video">本地视频</label>
             <div class="source-entry">
-              <input id="source" name="source" required autocomplete="off" placeholder="选择一个本地视频，或粘贴公开链接" />
-              <button type="submit">添加并生成笔记</button>
+              <input id="local-video" name="video" type="file" accept=".avi,.mkv,.mov,.mp4,.mpeg,.webm" required />
+              <button type="submit">加入收件箱</button>
             </div>
-            <label class="option-row" for="desired-output">
-              <span>这次想得到什么</span>
-              <select id="desired-output" name="desired-output">
-                <option value="readable_note" selected>可读学习笔记</option>
-                <option value="materials_only">只整理材料</option>
-              </select>
-            </label>
           </form>
+          <form id="url-form" class="source-form">
+            <label for="public-url">公开链接</label>
+            <div class="source-entry">
+              <input id="public-url" name="source" required autocomplete="url" placeholder="粘贴公开 HTTP(S) 链接" />
+              <button type="submit">加入收件箱</button>
+            </div>
+          </form>
+          <p class="section-note">新内容会使用设置中的默认结果，不需要逐项重复选择。</p>
           <p id="notice" class="notice" aria-live="polite">准备好后，从这里添加第一项内容。</p>
 
           <div class="favorites-heading">
@@ -58,6 +59,7 @@
             </div>
             <p id="favorites-status" class="section-note" aria-live="polite">连接抖音后，收藏会出现在这里。</p>
           </div>
+          <div class="favorite-actions"><button id="add-selected-favorites" class="secondary-button" type="button" disabled>加入收件箱</button><span id="favorite-selection" class="section-note">可多选历史收藏；首次同步不会自动处理。</span></div>
           <div id="douyin-favorites-list" class="favorite-grid"></div>
         </section>
 
@@ -138,6 +140,28 @@
             </div>
             <form id="provider-limits-form" class="provider-form"><label>自动重试次数<input name="retries_per_role" type="number" min="0" max="3" value="1" /></label><label>UTC 每日调用上限<input name="global_calls_per_day" type="number" min="0" max="800" value="80" /></label><label>笔记每日上限<input name="note_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>播客每日上限<input name="podcast_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>TTS 每日上限<input name="tts_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>ASR 每日上限<input name="asr_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>OCR 每日上限<input name="ocr_calls_per_day" type="number" min="0" max="800" value="20" /></label><button type="submit">保存限额</button></form>
             <p id="provider-budget" class="section-note">重试 1 次；每日调用上限将在这里显示。</p>
+          </div>
+          <div class="connection-card automation-settings-card">
+            <div class="connection-heading">
+              <div>
+                <p class="chapter-label">自动整理</p>
+                <h3>让收件箱继续前进</h3>
+              </div>
+              <span id="automation-state" class="status-pill">等待设置</span>
+            </div>
+            <p id="automation-summary" class="section-note">先完成学习连接和职责绑定，再保存默认结果。</p>
+            <form id="automation-form" class="provider-form">
+              <label>默认结果<select name="default_output"><option value="complete_note">完整笔记</option><option value="complete_note_with_audio" selected>完整笔记 + 播客音频</option></select></label>
+              <label>检查间隔（秒）<input name="check_interval_seconds" type="number" min="30" max="3600" value="300" /></label>
+              <label class="checkbox-label automation-favorite-option">
+                <input name="auto_organize_new_favorites" type="checkbox" />
+                <span class="automation-favorite-copy"><strong>自动整理新收藏</strong><small>只处理首次同步之后出现的新收藏；历史收藏仍由你手动加入收件箱。</small></span>
+              </label>
+              <label>每次处理项数<input name="max_items_per_tick" type="number" min="1" max="20" value="1" /></label>
+              <button type="submit">保存自动整理设置</button>
+            </form>
+            <p class="section-note">开启前请确认：会向已绑定的笔记、播客和语音 Provider 发送完成整理所需的内容；可能产生费用，并按当前重试和预算执行。</p>
+            <div class="automation-actions"><label class="checkbox-label"><input id="confirm-paid" type="checkbox" /> 我确认上述可能付费的自动整理</label><button id="authorize-automation" type="button">确认并开启</button><button id="disable-automation" class="secondary-button" type="button">关闭自动处理</button></div>
           </div>
         </section>
       </section>

@@ -8,12 +8,14 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from helpers.note_v3_fixtures import concept_payload
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.podcast_models import PodcastScript
 from learnnest.rendering import render_podcast_speech
 from learnnest.task_store import load_task, write_task_atomic
+from learnnest.web_app import create_web_app
 
 
 class FakeTtsProvider:
@@ -912,3 +914,25 @@ def test_failed_tts_rerun_preserves_previous_active_audio(tmp_path: Path) -> Non
     unchanged = load_task(task_dir)
     assert unchanged.stages["tts"] is StageStatus.COMPLETED
     assert unchanged.artifacts["tts"] == task.artifacts["tts"]
+
+
+def test_web_audio_endpoint_serves_only_owned_untampered_mp3(tmp_path: Path) -> None:
+    from learnnest.tts_generation import generate_and_activate_tts
+
+    task_dir = workspace(tmp_path)
+    task = generate_and_activate_tts(
+        task_dir,
+        FakeTtsProvider(wav_bytes()),
+        tmp_path,
+    )
+    client = TestClient(create_web_app(tmp_path))
+
+    playable = client.get(f"/api/learning/items/{task.task_id}/audio")
+    published = next((tmp_path / "视频学习音频").glob("*.mp3"))
+    published.write_bytes(b"tampered")
+    rejected = client.get(f"/api/learning/items/{task.task_id}/audio")
+
+    assert playable.status_code == 200
+    assert playable.headers["content-type"].startswith("audio/mpeg")
+    assert rejected.status_code == 404
+    assert "视频学习音频" not in rejected.text

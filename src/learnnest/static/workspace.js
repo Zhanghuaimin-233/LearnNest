@@ -14,6 +14,8 @@ const api = async (path, options = {}) => {
 };
 
 const notice = document.querySelector("#notice");
+const uploadForm = document.querySelector("#upload-form");
+const urlForm = document.querySelector("#url-form");
 const lists = {
   inbox: document.querySelector("#inbox-list"),
   processing: document.querySelector("#processing-list"),
@@ -41,6 +43,14 @@ const providerRoleFeedback = document.querySelector("#provider-role-feedback");
 const providerRoleList = document.querySelector("#provider-role-list");
 const windowsVoiceField = document.querySelector("#windows-voice-field");
 const windowsVoice = document.querySelector("#windows-voice");
+const automationForm = document.querySelector("#automation-form");
+const automationState = document.querySelector("#automation-state");
+const automationSummary = document.querySelector("#automation-summary");
+const confirmPaid = document.querySelector("#confirm-paid");
+const authorizeAutomationButton = document.querySelector("#authorize-automation");
+const disableAutomationButton = document.querySelector("#disable-automation");
+const addSelectedFavoritesButton = document.querySelector("#add-selected-favorites");
+const favoriteSelection = document.querySelector("#favorite-selection");
 let windowsVoicesLoaded = false;
 const providerRoleLabels = {
   note_writer: "笔记 Writer", note_reviewer: "笔记 Reviewer", podcast: "播客",
@@ -55,7 +65,7 @@ const stateLabel = {
   organizing: "正在整理",
   materials_ready: "材料已就绪",
   needs_action: "需要继续",
-  ready: "可以阅读",
+  ready: "可阅读",
 };
 const loginLabel = {
   disconnected: "未连接",
@@ -78,6 +88,7 @@ let douyinLoginStatus = null;
 let loginPollTimer = null;
 let loginCountdownTimer = null;
 let loginRefreshInFlight = false;
+let selectedFavoriteIdsState = new Set();
 
 function say(message) { notice.textContent = message; }
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value ?? ""; return node.innerHTML; }
@@ -159,6 +170,7 @@ function renderList(target, items, empty) {
         <p>${escapeHtml(item.source)} · ${escapeHtml(item.message)}</p>
       </div>
       ${item.action ? `<button type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${item.state === "ready" ? "open" : "continue"}">${escapeHtml(item.action)}</button>` : ""}
+      ${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}
     </article>`).join("");
   target.querySelectorAll("button[data-item-ref]").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
 }
@@ -179,9 +191,14 @@ function formatSyncTime(value) {
 }
 
 function renderFavorites(snapshot) {
+  const availableIds = new Set(snapshot.items.map((item) => item.aweme_id));
+  selectedFavoriteIdsState = new Set(
+    [...selectedFavoriteIdsState].filter((itemId) => availableIds.has(itemId)),
+  );
   if (!snapshot.items.length) {
     favoriteList.innerHTML = `<p class="empty">还没有同步的抖音收藏。</p>`;
     favoriteStatus.textContent = "连接抖音后，收藏会出现在这里。";
+    updateFavoriteSelection();
     return;
   }
   favoriteStatus.textContent = `最近同步：${formatSyncTime(snapshot.synced_at)}`;
@@ -195,10 +212,23 @@ function renderFavorites(snapshot) {
         <div class="favorite-card-copy">
           <h3 class="favorite-title">${escapeHtml(item.title)}</h3>
           <p class="favorite-time">同步于 ${escapeHtml(formatSyncTime(item.synced_at))}</p>
+          <label class="favorite-select"><input type="checkbox" value="${escapeHtml(item.aweme_id)}"${selectedFavoriteIdsState.has(item.aweme_id) ? " checked" : ""} /> 加入收件箱</label>
           <a class="favorite-link" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">打开作品页</a>
         </div>
       </article>`;
   }).join("");
+  favoriteList.querySelectorAll("input[type=checkbox]").forEach((checkbox) => checkbox.addEventListener("change", updateFavoriteSelection));
+  updateFavoriteSelection();
+}
+
+function selectedFavoriteIds() { return [...selectedFavoriteIdsState]; }
+function updateFavoriteSelection() {
+  selectedFavoriteIdsState = new Set(
+    [...favoriteList.querySelectorAll("input[type=checkbox]:checked")].map((item) => item.value),
+  );
+  const selected = selectedFavoriteIds();
+  addSelectedFavoritesButton.disabled = selected.length === 0;
+  favoriteSelection.textContent = selected.length ? `已选 ${selected.length} 项，加入后会使用当前默认结果。` : "可多选历史收藏；首次同步不会自动处理。";
 }
 
 async function loadFavorites() {
@@ -208,6 +238,23 @@ async function loadFavorites() {
     favoriteStatus.textContent = error.message;
   }
 }
+
+function renderAutomationStatus(status) {
+  const enabled = status.enabled;
+  automationState.textContent = enabled ? "自动整理已开启" : status.needs_authorization ? "需要重新确认" : status.configured ? "等待确认" : "等待设置";
+  automationState.className = `status-pill ${enabled ? "connected" : ""}`;
+  automationSummary.textContent = enabled
+    ? `会按 ${status.check_interval_seconds} 秒检查收件箱；默认生成${status.default_output === "complete_note" ? "完整笔记" : "完整笔记和播客音频"}。`
+    : "保存设置后，需要勾选付费确认才会开始自动整理。";
+  if (status.configured) {
+    automationForm.elements.default_output.value = status.default_output;
+    automationForm.elements.check_interval_seconds.value = status.check_interval_seconds;
+    automationForm.elements.auto_organize_new_favorites.checked = status.auto_organize_new_favorites;
+    automationForm.elements.max_items_per_tick.value = status.max_items_per_tick;
+  }
+}
+
+async function loadAutomationStatus() { try { renderAutomationStatus(await api("/api/automation/status")); } catch (error) { automationState.textContent = "无法读取"; } }
 
 function stopLoginPolling() {
   window.clearTimeout(loginPollTimer);
@@ -385,6 +432,7 @@ async function refresh(force = false) {
       render(snapshot);
     }
     await Promise.all([loadFavorites(), refreshProviderSettingsWhenIdle()]);
+    await loadAutomationStatus();
   } catch (error) {
     say(error.message);
   } finally {
@@ -411,21 +459,64 @@ async function actOnItem(itemRef, action) {
   }
 }
 
-document.querySelector("#add-form").addEventListener("submit", async (event) => {
+uploadForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
+  const file = form.get("video");
+  if (!(file instanceof File) || !file.name) return;
   try {
-    say("正在添加内容，页面会自动更新。");
-    const result = await api("/api/learning/items", {
+    say("正在保存视频到学习收件箱。");
+    const result = await api(`/api/learning/uploads?name=${encodeURIComponent(file.name)}`, {
       method: "POST",
-      body: JSON.stringify({ source: form.get("source"), desired_output: form.get("desired-output") }),
+      body: file,
     });
-    say(result.item.message);
+    say("已加入收件箱，正在整理材料。");
     event.currentTarget.reset();
     await refresh(true);
   } catch (error) {
     say(error.message);
   }
+});
+
+urlForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  try {
+    await api("/api/learning/submit", { method: "POST", body: JSON.stringify({ source: form.get("source") }) });
+    say("已加入收件箱，正在整理材料。");
+    event.currentTarget.reset();
+    await refresh(true);
+  } catch (error) { say(error.message); }
+});
+
+addSelectedFavoritesButton.addEventListener("click", async () => {
+  const awemeIds = selectedFavoriteIds();
+  if (!awemeIds.length) return;
+  try {
+    await api("/api/douyin/favorites/select", { method: "POST", body: JSON.stringify({ aweme_ids: awemeIds }) });
+    say("已加入收件箱，正在整理材料。");
+    selectedFavoriteIdsState.clear();
+    await refresh(true);
+  } catch (error) { say(error.message); }
+});
+
+automationForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  try {
+    renderAutomationStatus(await api("/api/automation/configure", { method: "POST", body: JSON.stringify({ default_output: form.get("default_output"), auto_organize_new_favorites: form.has("auto_organize_new_favorites"), check_interval_seconds: Number(form.get("check_interval_seconds")), max_items_per_tick: Number(form.get("max_items_per_tick")) }) }));
+    confirmPaid.checked = false;
+    say("自动整理设置已保存；请阅读提示并明确确认后开启。");
+  } catch (error) { say(error.message); }
+});
+
+authorizeAutomationButton.addEventListener("click", async () => {
+  if (!confirmPaid.checked) { say("请先勾选付费确认。 "); return; }
+  try { renderAutomationStatus(await api("/api/automation/authorize", { method: "POST", body: JSON.stringify({ confirm_paid: true }) })); say("自动整理已开启。"); } catch (error) { say(error.message); }
+});
+
+disableAutomationButton.addEventListener("click", async () => {
+  try { renderAutomationStatus(await api("/api/automation/disable", { method: "POST" })); say("自动整理已关闭。 "); } catch (error) { say(error.message); }
 });
 
 providerForm.addEventListener("submit", async (event) => {

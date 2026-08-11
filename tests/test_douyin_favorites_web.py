@@ -14,7 +14,13 @@ from learnnest.douyin_favorites import (
     DouyinFavoritesError,
     DouyinFavoritesStore,
 )
-from learnnest.web_app import create_web_app
+from learnnest.provider_profiles import connect, set_role_binding
+from learnnest.web_app import (
+    AutomationAuthorizeRequest,
+    AutomationConfigureRequest,
+    WebService,
+    create_web_app,
+)
 from fastapi.testclient import TestClient
 
 
@@ -77,6 +83,102 @@ def _store(
         thumbnail_opener=opener,
         page_size=10,
     )
+
+
+class FakeLogin:
+    def cookie_for(self, _session_id: str) -> SecretStr:
+        return SecretStr("fake-cookie")
+
+    def invalidate(self, _session_id: str) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+
+def _authorized_service(
+    root: Path, store: DouyinFavoritesStore, *, auto: bool
+) -> WebService:
+    connect(root, name="note", preset="mimo", secret_value="fake-key")
+    set_role_binding(root, role="note_writer", connection_name="note")
+    set_role_binding(root, role="note_reviewer", connection_name="note")
+    service = WebService(root, douyin_login=FakeLogin(), douyin_favorites=store)  # type: ignore[arg-type]
+    service.configure_automation(
+        AutomationConfigureRequest(
+            default_output="complete_note",
+            auto_organize_new_favorites=auto,
+            check_interval_seconds=300,
+            max_items_per_tick=1,
+        )
+    )
+    service.authorize_automation(AutomationAuthorizeRequest(confirm_paid=True))
+    return service
+
+
+def test_first_favorite_sync_is_a_baseline_but_later_new_items_are_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(
+        tmp_path,
+        FakeTransport(
+            [
+                {
+                    "status_code": 0,
+                    "aweme_list": [_item("1", "历史")],
+                    "has_more": False,
+                },
+                {
+                    "status_code": 0,
+                    "aweme_list": [_item("2", "新增"), _item("1", "历史")],
+                    "has_more": False,
+                },
+            ]
+        ),
+    )
+    service = _authorized_service(tmp_path, store, auto=True)
+    queued: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        service,
+        "submit_process",
+        lambda source, *, source_kind=None: queued.append((source, source_kind)),
+    )
+
+    service.sync_douyin_favorites("session")
+    service.sync_douyin_favorites("session")
+
+    assert queued == [("https://www.douyin.com/video/2", "douyin_favorite")]
+
+
+def test_favorite_sync_with_auto_disabled_never_queues_new_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(
+        tmp_path,
+        FakeTransport(
+            [
+                {
+                    "status_code": 0,
+                    "aweme_list": [_item("1", "历史")],
+                    "has_more": False,
+                },
+                {
+                    "status_code": 0,
+                    "aweme_list": [_item("2", "新增")],
+                    "has_more": False,
+                },
+            ]
+        ),
+    )
+    service = _authorized_service(tmp_path, store, auto=False)
+    queued: list[object] = []
+    monkeypatch.setattr(
+        service, "submit_process", lambda *_args, **_kwargs: queued.append(True)
+    )
+
+    service.sync_douyin_favorites("session")
+    service.sync_douyin_favorites("session")
+
+    assert queued == []
 
 
 def test_syncs_paginated_favorites_dedupes_and_persists_local_thumbnails(

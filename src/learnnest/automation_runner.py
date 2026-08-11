@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,6 +72,7 @@ def run_automation_tasks(
     *,
     now: datetime | None = None,
     provider_factory: ProviderFactory | None = None,
+    default_outputs: Mapping[str, str] | None = None,
 ) -> AutomationRunResult:
     """Deliver deterministic tasks under one immutable authorized policy.
 
@@ -109,6 +110,9 @@ def run_automation_tasks(
                     providers,
                     selected_now,
                     provider_factory=provider_factory,
+                    default_output=(default_outputs or {}).get(
+                        task_id, status.policy.default_output
+                    ),
                 ):
                     completed.append(task_id)
                 else:
@@ -138,12 +142,15 @@ def _run_task(
     now: datetime,
     *,
     provider_factory: ProviderFactory | None,
+    default_output: str,
 ) -> bool:
     status = load_status(root)
     assert status is not None
     if not status.policy.enabled or status.policy.authorized_at is None:
         return False
     policy = status.policy
+    if default_output not in {"complete_note", "complete_note_with_audio"}:
+        return False
     try:
         if provider_factory is None:
             assert providers is not None
@@ -160,7 +167,7 @@ def _run_task(
             AutomationTaskState(
                 task_id=task_id,
                 policy_sha256=status.policy_sha256,
-                default_output=policy.default_output,
+                default_output=default_output,
             ),
             "non_retryable_failure",
             _safe_summary(error),
@@ -194,7 +201,7 @@ def _run_task(
             task_id=task_id,
             policy_sha256=status.policy_sha256,
             plan_path=plan_path.resolve().relative_to(root).as_posix(),
-            default_output=policy.default_output,
+            default_output=default_output,
         )
         save_task_state(root, state)
     if state.status == "completed":

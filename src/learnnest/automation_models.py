@@ -186,6 +186,24 @@ class AutomationTaskState(_Model):
     ) = None
 
 
+class AutomationIntake(_Model):
+    """One durable, secret-free user request waiting for automatic delivery."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    task_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    source_kind: Literal["local_video", "public_url", "douyin_favorite"]
+    default_output: Literal["complete_note", "complete_note_with_audio"]
+    created_at: datetime
+    status: Literal["pending", "claimed", "completed", "needs_attention"] = "pending"
+
+    @field_validator("created_at")
+    @classmethod
+    def require_aware_created_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("automation intake timestamp must be timezone-aware")
+        return value
+
+
 class AutomationStatus(_Model):
     schema_version: Literal["1.1", "1.2"] = "1.2"
     policy: AutomationPolicy

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from learnnest.automation_models import (
     AutomationAttempt,
+    AutomationIntake,
     AutomationPolicy,
     AutomationStatus,
     AutomationTaskState,
@@ -147,6 +148,70 @@ def save_task_state(output_root: str | Path, state: AutomationTaskState) -> None
     _write_json(
         _task_path(output_root, state.task_id, state.policy_sha256),
         state.model_dump(mode="json"),
+    )
+
+
+def create_intake(
+    output_root: str | Path, intake: AutomationIntake
+) -> AutomationIntake:
+    """Atomically preserve the first user-selected output for one task identity."""
+    path = _intake_path(output_root, intake.task_id)
+    if path.is_file():
+        existing = load_intake(output_root, intake.task_id)
+        if (
+            existing.source_kind != intake.source_kind
+            or existing.default_output != intake.default_output
+        ):
+            raise ValueError("automation intake conflicts with its frozen identity")
+        return existing
+    _write_json(path, intake.model_dump(mode="json"))
+    return intake
+
+
+def load_intake(output_root: str | Path, task_id: str) -> AutomationIntake:
+    path = _intake_path(output_root, task_id)
+    try:
+        intake = AutomationIntake.model_validate_json(path.read_bytes())
+    except (OSError, UnicodeError, ValidationError, ValueError) as error:
+        raise ValueError("automation intake is missing or invalid") from error
+    if intake.task_id != task_id:
+        raise ValueError("automation intake does not match its identity")
+    return intake
+
+
+def find_intake(output_root: str | Path, task_id: str) -> AutomationIntake | None:
+    path = _intake_path(output_root, task_id)
+    if not path.is_file():
+        return None
+    return load_intake(output_root, task_id)
+
+
+def list_intakes(output_root: str | Path) -> tuple[AutomationIntake, ...]:
+    directory = automation_directory(output_root) / "intake"
+    if not directory.is_dir():
+        return ()
+    items: list[AutomationIntake] = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            intake = AutomationIntake.model_validate_json(path.read_bytes())
+        except (OSError, UnicodeError, ValidationError, ValueError) as error:
+            raise ValueError("automation intake is missing or invalid") from error
+        if path.stem != intake.task_id:
+            raise ValueError("automation intake does not match its identity")
+        items.append(intake)
+    return tuple(items)
+
+
+def save_intake(output_root: str | Path, intake: AutomationIntake) -> None:
+    existing = load_intake(output_root, intake.task_id)
+    if (
+        existing.source_kind != intake.source_kind
+        or existing.default_output != intake.default_output
+        or existing.created_at != intake.created_at
+    ):
+        raise ValueError("automation intake cannot change its frozen identity")
+    _write_json(
+        _intake_path(output_root, intake.task_id), intake.model_dump(mode="json")
     )
 
 
@@ -397,6 +462,12 @@ def _require_status(output_root: str | Path) -> AutomationStatus:
 
 def _task_path(output_root: str | Path, task_id: str, policy_sha: str) -> Path:
     return automation_directory(output_root) / "tasks" / task_id / f"{policy_sha}.json"
+
+
+def _intake_path(output_root: str | Path, task_id: str) -> Path:
+    if not task_id or Path(task_id).name != task_id:
+        raise ValueError("automation intake identity is invalid")
+    return automation_directory(output_root) / "intake" / f"{task_id}.json"
 
 
 def _migrate_task_states(root: Path, old_sha: str, new_sha: str) -> None:

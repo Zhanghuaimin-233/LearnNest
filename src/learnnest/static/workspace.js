@@ -89,6 +89,12 @@ let loginPollTimer = null;
 let loginCountdownTimer = null;
 let loginRefreshInFlight = false;
 let selectedFavoriteIdsState = new Set();
+let suggestedProviderConnectionName = "";
+const providerConnectionNameDefaults = {
+  "windows-tts": "windows-tts",
+  "local-asr": "local-asr",
+  "local-ocr": "local-ocr",
+};
 
 function say(message) { notice.textContent = message; }
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value ?? ""; return node.innerHTML; }
@@ -119,6 +125,13 @@ function renderProviderSettings(settings) {
       return `<div class="provider-role-summary"><span>${escapeHtml(providerRoleLabels[role] || role)}</span><span>${escapeHtml(name)} · ${escapeHtml(connection?.provider || "连接不可用")} · ${escapeHtml(connection?.model || "")}</span><strong>已绑定</strong></div>`;
     }).join("")
     : '<p class="empty">尚未绑定职责。</p>';
+}
+
+function suggestProviderConnectionName() {
+  const name = providerForm.elements.name;
+  if (name.value.trim() && name.value !== suggestedProviderConnectionName) return;
+  suggestedProviderConnectionName = providerConnectionNameDefaults[providerForm.elements.preset.value] || "";
+  name.value = suggestedProviderConnectionName;
 }
 
 async function refreshWindowsVoices() {
@@ -534,12 +547,14 @@ providerForm.addEventListener("submit", async (event) => {
       }),
     });
     event.currentTarget.reset();
+    suggestProviderConnectionName();
     renderProviderSettings(settings);
     say("连接已保存；密钥不会显示在页面中。");
   } catch (error) { say(error.message); }
 });
 
 providerForm.elements.preset.addEventListener("change", () => {
+  suggestProviderConnectionName();
   windowsVoicesLoaded = false;
   refreshWindowsVoices().catch((error) => say(error.message));
 });
@@ -575,5 +590,6 @@ cancelDouyinButton.addEventListener("click", cancelDouyin);
 syncFavoritesButton.addEventListener("click", syncFavorites);
 document.addEventListener("visibilitychange", () => refresh(true));
 restoreDouyinLogin();
+suggestProviderConnectionName();
 loadProviderSettings();
 refresh(true);

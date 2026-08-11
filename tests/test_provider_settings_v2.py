@@ -559,6 +559,35 @@ def test_webui_settings_page_and_api_expose_roles_budget_retry_but_never_a_key(
     assert "secret_id" not in updated.text
 
 
+def test_webui_local_connections_save_without_api_keys(tmp_path: Path) -> None:
+    client = TestClient(create_web_app(tmp_path))
+
+    for name, preset in (
+        ("local-asr", "local-asr"),
+        ("local-ocr", "local-ocr"),
+        ("windows-tts", "windows-tts"),
+    ):
+        response = client.post(
+            "/api/providers/connections",
+            json={"name": name, "preset": preset, "voice": "Microsoft Huihui"}
+            if preset == "windows-tts"
+            else {"name": name, "preset": preset},
+        )
+
+        assert response.status_code == 200
+
+    settings = client.get("/api/providers/settings").json()
+
+    assert {item["name"] for item in settings["connections"]} == {
+        "local-asr",
+        "local-ocr",
+        "windows-tts",
+    }
+    assert all(
+        item["secret_status"] == "local_configured" for item in settings["connections"]
+    )
+
+
 def test_webui_renders_bound_role_with_connection_provider_and_model(
     tmp_path: Path,
 ) -> None:
@@ -575,6 +604,9 @@ def test_webui_renders_bound_role_with_connection_provider_and_model(
     assert 'id="provider-role-feedback"' in page
     assert "provider-role-summary" in script
     assert "已绑定" in script
+    assert '"local-asr": "local-asr"' in script
+    assert '"local-ocr": "local-ocr"' in script
+    assert '"windows-tts": "windows-tts"' in script
     for group in ("note", "podcast", "tts", "asr", "ocr"):
         assert f'name="{group}_calls_per_day"' in page
         assert f'"{group}"' in script

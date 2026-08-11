@@ -607,6 +607,9 @@ def test_webui_renders_bound_role_with_connection_provider_and_model(
     assert '"local-asr": "local-asr"' in script
     assert '"local-ocr": "local-ocr"' in script
     assert '"windows-tts": "windows-tts"' in script
+    assert "function startProviderSave(event)" in script
+    assert script.count("const finishSaving = startProviderSave(event);") == 3
+    assert 'const current = await api("/api/providers/settings");' not in script
     for group in ("note", "podcast", "tts", "asr", "ocr"):
         assert f'name="{group}_calls_per_day"' in page
         assert f'"{group}"' in script

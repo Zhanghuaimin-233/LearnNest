@@ -134,6 +134,24 @@ function suggestProviderConnectionName() {
   name.value = suggestedProviderConnectionName;
 }
 
+function startProviderSave(event) {
+  const button = event.submitter || event.currentTarget.querySelector('button[type="submit"]');
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "保存中…";
+  providerState.textContent = "保存中";
+  return () => {
+    button.disabled = false;
+    button.textContent = label;
+  };
+}
+
+function showProviderSaveFailure(error) {
+  providerState.textContent = "保存失败";
+  providerState.className = "status-pill";
+  say(error.message);
+}
+
 async function refreshWindowsVoices() {
   if (providerForm.elements.preset.value !== "windows-tts") {
     windowsVoiceField.hidden = true;
@@ -537,6 +555,7 @@ providerForm.addEventListener("submit", async (event) => {
   const form = new FormData(event.currentTarget);
   const preset = String(form.get("preset"));
   const key = String(form.get("api_key") || "").trim();
+  const finishSaving = startProviderSave(event);
   try {
     const settings = await api("/api/providers/connections", {
       method: "POST",
@@ -550,7 +569,7 @@ providerForm.addEventListener("submit", async (event) => {
     suggestProviderConnectionName();
     renderProviderSettings(settings);
     say("连接已保存；密钥不会显示在页面中。");
-  } catch (error) { say(error.message); }
+  } catch (error) { showProviderSaveFailure(error); } finally { finishSaving(); }
 });
 
 providerForm.elements.preset.addEventListener("change", () => {
@@ -562,6 +581,7 @@ providerForm.elements.preset.addEventListener("change", () => {
 providerRoleForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
+  const finishSaving = startProviderSave(event);
   try {
     const settings = await api(`/api/providers/roles/${encodeURIComponent(form.get("role"))}`, { method: "POST", body: JSON.stringify({ connection_name: form.get("connection_name") }) });
     renderProviderSettings(settings);
@@ -569,7 +589,7 @@ providerRoleForm.addEventListener("submit", async (event) => {
     const detail = `${providerRoleLabels[form.get("role")]} → ${connection.provider} · ${connection.model}`;
     providerRoleFeedback.textContent = `已绑定：${detail}`;
     say(`职责已绑定：${detail}`);
-  } catch (error) { say(error.message); }
+  } catch (error) { showProviderSaveFailure(error); } finally { finishSaving(); }
 });
 
 providerRoleForm.elements.role.addEventListener("change", () => loadProviderSettings());
@@ -577,11 +597,11 @@ providerRoleForm.elements.role.addEventListener("change", () => loadProviderSett
 providerLimitsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
+  const finishSaving = startProviderSave(event);
   try {
-    const current = await api("/api/providers/settings");
     renderProviderSettings(await api("/api/providers/limits", { method: "PUT", body: JSON.stringify({ retries_per_role: Number(form.get("retries_per_role")), global_calls_per_day: Number(form.get("global_calls_per_day")), budget_group_calls_per_day: Object.fromEntries(["note", "podcast", "tts", "asr", "ocr"].map((group) => [group, Number(form.get(`${group}_calls_per_day`))])) }) }));
     say("调用限额已保存；自动授权已需要按新设置重新确认。");
-  } catch (error) { say(error.message); }
+  } catch (error) { showProviderSaveFailure(error); } finally { finishSaving(); }
 });
 
 connectDouyinButton.addEventListener("click", connectDouyin);

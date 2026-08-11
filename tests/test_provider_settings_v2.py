@@ -19,7 +19,9 @@ from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.provider_profiles import (
     ProviderConnectionBoundError,
     ProviderConnectionNotFoundError,
+    ProviderRoleNotBoundError,
     ProviderSettings,
+    clear_role_binding,
     connect,
     delete_connection,
     freeze_role_bindings,
@@ -548,6 +550,26 @@ def test_delete_connection_rejects_missing_or_bound_connections_without_mutation
     assert secret_path.is_file()
 
 
+def test_clear_role_binding_keeps_connection_and_changes_settings_sha(
+    tmp_path: Path,
+) -> None:
+    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    set_role_binding(tmp_path, role="note_writer", connection_name=connection.name)
+    before_sha = settings_sha256(load_settings(tmp_path))
+    assert connection.secret_id is not None
+    secret_path = ProviderSecretStore(tmp_path).path_for(connection.secret_id)
+
+    clear_role_binding(tmp_path, role="note_writer")
+
+    settings = load_settings(tmp_path)
+    assert settings.role_bindings == {}
+    assert settings.connections[connection.name] == connection
+    assert secret_path.is_file()
+    assert before_sha != settings_sha256(settings)
+    with pytest.raises(ProviderRoleNotBoundError):
+        clear_role_binding(tmp_path, role="note_writer")
+
+
 def test_delete_connection_rolls_back_when_setting_or_secret_cleanup_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -727,6 +749,22 @@ def test_webui_rejects_deleting_a_bound_connection_with_role_guidance(
     assert "mimo" in load_settings(tmp_path).connections
 
 
+def test_webui_unbinds_a_role_without_deleting_its_connection(tmp_path: Path) -> None:
+    secret = "clear-role-secret-never-show"
+    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value=secret)
+    set_role_binding(tmp_path, role="note_writer", connection_name=connection.name)
+    client = TestClient(create_web_app(tmp_path))
+
+    cleared = client.delete("/api/providers/roles/note_writer")
+    missing = client.delete("/api/providers/roles/note_writer")
+
+    assert cleared.status_code == 200
+    assert cleared.json()["role_bindings"] == {}
+    assert "mimo" in {item["name"] for item in cleared.json()["connections"]}
+    assert missing.status_code == 404
+    assert secret not in cleared.text + missing.text
+
+
 def test_webui_renders_bound_role_with_connection_provider_and_model(
     tmp_path: Path,
 ) -> None:
@@ -752,6 +790,8 @@ def test_webui_renders_bound_role_with_connection_provider_and_model(
     assert 'data-delete-connection="${escapeHtml(item.name)}"' in script
     assert "window.confirm" in script
     assert "await loadAutomationStatus();" in script
+    assert 'data-unbind-role="${escapeHtml(role)}"' in script
+    assert "async function clearProviderRole(button)" in script
     for group in ("note", "podcast", "tts", "asr", "ocr"):
         assert f'name="{group}_calls_per_day"' in page
         assert f'"{group}"' in script

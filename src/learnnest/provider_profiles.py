@@ -56,6 +56,10 @@ class ProviderConnectionBoundError(ValueError):
         super().__init__("provider connection is still bound")
 
 
+class ProviderRoleNotBoundError(ValueError):
+    """The requested workflow role has no configured connection."""
+
+
 class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -540,6 +544,27 @@ def set_role_binding(
         validated = ProviderSettings.model_validate(candidate.model_dump(mode="python"))
     except ValidationError as error:
         raise ValueError("provider role binding is incompatible") from error
+    save_settings(output_root, validated)
+    return validated
+
+
+def clear_role_binding(
+    output_root: str | Path, *, role: ProviderRole
+) -> ProviderSettings:
+    """Remove one role binding without deleting its connection or secret."""
+    settings = load_settings(output_root)
+    if role not in settings.role_bindings:
+        raise ProviderRoleNotBoundError("provider role is not bound")
+    candidate = settings.model_copy(
+        update={
+            "role_bindings": {
+                bound_role: binding
+                for bound_role, binding in settings.role_bindings.items()
+                if bound_role != role
+            }
+        }
+    )
+    validated = ProviderSettings.model_validate(candidate.model_dump(mode="python"))
     save_settings(output_root, validated)
     return validated
 

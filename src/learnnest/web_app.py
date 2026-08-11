@@ -52,6 +52,8 @@ from learnnest.provider_profiles import (
     ProviderConnectionBoundError,
     ProviderConnectionNotFoundError,
     ProviderRole,
+    ProviderRoleNotBoundError,
+    clear_role_binding,
     connect as connect_provider,
     delete_connection,
     get_connection,
@@ -470,6 +472,10 @@ class WebService:
             )
         except ValueError as error:
             raise ValueError("连接不能承担这个职责。") from error
+        return self.provider_settings()
+
+    def clear_provider_role(self, role: ProviderRole) -> dict[str, object]:
+        clear_role_binding(self.output_root, role=role)
         return self.provider_settings()
 
     def check_provider_connection(self, name: str) -> dict[str, str]:
@@ -947,6 +953,17 @@ def create_web_app(
             return service.set_provider_role(role, request)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.delete("/api/providers/roles/{role}")
+    def clear_provider_role(role: ProviderRole) -> dict[str, object]:
+        try:
+            return service.clear_provider_role(role)
+        except ProviderRoleNotBoundError as error:
+            raise HTTPException(
+                status_code=404, detail="该职责尚未绑定连接。"
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail="职责无法解绑。") from error
 
     @app.post("/api/providers/connections/{name}/check")
     def check_provider_connection(name: str) -> dict[str, str]:

@@ -135,9 +135,10 @@ function renderProviderSettings(settings) {
   providerRoleList.innerHTML = bindings.length
     ? bindings.map(([role, name]) => {
       const connection = connections.get(name);
-      return `<div class="provider-role-summary"><span>${escapeHtml(providerRoleLabels[role] || role)}</span><span>${escapeHtml(name)} · ${escapeHtml(connection?.provider || "连接不可用")} · ${escapeHtml(connection?.model || "")}</span><strong>已绑定</strong></div>`;
+      return `<div class="provider-role-summary"><span>${escapeHtml(providerRoleLabels[role] || role)}</span><span>${escapeHtml(name)} · ${escapeHtml(connection?.provider || "连接不可用")} · ${escapeHtml(connection?.model || "")}</span><div class="provider-role-actions"><strong>已绑定</strong><button type="button" data-unbind-role="${escapeHtml(role)}">解绑</button></div></div>`;
     }).join("")
     : '<p class="empty">尚未绑定职责。</p>';
+  providerRoleList.querySelectorAll("button[data-unbind-role]").forEach((button) => button.addEventListener("click", () => clearProviderRole(button)));
 }
 
 function suggestProviderConnectionName() {
@@ -159,10 +160,32 @@ function startProviderSave(event) {
   };
 }
 
-function showProviderSaveFailure(error) {
-  providerState.textContent = "保存失败";
+function showProviderUpdateFailure(error) {
+  providerState.textContent = "操作失败";
   providerState.className = "status-pill";
   say(error.message);
+}
+
+async function clearProviderRole(button) {
+  const role = button.dataset.unbindRole;
+  const label = providerRoleLabels[role] || role;
+  if (!window.confirm(`确定解绑“${label}”职责吗？自动整理需要重新确认。`)) return;
+  const buttonLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "解绑中…";
+  providerState.textContent = "解绑中";
+  try {
+    const settings = await api(`/api/providers/roles/${encodeURIComponent(role)}`, { method: "DELETE" });
+    renderProviderSettings(settings);
+    await loadAutomationStatus();
+    providerRoleFeedback.textContent = `已解绑：${label}`;
+    say(`已解绑 ${label}；自动整理需要重新确认。`);
+  } catch (error) {
+    showProviderUpdateFailure(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = buttonLabel;
+  }
 }
 
 async function deleteProviderConnection(button) {
@@ -178,7 +201,7 @@ async function deleteProviderConnection(button) {
     await loadAutomationStatus();
     say(`已删除连接：${name}。如自动整理此前已授权，请重新确认。`);
   } catch (error) {
-    showProviderSaveFailure(error);
+    showProviderUpdateFailure(error);
   } finally {
     button.disabled = false;
     button.textContent = label;
@@ -602,7 +625,7 @@ providerForm.addEventListener("submit", async (event) => {
     suggestProviderConnectionName();
     renderProviderSettings(settings);
     say("连接已保存；密钥不会显示在页面中。");
-  } catch (error) { showProviderSaveFailure(error); } finally { finishSaving(); }
+  } catch (error) { showProviderUpdateFailure(error); } finally { finishSaving(); }
 });
 
 providerForm.elements.preset.addEventListener("change", () => {
@@ -622,7 +645,7 @@ providerRoleForm.addEventListener("submit", async (event) => {
     const detail = `${providerRoleLabels[form.get("role")]} → ${connection.provider} · ${connection.model}`;
     providerRoleFeedback.textContent = `已绑定：${detail}`;
     say(`职责已绑定：${detail}`);
-  } catch (error) { showProviderSaveFailure(error); } finally { finishSaving(); }
+  } catch (error) { showProviderUpdateFailure(error); } finally { finishSaving(); }
 });
 
 providerRoleForm.elements.role.addEventListener("change", () => loadProviderSettings());
@@ -634,7 +657,7 @@ providerLimitsForm.addEventListener("submit", async (event) => {
   try {
     renderProviderSettings(await api("/api/providers/limits", { method: "PUT", body: JSON.stringify({ retries_per_role: Number(form.get("retries_per_role")), global_calls_per_day: Number(form.get("global_calls_per_day")), budget_group_calls_per_day: Object.fromEntries(["note", "podcast", "tts", "asr", "ocr"].map((group) => [group, Number(form.get(`${group}_calls_per_day`))])) }) }));
     say("调用限额已保存；自动授权已需要按新设置重新确认。");
-  } catch (error) { showProviderSaveFailure(error); } finally { finishSaving(); }
+  } catch (error) { showProviderUpdateFailure(error); } finally { finishSaving(); }
 });
 
 connectDouyinButton.addEventListener("click", connectDouyin);

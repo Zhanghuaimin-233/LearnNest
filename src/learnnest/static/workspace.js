@@ -108,8 +108,20 @@ function renderProviderSettings(settings) {
   providerLimitsForm.elements.retries_per_role.value = settings.retries_per_role;
   providerLimitsForm.elements.global_calls_per_day.value = settings.global_calls_per_day;
   for (const group of ["note", "podcast", "tts", "asr", "ocr"]) providerLimitsForm.elements[`${group}_calls_per_day`].value = settings.budget_group_calls_per_day[group];
+  const rolesByConnection = new Map();
+  Object.entries(settings.role_bindings).forEach(([role, name]) => {
+    const roles = rolesByConnection.get(name) || [];
+    roles.push(providerRoleLabels[role] || role);
+    rolesByConnection.set(name, roles);
+  });
   providerList.innerHTML = settings.connections.length
-    ? settings.connections.map((item) => `<div class="provider-row"><span>${escapeHtml(item.name)}</span><span>${escapeHtml(item.provider)} · ${escapeHtml(item.voice || item.model)}</span><span>${item.secret_status === "local_configured" ? "本地已配置" : item.configured ? "已配置" : "未配置"}</span><button type="button" data-check-connection="${escapeHtml(item.name)}">检查</button></div>`).join("")
+    ? settings.connections.map((item) => {
+      const roles = rolesByConnection.get(item.name) || [];
+      const deleteControl = roles.length
+        ? `<span class="provider-bound">已绑定 ${escapeHtml(roles.join("、"))}；请先替换</span>`
+        : `<button type="button" data-delete-connection="${escapeHtml(item.name)}">删除</button>`;
+      return `<div class="provider-row"><span>${escapeHtml(item.name)}</span><span>${escapeHtml(item.provider)} · ${escapeHtml(item.voice || item.model)}</span><span>${item.secret_status === "local_configured" ? "本地已配置" : item.configured ? "已配置" : "未配置"}</span><div class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查</button>${deleteControl}</div></div>`;
+    }).join("")
     : '<p class="empty">还没有学习连接。</p>';
   providerList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", async () => {
     try {
@@ -117,6 +129,7 @@ function renderProviderSettings(settings) {
       say("连接配置可用；这次检查没有调用 Provider。");
     } catch (error) { say(error.message); }
   }));
+  providerList.querySelectorAll("button[data-delete-connection]").forEach((button) => button.addEventListener("click", () => deleteProviderConnection(button)));
   const connections = new Map(settings.connections.map((item) => [item.name, item]));
   const bindings = Object.entries(settings.role_bindings);
   providerRoleList.innerHTML = bindings.length
@@ -150,6 +163,26 @@ function showProviderSaveFailure(error) {
   providerState.textContent = "保存失败";
   providerState.className = "status-pill";
   say(error.message);
+}
+
+async function deleteProviderConnection(button) {
+  const name = button.dataset.deleteConnection;
+  if (!window.confirm(`确定删除连接“${name}”吗？此操作无法恢复。`)) return;
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "删除中…";
+  providerState.textContent = "删除中";
+  try {
+    const settings = await api(`/api/providers/connections/${encodeURIComponent(name)}`, { method: "DELETE" });
+    renderProviderSettings(settings);
+    await loadAutomationStatus();
+    say(`已删除连接：${name}。如自动整理此前已授权，请重新确认。`);
+  } catch (error) {
+    showProviderSaveFailure(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
 }
 
 async function refreshWindowsVoices() {

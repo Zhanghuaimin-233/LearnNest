@@ -49,8 +49,11 @@ from learnnest.models import TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
 from learnnest.provider_profiles import (
     ProviderBudgetGroup,
+    ProviderConnectionBoundError,
+    ProviderConnectionNotFoundError,
     ProviderRole,
     connect as connect_provider,
+    delete_connection,
     get_connection,
     load_settings,
     public_settings as public_provider_settings,
@@ -439,6 +442,10 @@ class WebService:
             )
         except ValueError as error:
             raise ValueError("连接配置无法保存。") from error
+        return self.provider_settings()
+
+    def delete_provider_connection(self, name: str) -> dict[str, object]:
+        delete_connection(self.output_root, name=name)
         return self.provider_settings()
 
     def windows_tts_voices(self) -> dict[str, object]:
@@ -901,6 +908,29 @@ def create_web_app(
             return service.save_provider_connection(request)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.delete("/api/providers/connections/{name}")
+    def delete_provider_connection(name: str) -> dict[str, object]:
+        try:
+            return service.delete_provider_connection(name)
+        except ProviderConnectionNotFoundError as error:
+            raise HTTPException(status_code=404, detail="连接不存在。") from error
+        except ProviderConnectionBoundError as error:
+            labels = {
+                "note_writer": "笔记 Writer",
+                "note_reviewer": "笔记 Reviewer",
+                "podcast": "播客",
+                "tts": "TTS",
+                "asr": "ASR",
+                "ocr": "OCR",
+            }
+            roles = "、".join(labels[role] for role in error.roles)
+            raise HTTPException(
+                status_code=409,
+                detail=f"连接仍被 {roles} 绑定，请先替换职责连接。",
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail="连接无法删除。") from error
 
     @app.get("/api/providers/windows-tts/voices")
     def windows_tts_voices() -> dict[str, object]:

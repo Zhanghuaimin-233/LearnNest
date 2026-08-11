@@ -44,6 +44,18 @@ _ROLE_BUDGET_GROUPS: dict[ProviderRole, ProviderBudgetGroup] = {
 }
 
 
+class ProviderConnectionNotFoundError(ValueError):
+    """The requested connection does not exist."""
+
+
+class ProviderConnectionBoundError(ValueError):
+    """A connection cannot be deleted while a workflow role uses it."""
+
+    def __init__(self, roles: tuple[ProviderRole, ...]) -> None:
+        self.roles = roles
+        super().__init__("provider connection is still bound")
+
+
 class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -415,6 +427,67 @@ def connect(
                 pass
         raise
     return connection
+
+
+def delete_connection(output_root: str | Path, *, name: str) -> ProviderSettings:
+    """Remove one unbound connection and its ciphertext, if any.
+
+    Ciphertext is moved aside before settings are changed, so every expected
+    failure can restore the original usable connection without handling the
+    plaintext secret.
+    """
+    settings = load_settings(output_root)
+    try:
+        connection = settings.connections[name]
+    except KeyError as error:
+        raise ProviderConnectionNotFoundError(
+            "provider connection is not configured"
+        ) from error
+    roles = tuple(
+        role
+        for role, binding in settings.role_bindings.items()
+        if binding.connection_id == name
+    )
+    if roles:
+        raise ProviderConnectionBoundError(roles)
+    candidate = settings.model_copy(
+        update={
+            "connections": {
+                connection_name: item
+                for connection_name, item in settings.connections.items()
+                if connection_name != name
+            }
+        }
+    )
+    validated = ProviderSettings.model_validate(candidate.model_dump(mode="python"))
+    store = ProviderSecretStore(output_root)
+    staged = None
+    try:
+        if connection.secret_id is not None:
+            staged = store.stage_for_deletion(connection.secret_id)
+        save_settings(output_root, validated)
+    except (OSError, SecretStoreError, ValueError) as error:
+        if staged is not None:
+            try:
+                store.restore_staged_deletion(staged)
+            except SecretStoreError as rollback_error:
+                raise ValueError(
+                    "provider connection deletion could not be rolled back"
+                ) from rollback_error
+        raise ValueError("provider connection cannot be deleted") from error
+    if staged is not None:
+        try:
+            store.discard_staged_deletion(staged)
+        except SecretStoreError as error:
+            try:
+                save_settings(output_root, settings)
+                store.restore_staged_deletion(staged)
+            except (OSError, SecretStoreError, ValueError) as rollback_error:
+                raise ValueError(
+                    "provider connection deletion could not be rolled back"
+                ) from rollback_error
+            raise ValueError("provider connection cannot be deleted") from error
+    return validated
 
 
 def get_connection(

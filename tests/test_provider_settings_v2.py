@@ -17,8 +17,11 @@ from learnnest.automation_store import authorize, save_policy
 from learnnest.automation_store import load_task_state
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.provider_profiles import (
+    ProviderConnectionBoundError,
+    ProviderConnectionNotFoundError,
     ProviderSettings,
     connect,
+    delete_connection,
     freeze_role_bindings,
     get_connection,
     load_settings,
@@ -91,6 +94,26 @@ def test_dpapi_corruption_unknown_secret_and_cross_user_failure_are_fail_closed(
     monkeypatch.setattr(fresh, "_unprotect", lambda _: (_ for _ in ()).throw(OSError()))
     with pytest.raises(SecretStoreError, match="unavailable"):
         fresh.read(fresh_id)
+
+
+def test_staged_secret_deletion_is_ciphertext_only_and_reversible(
+    tmp_path: Path,
+) -> None:
+    store = ProviderSecretStore(tmp_path)
+    secret_id = store.put("mimo-note", "secret")
+    path = store.path_for(secret_id)
+
+    staged = store.stage_for_deletion(secret_id)
+
+    assert staged is not None
+    assert not path.exists()
+    assert staged.staged.is_file()
+    assert b"secret" not in staged.staged.read_bytes()
+
+    store.restore_staged_deletion(staged)
+
+    assert path.is_file()
+    assert store.read(secret_id).get_secret_value() == "secret"
 
 
 def test_v1_settings_migrate_and_unsupported_products_are_rejected(
@@ -487,6 +510,76 @@ def test_incompatible_same_name_connection_update_is_rejected_before_secret_or_s
     assert load_settings(tmp_path).role_bindings["tts"].connection_id == "shared"
 
 
+def test_delete_connection_removes_unbound_local_and_cloud_connections(
+    tmp_path: Path,
+) -> None:
+    cloud = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connect(tmp_path, name="local-asr", preset="local-asr")
+    before_sha = settings_sha256(load_settings(tmp_path))
+    assert cloud.secret_id is not None
+    secret_path = ProviderSecretStore(tmp_path).path_for(cloud.secret_id)
+
+    delete_connection(tmp_path, name="mimo")
+    after_cloud_delete = load_settings(tmp_path)
+    delete_connection(tmp_path, name="local-asr")
+
+    assert "mimo" not in after_cloud_delete.connections
+    assert not secret_path.exists()
+    assert before_sha != settings_sha256(after_cloud_delete)
+    assert load_settings(tmp_path).connections == {}
+
+
+def test_delete_connection_rejects_missing_or_bound_connections_without_mutation(
+    tmp_path: Path,
+) -> None:
+    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    set_role_binding(tmp_path, role="note_writer", connection_name=connection.name)
+    before = load_settings(tmp_path).model_dump(mode="json")
+    assert connection.secret_id is not None
+    secret_path = ProviderSecretStore(tmp_path).path_for(connection.secret_id)
+
+    with pytest.raises(ProviderConnectionBoundError) as bound:
+        delete_connection(tmp_path, name="mimo")
+    with pytest.raises(ProviderConnectionNotFoundError):
+        delete_connection(tmp_path, name="missing")
+
+    assert bound.value.roles == ("note_writer",)
+    assert load_settings(tmp_path).model_dump(mode="json") == before
+    assert secret_path.is_file()
+
+
+def test_delete_connection_rolls_back_when_setting_or_secret_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import learnnest.provider_profiles as profiles
+
+    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    assert connection.secret_id is not None
+    secret_path = ProviderSecretStore(tmp_path).path_for(connection.secret_id)
+
+    monkeypatch.setattr(
+        profiles,
+        "save_settings",
+        lambda *_: (_ for _ in ()).throw(OSError("write failed")),
+    )
+    with pytest.raises(ValueError, match="cannot be deleted"):
+        delete_connection(tmp_path, name="mimo")
+    assert "mimo" in load_settings(tmp_path).connections
+    assert secret_path.is_file()
+
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        ProviderSecretStore,
+        "discard_staged_deletion",
+        lambda *_: (_ for _ in ()).throw(SecretStoreError("delete failed")),
+    )
+    with pytest.raises(ValueError, match="cannot be deleted"):
+        delete_connection(tmp_path, name="mimo")
+    assert "mimo" in load_settings(tmp_path).connections
+    assert secret_path.is_file()
+
+
 def test_note_and_podcast_cannot_share_connection_or_secret_even_if_json_is_tampered(
     tmp_path: Path,
 ) -> None:
@@ -588,6 +681,52 @@ def test_webui_local_connections_save_without_api_keys(tmp_path: Path) -> None:
     )
 
 
+def test_webui_deletes_only_unbound_connections_without_exposing_secrets(
+    tmp_path: Path,
+) -> None:
+    cloud = connect(tmp_path, name="mimo", preset="mimo", secret_value="never-show")
+    local = connect(tmp_path, name="local-asr", preset="local-asr")
+    client = TestClient(create_web_app(tmp_path))
+    assert cloud.secret_id is not None
+    secret_path = ProviderSecretStore(tmp_path).path_for(cloud.secret_id)
+
+    deleted = client.delete("/api/providers/connections/mimo")
+    deleted_local = client.delete("/api/providers/connections/local-asr")
+    missing = client.delete("/api/providers/connections/missing")
+
+    assert deleted.status_code == 200
+    assert deleted_local.status_code == 200
+    assert deleted.json()["connections"] == [
+        {
+            "name": local.name,
+            "capability": "asr",
+            "provider": "local-asr",
+            "model": "local-installed",
+            "configured": True,
+            "secret_status": "local_configured",
+            "voice": None,
+        }
+    ]
+    assert not secret_path.exists()
+    assert missing.status_code == 404
+    assert "never-show" not in deleted.text + missing.text
+
+
+def test_webui_rejects_deleting_a_bound_connection_with_role_guidance(
+    tmp_path: Path,
+) -> None:
+    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    set_role_binding(tmp_path, role="note_writer", connection_name=connection.name)
+    client = TestClient(create_web_app(tmp_path))
+
+    response = client.delete("/api/providers/connections/mimo")
+
+    assert response.status_code == 409
+    assert "笔记 Writer" in response.text
+    assert "secret" not in response.text
+    assert "mimo" in load_settings(tmp_path).connections
+
+
 def test_webui_renders_bound_role_with_connection_provider_and_model(
     tmp_path: Path,
 ) -> None:
@@ -610,6 +749,9 @@ def test_webui_renders_bound_role_with_connection_provider_and_model(
     assert "function startProviderSave(event)" in script
     assert script.count("const finishSaving = startProviderSave(event);") == 3
     assert 'const current = await api("/api/providers/settings");' not in script
+    assert 'data-delete-connection="${escapeHtml(item.name)}"' in script
+    assert "window.confirm" in script
+    assert "await loadAutomationStatus();" in script
     for group in ("note", "podcast", "tts", "asr", "ocr"):
         assert f'name="{group}_calls_per_day"' in page
         assert f'"{group}"' in script
@@ -637,8 +779,9 @@ def test_provider_setting_change_invalidates_automatic_authorization_before_call
         tmp_path,
         AutomationPolicy(schedule_id="manual", writer=snapshot, reviewer=snapshot),
     )
-    authorize(tmp_path, now=datetime(2026, 8, 2, tzinfo=UTC))
     connect(tmp_path, name="mimo", preset="mimo", secret_value="changed")
+    authorize(tmp_path, now=datetime(2026, 8, 2, tzinfo=UTC))
+    delete_connection(tmp_path, name="mimo")
 
     providers = AutomationProviders(
         writer=object(),

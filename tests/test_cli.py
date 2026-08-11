@@ -19,8 +19,10 @@ from learnnest.automation_store import load_task_state
 from learnnest.models import ContentPack, Evidence, StageStatus, TaskRecord
 from learnnest.provider_profiles import (
     ProviderSettings,
+    connect,
     load_settings,
     save_settings,
+    set_role_binding,
     settings_sha256,
 )
 from learnnest.provider_service import execute_direct_provider_call
@@ -88,6 +90,57 @@ def test_help_lists_all_pipeline_commands() -> None:
         "layout",
     ):
         assert command in result.output
+
+
+def test_provider_delete_requires_confirmation_and_rejects_bound_connections(
+    tmp_path: Path,
+) -> None:
+    cloud = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    assert cloud.secret_id is not None
+    result = runner.invoke(
+        app, ["provider", "delete", "mimo", "--output-root", str(tmp_path)]
+    )
+
+    assert result.exit_code == 1
+    assert "--confirm is required" in result.output
+    assert "mimo" in load_settings(tmp_path).connections
+
+    set_role_binding(tmp_path, role="note_writer", connection_name="mimo")
+    bound = runner.invoke(
+        app,
+        [
+            "provider",
+            "delete",
+            "mimo",
+            "--confirm",
+            "--output-root",
+            str(tmp_path),
+        ],
+    )
+
+    assert bound.exit_code == 1
+    assert "still bound" in bound.output
+    assert "mimo" in load_settings(tmp_path).connections
+
+
+def test_provider_delete_removes_an_unbound_connection(tmp_path: Path) -> None:
+    connection = connect(tmp_path, name="local-asr", preset="local-asr")
+
+    result = runner.invoke(
+        app,
+        [
+            "provider",
+            "delete",
+            connection.name,
+            "--confirm",
+            "--output-root",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output == "Deleted local-asr\n"
+    assert load_settings(tmp_path).connections == {}
 
 
 def test_assisted_cli_admits_the_real_b_dossier_after_a_is_skipped(

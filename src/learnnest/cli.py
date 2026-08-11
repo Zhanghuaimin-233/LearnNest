@@ -71,6 +71,7 @@ from learnnest.provider_profiles import (
     connection_presets,
     ProviderConnection,
     connect as connect_provider,
+    delete_connection,
     get_connection,
     load_settings,
     public_settings as public_provider_settings,
@@ -293,6 +294,29 @@ def provider_status(
     except ValueError as error:
         typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(code=1) from error
+
+
+@provider_app.command("delete")
+def provider_delete(
+    name: Annotated[str, typer.Argument(help="Configured connection name")],
+    confirm: Annotated[
+        bool, typer.Option("--confirm", help="Confirm irreversible deletion.")
+    ] = False,
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Delete one unbound Provider connection and its encrypted Key."""
+    if not confirm:
+        typer.echo("ERROR: --confirm is required", err=True)
+        raise typer.Exit(code=1)
+    root = _output_root(output_root)
+    try:
+        delete_connection(root, name=name)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Deleted {name}")
 
 
 @provider_app.command("bind")

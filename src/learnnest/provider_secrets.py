@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import SecretStr
@@ -17,6 +18,14 @@ _PLAINTEXT_MAGIC = b"LEARNNEST_PROVIDER_SECRET_V1\0"
 
 class SecretStoreError(RuntimeError):
     """A deliberately non-diagnostic provider-secret access failure."""
+
+
+@dataclass(frozen=True)
+class StagedSecretDeletion:
+    """One same-directory, reversible secret removal."""
+
+    source: Path
+    staged: Path
 
 
 class ProviderSecretStore:
@@ -95,6 +104,35 @@ class ProviderSecretStore:
         except Exception as error:
             raise SecretStoreError("provider secret is unavailable") from error
         return SecretStr(value)
+
+    def stage_for_deletion(self, secret_id: str) -> StagedSecretDeletion | None:
+        """Move one ciphertext aside without decrypting it.
+
+        A missing ciphertext is already absent and does not block removal of a
+        stale connection record.
+        """
+        source = self.path_for(secret_id)
+        if not source.is_file():
+            return None
+        staged = source.with_name(f".{source.name}.{uuid.uuid4().hex}.delete")
+        try:
+            os.replace(source, staged)
+        except OSError as error:
+            raise SecretStoreError("provider secret is unavailable") from error
+        return StagedSecretDeletion(source=source, staged=staged)
+
+    def discard_staged_deletion(self, staged: StagedSecretDeletion) -> None:
+        try:
+            staged.staged.unlink()
+        except OSError as error:
+            raise SecretStoreError("provider secret is unavailable") from error
+
+    def restore_staged_deletion(self, staged: StagedSecretDeletion) -> None:
+        try:
+            if staged.staged.is_file():
+                os.replace(staged.staged, staged.source)
+        except OSError as error:
+            raise SecretStoreError("provider secret is unavailable") from error
 
     def path_for(self, secret_id: str) -> Path:
         if len(secret_id) != 32 or any(

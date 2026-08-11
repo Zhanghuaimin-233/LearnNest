@@ -792,6 +792,9 @@ def test_webui_renders_bound_role_with_connection_provider_and_model(
     assert "await loadAutomationStatus();" in script
     assert 'data-unbind-role="${escapeHtml(role)}"' in script
     assert "async function clearProviderRole(button)" in script
+    assert "const submittedForm = event.currentTarget;" in script
+    assert "submittedForm.reset();" in script
+    assert "event.currentTarget.reset();" not in script
     for group in ("note", "podcast", "tts", "asr", "ocr"):
         assert f'name="{group}_calls_per_day"' in page
         assert f'"{group}"' in script

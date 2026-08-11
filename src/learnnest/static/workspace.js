@@ -548,7 +548,8 @@ async function actOnItem(itemRef, action) {
 
 uploadForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const submittedForm = event.currentTarget;
+  const form = new FormData(submittedForm);
   const file = form.get("video");
   if (!(file instanceof File) || !file.name) return;
   try {
@@ -558,7 +559,7 @@ uploadForm.addEventListener("submit", async (event) => {
       body: file,
     });
     say("已加入收件箱，正在整理材料。");
-    event.currentTarget.reset();
+    submittedForm.reset();
     await refresh(true);
   } catch (error) {
     say(error.message);
@@ -567,11 +568,12 @@ uploadForm.addEventListener("submit", async (event) => {
 
 urlForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const submittedForm = event.currentTarget;
+  const form = new FormData(submittedForm);
   try {
     await api("/api/learning/submit", { method: "POST", body: JSON.stringify({ source: form.get("source") }) });
     say("已加入收件箱，正在整理材料。");
-    event.currentTarget.reset();
+    submittedForm.reset();
     await refresh(true);
   } catch (error) { say(error.message); }
 });
@@ -608,7 +610,8 @@ disableAutomationButton.addEventListener("click", async () => {
 
 providerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const submittedForm = event.currentTarget;
+  const form = new FormData(submittedForm);
   const preset = String(form.get("preset"));
   const key = String(form.get("api_key") || "").trim();
   const finishSaving = startProviderSave(event);
@@ -621,7 +624,7 @@ providerForm.addEventListener("submit", async (event) => {
         ...(preset === "windows-tts" ? { voice: form.get("voice") } : {}),
       }),
     });
-    event.currentTarget.reset();
+    submittedForm.reset();
     suggestProviderConnectionName();
     renderProviderSettings(settings);
     say("连接已保存；密钥不会显示在页面中。");

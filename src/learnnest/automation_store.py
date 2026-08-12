@@ -151,6 +151,22 @@ def save_task_state(output_root: str | Path, state: AutomationTaskState) -> None
     )
 
 
+def task_has_execution_facts(output_root: str | Path, task_id: str) -> bool:
+    """Return whether any durable automation state already fixes task identity."""
+    directory = automation_directory(output_root) / "tasks" / task_id
+    if not directory.is_dir():
+        return False
+    for path in sorted(directory.glob("*.json")):
+        try:
+            state = AutomationTaskState.model_validate_json(path.read_bytes())
+        except (OSError, UnicodeError, ValidationError, ValueError) as error:
+            raise ValueError("automation task state is missing or invalid") from error
+        if state.task_id != task_id or path.stem != state.policy_sha256:
+            raise ValueError("automation task state does not match its identity")
+        return True
+    return False
+
+
 def create_intake(
     output_root: str | Path, intake: AutomationIntake
 ) -> AutomationIntake:

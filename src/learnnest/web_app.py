@@ -1108,6 +1108,7 @@ def _learning_item_payload(
         "state": item.state,
         "message": item.message,
         "action": item.action,
+        "action_kind": item.action_kind,
     }
     if workspace is not None:
         try:

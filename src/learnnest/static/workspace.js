@@ -61,12 +61,16 @@ const providerRoleCapabilities = {
   tts: "tts", asr: "asr", ocr: "ocr",
 };
 const stateLabel = {
+  materials_ready: "材料已准备",
+  waiting_setup: "等待设置",
+  waiting_authorization: "等待授权",
   queued: "等待整理",
   organizing: "正在整理",
-  materials_ready: "材料已就绪",
-  needs_action: "需要继续",
+  partial_ready: "笔记已就绪，音频待完成",
+  needs_action: "需要处理",
   ready: "可阅读",
 };
+const learningActionKinds = new Set(["open_note", "open_settings", "open_automation", "continue"]);
 const loginLabel = {
   disconnected: "未连接",
   starting: "准备中",
@@ -256,7 +260,7 @@ function renderList(target, items, empty) {
         <h3>${escapeHtml(item.title)}</h3>
         <p>${escapeHtml(item.source)} · ${escapeHtml(item.message)}</p>
       </div>
-      ${item.action ? `<button type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${item.state === "ready" ? "open" : "continue"}">${escapeHtml(item.action)}</button>` : ""}
+      ${item.action && learningActionKinds.has(item.action_kind) ? `<button type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}
       ${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}
     </article>`).join("");
   target.querySelectorAll("button[data-item-ref]").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
@@ -534,10 +538,20 @@ function scheduleRefresh() {
 
 async function actOnItem(itemRef, action) {
   try {
-    if (action === "open") {
+    if (action === "open_note") {
       window.open(`/api/learning/items/${encodeURIComponent(itemRef)}/note`, "_blank", "noopener");
       return;
     }
+    if (action === "open_settings") {
+      document.querySelector("#settings")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    if (action === "open_automation") {
+      document.querySelector("#settings")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      window.requestAnimationFrame(() => confirmPaid?.focus({ preventScroll: true }));
+      return;
+    }
+    if (action !== "continue") return;
     const result = await api(`/api/learning/items/${encodeURIComponent(itemRef)}/continue`, { method: "POST" });
     say(result.outcome === "needs_setup" ? "需要完成设置后才能继续。" : "已继续整理内容。");
     await refresh(true);

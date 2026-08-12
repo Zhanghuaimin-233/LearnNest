@@ -20,14 +20,22 @@ from learnnest.automation_store import (
     list_intakes,
     load_status,
     save_intake,
+    task_has_execution_facts,
 )
-from learnnest.provider_profiles import load_settings, settings_sha256
+from learnnest.learning_state import automation_readiness, required_automation_roles
+from learnnest.locks import LockUnavailable, task_lock
+from learnnest.models import StageStatus, TaskRecord
+from learnnest.provider_profiles import (
+    freeze_role_bindings,
+    load_settings,
+    settings_sha256,
+)
 from learnnest.provider_service import (
     assisted_provider_from_snapshot,
     podcast_provider_from_snapshot,
     tts_provider_from_snapshot,
 )
-from learnnest.task_store import find_task_by_id, load_task
+from learnnest.task_store import find_task_by_id, load_task, write_task_atomic
 
 RunTasks = Callable[..., AutomationRunResult]
 Clock = Callable[[], datetime]
@@ -94,21 +102,37 @@ class AutomationCoordinator:
             )[: status.policy.max_items_per_tick]
             if not selected:
                 return AutomationRunResult((), (), ())
+            prepared: list[AutomationIntake] = []
             for intake in selected:
+                try:
+                    _freeze_intake_task_binding(self.output_root, intake)
+                except _ImmutableTaskIdentity:
+                    save_intake(
+                        self.output_root,
+                        intake.model_copy(update={"status": "needs_attention"}),
+                    )
+                    continue
+                except (LockUnavailable, OSError, ValueError):
+                    # A missing role, stale configuration, corrupt task fact, or
+                    # failed atomic write stays safely pending for later repair.
+                    continue
                 if intake.status == "pending":
                     save_intake(
                         self.output_root,
                         intake.model_copy(update={"status": "claimed"}),
                     )
-            task_ids = tuple(item.task_id for item in selected)
-            outputs = {item.task_id: item.default_output for item in selected}
+                prepared.append(intake)
+            if not prepared:
+                return None
+            task_ids = tuple(item.task_id for item in prepared)
+            outputs = {item.task_id: item.default_output for item in prepared}
             result = self._run_tasks(
                 self.output_root,
                 task_ids,
                 default_outputs=outputs,
                 now=self._clock(),
             )
-            for intake in selected:
+            for intake in prepared:
                 if intake.task_id in result.completed_task_ids:
                     save_intake(
                         self.output_root,
@@ -183,6 +207,62 @@ def _authorization_is_current(output_root: Path) -> bool:
     )
 
 
+class _ImmutableTaskIdentity(ValueError):
+    """A task already has paid/automation facts and cannot be rebound."""
+
+
+def _freeze_intake_task_binding(output_root: Path, intake: AutomationIntake) -> None:
+    """Freeze the authorized roles before changing pending intake ownership."""
+    if automation_readiness(output_root, intake) != "ready":
+        raise ValueError("automation setup is not ready")
+    current = freeze_role_bindings(output_root)
+    required = required_automation_roles(intake.default_output)
+    if any(role not in current for role in required):
+        raise ValueError("automation roles are incomplete")
+    with task_lock(output_root, intake.task_id, timeout=0):
+        found = find_task_by_id(output_root, intake.task_id)
+        if found is None:
+            raise ValueError("automation task is missing")
+        task_dir, task = found
+        if _task_bindings_match(task, current, required):
+            return
+        if task_has_execution_facts(
+            output_root, intake.task_id
+        ) or _has_paid_task_trace(task):
+            raise _ImmutableTaskIdentity("automation task binding is immutable")
+        updated = TaskRecord.model_validate(
+            {
+                **task.model_dump(mode="python"),
+                "provider_bindings": {
+                    role: binding.model_dump(mode="python")
+                    for role, binding in current.items()
+                },
+                "provider_settings_sha256": settings_sha256(load_settings(output_root)),
+            }
+        )
+        write_task_atomic(task_dir, updated)
+
+
+def _task_bindings_match(
+    task: TaskRecord, current: dict[str, object], required: tuple[str, ...]
+) -> bool:
+    for role in required:
+        frozen = task.provider_bindings.get(role)
+        configured = current.get(role)
+        if frozen is None or configured is None:
+            return False
+        if frozen.model_dump(mode="json") != configured.model_dump(mode="json"):
+            return False
+    return True
+
+
+def _has_paid_task_trace(task: TaskRecord) -> bool:
+    return any(
+        task.stages.get(stage) not in {None, StageStatus.PENDING}
+        for stage in ("note", "publish", "podcast_script", "tts")
+    )
+
+
 def automation_providers_for_task(root: Path, task_id: str) -> AutomationProviders:
     """Build only the task's immutable providers after runner admission."""
     found = find_task_by_id(root, task_id)
@@ -193,22 +273,40 @@ def automation_providers_for_task(root: Path, task_id: str) -> AutomationProvide
     try:
         writer = task.provider_bindings["note_writer"]
         reviewer = task.provider_bindings["note_reviewer"]
-        podcast = task.provider_bindings["podcast"]
-        tts = task.provider_bindings["tts"]
     except KeyError as error:
         raise ValueError(
-            "automation task is missing frozen Provider role bindings"
+            "automation task is missing frozen note role bindings"
         ) from error
+    podcast = task.provider_bindings.get("podcast")
+    tts = task.provider_bindings.get("tts")
     return AutomationProviders(
         writer=assisted_provider_from_snapshot(str(root), writer),
         reviewer=assisted_provider_from_snapshot(str(root), reviewer),
-        podcast=podcast_provider_from_snapshot(str(root), podcast),
+        podcast=(
+            podcast_provider_from_snapshot(str(root), podcast)
+            if podcast is not None
+            else _UnavailableAutomationProvider()
+        ),
         tts=(
-            tts_provider_from_snapshot(str(root), tts)
+            _UnavailableAutomationProvider()
+            if tts is None
+            else tts_provider_from_snapshot(str(root), tts)
             if tts.provider == "windows-tts"
             else _LazyFrozenTtsProvider(root, tts)
         ),
     )
+
+
+class _UnavailableAutomationProvider:
+    """A role omitted by a note-only task; invocation remains fail-closed."""
+
+    billing = "paid"
+    name = "unavailable"
+    model = "unavailable"
+    endpoint_identity = ""
+
+    def __getattr__(self, _name: str) -> object:
+        raise ValueError("automation task is missing frozen audio role bindings")
 
 
 class _LazyFrozenTtsProvider:

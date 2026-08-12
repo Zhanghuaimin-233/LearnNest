@@ -159,7 +159,7 @@ def _run_task(
         else:
             task_providers = None
             writer_snapshot, reviewer_snapshot = _frozen_task_assisted_snapshots(
-                root, task_id, status.policy
+                root, task_id, status.policy, default_output
             )
     except Exception as error:
         _attention(
@@ -872,7 +872,7 @@ def _assert_plan_snapshots(
 
 
 def _frozen_task_assisted_snapshots(
-    root: Path, task_id: str, policy: object
+    root: Path, task_id: str, policy: object, default_output: str
 ) -> tuple[object, object]:
     found = find_task_by_id(root, task_id)
     if found is None:
@@ -900,7 +900,7 @@ def _frozen_task_assisted_snapshots(
         raise ValueError(
             "automation task frozen note bindings do not match authorization"
         )
-    if getattr(policy, "default_output", None) == "complete_note_with_audio":
+    if default_output == "complete_note_with_audio":
         try:
             podcast = task.provider_bindings["podcast"]
             tts = task.provider_bindings["tts"]

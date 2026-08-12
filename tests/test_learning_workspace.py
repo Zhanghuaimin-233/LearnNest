@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import learnnest.learning_workspace as learning_workspace
+import learnnest.web_app as web_app
 from learnnest.execution import RecoveryPlan
+from learnnest.assisted_note_models import AssistedConnectionSnapshot
+from learnnest.automation_models import AutomationIntake, AutomationPolicy
+from learnnest.automation_store import (
+    authorize,
+    create_intake,
+    save_intake,
+    save_policy,
+)
 from learnnest.locks import LockUnavailable
 from learnnest.models import StageStatus, TaskRecord
+from learnnest.provider_profiles import connect, set_role_binding
 from learnnest.task_store import create_task, write_task_atomic
 
 
@@ -51,6 +62,182 @@ def _published_task(root: Path, name: str = "ready-item") -> tuple[Path, TaskRec
         encoding="utf-8",
     )
     return task_dir, task
+
+
+def _configured_root(root: Path, *, authorized: bool) -> None:
+    connect(root, name="note", preset="mimo", secret_value="fake-key")
+    set_role_binding(root, role="note_writer", connection_name="note")
+    set_role_binding(root, role="note_reviewer", connection_name="note")
+    snapshot = AssistedConnectionSnapshot(
+        connection_name="note",
+        connection_id="note",
+        provider="xiaomi-mimo",
+        endpoint_identity="https://api.xiaomimimo.com/v1",
+        model="mimo-v2.5",
+        adapter_revision="1",
+    )
+    save_policy(
+        root,
+        AutomationPolicy(
+            writer=snapshot, reviewer=snapshot, default_output="complete_note"
+        ),
+    )
+    if authorized:
+        authorize(root)
+
+
+@pytest.mark.parametrize(
+    (
+        "case",
+        "expected_state",
+        "expected_message",
+        "expected_action",
+        "expected_action_kind",
+    ),
+    [
+        ("materials", "materials_ready", "材料已准备，可以开始整理。", None, None),
+        ("setup", "waiting_setup", "请先完成整理设置。", "完成设置", "open_settings"),
+        (
+            "authorization",
+            "waiting_authorization",
+            "请确认授权后开始整理。",
+            "确认授权",
+            "open_automation",
+        ),
+        ("queued", "queued", "等待整理。", None, None),
+        ("organizing", "organizing", "正在整理内容。", None, None),
+        (
+            "partial",
+            "partial_ready",
+            "笔记已完成，音频仍在处理中。",
+            "打开笔记",
+            "open_note",
+        ),
+        ("attention", "needs_action", "需要你处理；已保留完成的内容。", None, None),
+        ("ready", "ready", "可阅读。", "打开笔记", "open_note"),
+    ],
+)
+def test_snapshot_projects_the_eight_public_learning_states(
+    tmp_path: Path,
+    case: str,
+    expected_state: str,
+    expected_message: str,
+    expected_action: str | None,
+    expected_action_kind: str | None,
+) -> None:
+    task_dir, task = _task(
+        tmp_path,
+        case,
+        stages={"content_pack": StageStatus.COMPLETED},
+        artifacts={"content_pack": ["content_pack.json"]},
+    )
+    if case in {
+        "setup",
+        "authorization",
+        "queued",
+        "organizing",
+        "attention",
+        "partial",
+    }:
+        create_intake(
+            tmp_path,
+            AutomationIntake(
+                task_id=task.task_id,
+                source_kind="local_video",
+                default_output="complete_note_with_audio"
+                if case == "partial"
+                else "complete_note",
+                created_at=datetime.now(UTC),
+                status="claimed"
+                if case == "organizing"
+                else "needs_attention"
+                if case == "attention"
+                else "pending",
+            ),
+        )
+    if case in {"authorization", "queued", "organizing", "attention", "partial"}:
+        _configured_root(
+            tmp_path,
+            authorized=case in {"queued", "organizing", "attention", "partial"},
+        )
+    if case in {"partial", "ready"}:
+        (task_dir / "note.md").write_text(
+            f"<!-- learnnest-task-id: {task.task_id} -->\n\n# 笔记", encoding="utf-8"
+        )
+        write_task_atomic(
+            task_dir,
+            task.model_copy(
+                update={
+                    "stages": {"publish": StageStatus.COMPLETED},
+                    "artifacts": {"publish": ["note.md"]},
+                }
+            ),
+        )
+
+    snapshot = learning_workspace.LearningWorkspace(tmp_path).snapshot()
+    item = next(
+        item
+        for group in (snapshot.inbox, snapshot.processing, snapshot.library)
+        for item in group
+    )
+
+    assert (item.state, item.message, item.action, item.action_kind) == (
+        expected_state,
+        expected_message,
+        expected_action,
+        expected_action_kind,
+    )
+    payload = web_app._learning_item_payload(item)
+    assert (
+        payload["state"],
+        payload["message"],
+        payload["action"],
+        payload["action_kind"],
+    ) == (
+        expected_state,
+        expected_message,
+        expected_action,
+        expected_action_kind,
+    )
+
+
+def test_snapshot_revision_observes_intake_changes_and_safely_projects_corruption(
+    tmp_path: Path,
+) -> None:
+    _, task = _task(
+        tmp_path,
+        "revision-intake",
+        stages={"content_pack": StageStatus.COMPLETED},
+        artifacts={"content_pack": ["content_pack.json"]},
+    )
+    intake = create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=task.task_id,
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime.now(UTC),
+        ),
+    )
+    workspace = learning_workspace.LearningWorkspace(tmp_path)
+    first = workspace.snapshot()
+    save_intake(tmp_path, intake.model_copy(update={"status": "claimed"}))
+
+    claimed = workspace.snapshot(first.revision)
+    assert claimed.unchanged is False
+    assert claimed.revision != first.revision
+    assert claimed.processing[0].state == "organizing"
+    assert workspace.snapshot(claimed.revision).unchanged is True
+
+    intake_path = (
+        tmp_path / ".learnnest" / "automation" / "intake" / f"{task.task_id}.json"
+    )
+    intake_path.write_text('{"task_id":"wrong"}', encoding="utf-8")
+    corrupt = workspace.snapshot(claimed.revision)
+
+    assert corrupt.unchanged is False
+    assert corrupt.processing[0].state == "needs_action"
+    assert "wrong" not in corrupt.processing[0].message
 
 
 def test_snapshot_projects_existing_tasks_and_isolates_corrupt_records(

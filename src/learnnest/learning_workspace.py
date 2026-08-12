@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from learnnest.execution import plan_recovery
 from learnnest.automation_store import find_intake
+from learnnest.learning_state import automation_readiness, automation_task_state
 from learnnest.locks import LockUnavailable, task_lock
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
@@ -21,8 +22,18 @@ from learnnest.task_store import find_task_by_id, load_task
 from learnnest.tts_generation import probe_audio
 
 DesiredOutput = Literal["readable_note", "materials_only"]
+LearningActionKind = Literal[
+    "open_note", "open_settings", "open_automation", "continue"
+]
 LearningState = Literal[
-    "queued", "organizing", "materials_ready", "needs_action", "ready"
+    "materials_ready",
+    "waiting_setup",
+    "waiting_authorization",
+    "queued",
+    "organizing",
+    "partial_ready",
+    "needs_action",
+    "ready",
 ]
 _NON_PUBLIC_HOST_SUFFIXES = (
     ".example",
@@ -51,6 +62,11 @@ class LearningItem:
     state: LearningState
     message: str
     action: str | None
+    action_kind: LearningActionKind | None
+
+    def __post_init__(self) -> None:
+        if (self.action is None) != (self.action_kind is None):
+            raise ValueError("learning action and action kind must be paired")
 
 
 @dataclass(frozen=True)
@@ -122,6 +138,7 @@ class LearningWorkspace:
                             self._item(task_dir, persisted),
                             "需要完成设置后才能继续。",
                             "完成设置",
+                            "open_settings",
                         ),
                         outcome="needs_setup",
                     )
@@ -146,7 +163,7 @@ class LearningWorkspace:
         )
 
     def snapshot(self, known_revision: str | None = None) -> LearningSnapshot:
-        """Read task JSON snapshots only; this method never starts work."""
+        """Read persisted task/intake facts only; this method never starts work."""
         entries, revision = self._task_entries_and_revision()
         if known_revision == revision:
             return LearningSnapshot(revision, True, (), (), ())
@@ -155,7 +172,7 @@ class LearningWorkspace:
         library: list[LearningItem] = []
         for task_dir, task in entries:
             item = self._item(task_dir, task)
-            if item.state == "ready":
+            if item.state in {"ready", "partial_ready"}:
                 library.append(item)
             elif item.state in {"queued", "materials_ready"}:
                 inbox.append(item)
@@ -236,29 +253,68 @@ class LearningWorkspace:
         task_root = self.output_root / "视频学习素材"
         digest = sha256()
         entries: list[tuple[Path, TaskRecord]] = []
-        if not task_root.is_dir():
-            return entries, digest.hexdigest()
-        for task_json in sorted(
-            task_root.glob("*/task.json"), key=lambda path: path.parent.name
-        ):
-            try:
-                raw = task_json.read_bytes()
-            except OSError:
-                continue
-            digest.update(task_json.parent.name.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(raw)
-            digest.update(b"\0")
-            try:
-                entries.append((task_json.parent, load_task(task_json)))
-            except (OSError, ValueError):
-                continue
+        if task_root.is_dir():
+            for task_json in sorted(
+                task_root.glob("*/task.json"), key=lambda path: path.parent.name
+            ):
+                try:
+                    raw = task_json.read_bytes()
+                except OSError:
+                    continue
+                _digest_fact(digest, "task", task_json.parent.name, raw)
+                try:
+                    entries.append((task_json.parent, load_task(task_json)))
+                except (OSError, ValueError):
+                    continue
+        intake_root = self.output_root / ".learnnest" / "automation" / "intake"
+        if intake_root.is_dir():
+            for intake_json in sorted(
+                intake_root.glob("*.json"), key=lambda path: path.name
+            ):
+                try:
+                    raw = intake_json.read_bytes()
+                except OSError:
+                    continue
+                _digest_fact(digest, "intake", intake_json.name, raw)
+        state_root = self.output_root / ".learnnest" / "automation" / "tasks"
+        if state_root.is_dir():
+            for state_json in sorted(
+                state_root.glob("*/*.json"), key=lambda path: path.as_posix()
+            ):
+                try:
+                    raw = state_json.read_bytes()
+                except OSError:
+                    continue
+                _digest_fact(
+                    digest,
+                    "automation-state",
+                    state_json.relative_to(state_root).as_posix(),
+                    raw,
+                )
         entries.sort(key=lambda entry: entry[0].name, reverse=True)
         return entries, digest.hexdigest()
 
     def _item(self, task_dir: Path, task: TaskRecord) -> LearningItem:
         note_path = _readable_note_path(task_dir, task)
         if note_path is not None:
+            try:
+                intake = find_intake(self.output_root, task.task_id)
+            except ValueError:
+                intake = None
+            if (
+                intake is not None
+                and intake.default_output == "complete_note_with_audio"
+                and task.stages.get("tts") is not StageStatus.COMPLETED
+            ):
+                return LearningItem(
+                    task.task_id,
+                    task.title,
+                    _safe_source_label(task),
+                    "partial_ready",
+                    "笔记已完成，音频仍在处理中。",
+                    "打开笔记",
+                    "open_note",
+                )
             return LearningItem(
                 task.task_id,
                 task.title,
@@ -270,6 +326,7 @@ class LearningWorkspace:
                     else "可阅读。"
                 ),
                 "打开笔记",
+                "open_note",
             )
         try:
             intake = find_intake(self.output_root, task.task_id)
@@ -281,6 +338,18 @@ class LearningWorkspace:
                 "needs_action",
                 "需要你处理；已保留完成的内容。",
                 None,
+                None,
+            )
+        execution_state = automation_task_state(self.output_root, task.task_id)
+        if execution_state in {"invalid", "needs_attention", "completed"}:
+            return LearningItem(
+                task.task_id,
+                task.title,
+                _safe_source_label(task),
+                "needs_action",
+                "需要你处理；已保留完成的内容。",
+                None,
+                None,
             )
         if intake is not None and intake.status == "needs_attention":
             return LearningItem(
@@ -290,14 +359,6 @@ class LearningWorkspace:
                 "needs_action",
                 "需要你处理；已保留完成的内容。",
                 None,
-            )
-        if intake is not None and intake.status == "pending":
-            return LearningItem(
-                task.task_id,
-                task.title,
-                _safe_source_label(task),
-                "queued",
-                "等待整理。",
                 None,
             )
         if intake is not None and intake.status == "claimed":
@@ -306,7 +367,40 @@ class LearningWorkspace:
                 task.title,
                 _safe_source_label(task),
                 "organizing",
-                "处理中。",
+                "正在整理内容。",
+                None,
+                None,
+            )
+        if intake is not None:
+            readiness = automation_readiness(self.output_root, intake)
+            if readiness == "waiting_setup":
+                return LearningItem(
+                    task.task_id,
+                    task.title,
+                    _safe_source_label(task),
+                    "waiting_setup",
+                    "请先完成整理设置。",
+                    "完成设置",
+                    "open_settings",
+                )
+            if readiness == "waiting_authorization":
+                return LearningItem(
+                    task.task_id,
+                    task.title,
+                    _safe_source_label(task),
+                    "waiting_authorization",
+                    "请确认授权后开始整理。",
+                    "确认授权",
+                    "open_automation",
+                )
+        if intake is not None and intake.status == "pending":
+            return LearningItem(
+                task.task_id,
+                task.title,
+                _safe_source_label(task),
+                "queued",
+                "等待整理。",
+                None,
                 None,
             )
         if task.error_summary:
@@ -317,6 +411,7 @@ class LearningWorkspace:
                 "needs_action",
                 "处理需要继续；已保留完成的内容。",
                 "继续处理",
+                "continue",
             )
         if task.stages.get("content_pack") is StageStatus.COMPLETED:
             return LearningItem(
@@ -324,7 +419,8 @@ class LearningWorkspace:
                 task.title,
                 _safe_source_label(task),
                 "materials_ready",
-                "等待整理。",
+                "材料已准备，可以开始整理。",
+                None,
                 None,
             )
         if task.active_attempt_id is not None or any(
@@ -337,6 +433,7 @@ class LearningWorkspace:
                 "organizing",
                 "正在整理内容。",
                 None,
+                None,
             )
         return LearningItem(
             task.task_id,
@@ -344,6 +441,7 @@ class LearningWorkspace:
             _safe_source_label(task),
             "queued",
             "等待开始整理。",
+            None,
             None,
         )
 
@@ -416,9 +514,29 @@ def _safe_source_label(task: TaskRecord) -> str:
     return Path(source).name or "本地内容"
 
 
-def _item_with_action(item: LearningItem, message: str, action: str) -> LearningItem:
+def _digest_fact(digest: object, kind: str, name: str, raw: bytes) -> None:
+    digest.update(kind.encode("utf-8"))  # type: ignore[attr-defined]
+    digest.update(b"\0")  # type: ignore[attr-defined]
+    digest.update(name.encode("utf-8"))  # type: ignore[attr-defined]
+    digest.update(b"\0")  # type: ignore[attr-defined]
+    digest.update(raw)  # type: ignore[attr-defined]
+    digest.update(b"\0")  # type: ignore[attr-defined]
+
+
+def _item_with_action(
+    item: LearningItem,
+    message: str,
+    action: str,
+    action_kind: LearningActionKind,
+) -> LearningItem:
     return LearningItem(
-        item.item_ref, item.title, item.source, "needs_action", message, action
+        item.item_ref,
+        item.title,
+        item.source,
+        "needs_action",
+        message,
+        action,
+        action_kind,
     )
 
 

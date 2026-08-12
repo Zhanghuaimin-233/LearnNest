@@ -49,7 +49,7 @@ button:hover { background: var(--indigo); border-color: var(--indigo); }
 .book-list { border-top: 1px solid var(--line); }
 .learning-row { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 18px 4px; border-bottom: 1px solid var(--line); }
 .status-bookmark { align-self: stretch; min-height: 45px; background: #a3bdc8; }
-.status-bookmark.ready { background: var(--lake); }.status-bookmark.needs_action { background: var(--warning); }.status-bookmark.materials_ready { background: var(--bookmark); }.status-bookmark.organizing { background: var(--lake); }.status-bookmark.queued { background: #a3bdc8; }
+.status-bookmark.ready { background: var(--lake); }.status-bookmark.partial_ready { background: #6ca48b; }.status-bookmark.needs_action { background: var(--warning); }.status-bookmark.materials_ready { background: var(--bookmark); }.status-bookmark.waiting_setup { background: #bc93c7; }.status-bookmark.waiting_authorization { background: #d38b59; }.status-bookmark.organizing { background: var(--lake); }.status-bookmark.queued { background: #a3bdc8; }
 .learning-copy h3 { margin-bottom: 5px; font-size: 1rem; }.learning-copy p { margin-bottom: 0; overflow: hidden; color: var(--ink-soft); font-size: .86rem; text-overflow: ellipsis; white-space: nowrap; }
 .learning-row button { padding: 8px 12px; font-size: .88rem; }.learning-row audio { grid-column: 2 / -1; width: min(100%, 360px); }
 .empty { margin: 0; padding: 26px 0; color: var(--ink-soft); }

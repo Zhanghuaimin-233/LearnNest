@@ -422,6 +422,7 @@ def test_learning_api_adds_note_and_opens_safe_rendered_markdown(
     assert response.status_code == 201
     assert observed["profile"] == "note"
     assert snapshot.json()["library"][0]["state"] == "ready"
+    assert snapshot.json()["library"][0]["action_kind"] == "open_note"
     assert "<h1>一篇笔记</h1>" in note.text
     assert "<script>bad()</script>" not in note.text
     assert f"/api/learning/items/{task.task_id}/images/cover.png" in note.text
@@ -439,6 +440,44 @@ def test_learning_api_adds_note_and_opens_safe_rendered_markdown(
         "task id",
     ):
         assert forbidden not in page.text.lower()
+
+
+def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    script = client.get("/static/workspace.js").text
+    stylesheet = client.get("/static/workspace.css").text
+
+    for state in (
+        "materials_ready",
+        "waiting_setup",
+        "waiting_authorization",
+        "queued",
+        "organizing",
+        "partial_ready",
+        "needs_action",
+        "ready",
+    ):
+        assert f'{state}: "' in script
+    for action_kind in ("open_note", "open_settings", "open_automation"):
+        assert f'action === "{action_kind}"' in script
+    assert 'action !== "continue"' in script
+    assert 'item.state === "ready" ? "open" : "continue"' not in script
+    assert 'data-action="${escapeHtml(item.action_kind)}"' in script
+    assert "partial_ready" in stylesheet
+    assert "waiting_setup" in stylesheet
+    assert "waiting_authorization" in stylesheet
+    assert "confirmPaid.checked = true" not in script
+    action_block = script.split("async function actOnItem", maxsplit=1)[1].split(
+        "uploadForm.addEventListener", maxsplit=1
+    )[0]
+    assert 'document.querySelector("#settings")?.scrollIntoView' in action_block
+    assert "confirmPaid?.focus" in action_block
+    assert "/api/automation/authorize" not in action_block
+    assert action_block.index('action !== "continue"') < action_block.index("/continue")
+    assert "@media (max-width: 760px)" in stylesheet
+    assert ".learning-row { grid-template-columns: 9px minmax(0, 1fr); }" in stylesheet
 
 
 def test_douyin_webui_keeps_login_and_favorite_vocabulary_human_facing(

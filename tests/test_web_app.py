@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +14,31 @@ import learnnest.cli as cli
 import learnnest.learning_workspace as learning_workspace
 import learnnest.web_app as web_app
 from learnnest.execution import RecoveryPlan
-from learnnest.automation_store import load_intake
-from learnnest.models import StageStatus, TaskRecord
-from learnnest.task_store import create_task, write_task_atomic
-from learnnest.provider_profiles import connect, set_role_binding
+from learnnest.automation_models import (
+    AutomationAttempt,
+    AutomationIntake,
+    AutomationTaskState,
+)
+from learnnest.automation_coordinator import AutomationCoordinator
+from learnnest.automation_runner import AutomationProviders, run_automation_tasks
+from learnnest.automation_store import (
+    create_intake,
+    load_intake,
+    load_status,
+    load_task_state,
+    save_intake,
+    save_task_state,
+)
+from learnnest.models import ContentPack, Evidence, StageStatus, TaskRecord
+from learnnest.pipeline import PipelineError
+from learnnest.task_store import create_task, load_task, write_task_atomic
+from learnnest.provider_profiles import (
+    connect,
+    freeze_role_bindings,
+    load_settings,
+    set_role_binding,
+    settings_sha256,
+)
 
 
 def _task(root: Path, *, error_summary: str | None = None) -> tuple[Path, TaskRecord]:
@@ -52,6 +74,190 @@ def _wait_for_job(client: TestClient, job_id: str) -> dict[str, Any]:
             return payload
         time.sleep(0.01)
     raise AssertionError("background job did not complete")
+
+
+class _RetryableWriter:
+    name = "xiaomi-mimo"
+    model = "mimo-v2.5"
+    endpoint_identity = "https://api.xiaomimimo.com/v1"
+
+    def __init__(self, failures: int = 1) -> None:
+        self.failures = failures
+        self.writer_calls = 0
+        self.reviewer_calls = 0
+
+    def write_markdown(self, _dossier_json: str) -> str:
+        self.writer_calls += 1
+        if self.writer_calls <= self.failures:
+            raise RuntimeError("HTTP 503 temporary writer failure")
+        return "# Retry\n\n正文。"
+
+    def review_markdown(self, _dossier_json: str, _candidate_markdown: str) -> str:
+        self.reviewer_calls += 1
+        return "# Retry\n\n复核正文。"
+
+
+class _UnusedAutomationProvider:
+    name = "unused"
+    model = "unused"
+    voice = "unused"
+
+
+def _retry_providers(provider: _RetryableWriter) -> AutomationProviders:
+    return AutomationProviders(
+        writer=provider,
+        reviewer=provider,
+        podcast=_UnusedAutomationProvider(),
+        tts=_UnusedAutomationProvider(),
+    )
+
+
+def _prepare_due_automation_retry(
+    root: Path, *, default_output: str = "complete_note"
+) -> tuple[
+    Path,
+    TaskRecord,
+    AutomationIntake,
+    AutomationTaskState,
+    _RetryableWriter,
+]:
+    task_dir, task = _task(root)
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "stages": {"content_pack": StageStatus.COMPLETED},
+                "artifacts": {"content_pack": ["content_pack.json"]},
+            }
+        ),
+    )
+    (task_dir / "content_pack.json").write_text(
+        ContentPack(
+            task_id=task.task_id,
+            source_fingerprint=task.source_fingerprint,
+            evidence=[
+                Evidence(
+                    id="tr_0001",
+                    kind="transcript",
+                    start_ms=0,
+                    end_ms=1_000,
+                    text="retry test",
+                    artifact_path="content_pack.json",
+                )
+            ],
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    connect(root, name="note", preset="mimo", secret_value="fake-key")
+    set_role_binding(root, role="note_writer", connection_name="note")
+    set_role_binding(root, role="note_reviewer", connection_name="note")
+    if default_output == "complete_note_with_audio":
+        connect(root, name="podcast", preset="deepseek", secret_value="fake-key")
+        set_role_binding(root, role="podcast", connection_name="podcast")
+        connect(root, name="voice", preset="windows-tts")
+        set_role_binding(root, role="tts", connection_name="voice")
+    service = web_app.WebService(root)
+    service.configure_automation(
+        web_app.AutomationConfigureRequest(
+            default_output=default_output,
+            check_interval_seconds=30,
+            max_items_per_tick=1,
+        )
+    )
+    service.authorize_automation(web_app.AutomationAuthorizeRequest(confirm_paid=True))
+    bindings = freeze_role_bindings(root)
+    write_task_atomic(
+        task_dir,
+        load_task(task_dir).model_copy(
+            update={
+                "provider_bindings": bindings,
+                "provider_settings_sha256": settings_sha256(load_settings(root)),
+            }
+        ),
+    )
+    status = load_status(root)
+    assert status is not None
+    intake = AutomationIntake(
+        task_id=task.task_id,
+        source_kind="local_video",
+        default_output=default_output,  # type: ignore[arg-type]
+        created_at=datetime.now(UTC),
+        status="pending",
+    )
+    create_intake(root, intake)
+    provider = _RetryableWriter()
+    failed_at = datetime.now(UTC) - timedelta(minutes=2)
+    coordinator = AutomationCoordinator(
+        root,
+        clock=lambda: failed_at,
+        run_tasks=lambda output_root, task_ids, *, default_outputs, now: (
+            run_automation_tasks(
+                output_root,
+                task_ids,
+                _retry_providers(provider),
+                default_outputs=default_outputs,
+                now=now,
+            )
+        ),
+    )
+    result = coordinator.tick_once()
+    assert result is not None
+    assert result.failed_task_ids == (task.task_id,)
+    state = load_task_state(root, task.task_id, status.policy_sha256)
+    assert state is not None
+    intake = load_intake(root, task.task_id)
+    assert state.status == "pending"
+    assert state.blocked_reason == "retry_wait"
+    assert intake.status == "needs_attention"
+    return task_dir, load_task(task_dir), intake, state, provider
+
+
+def _retry_fact_bytes(root: Path, task_id: str, policy_sha: str) -> tuple[bytes, bytes]:
+    return (
+        (
+            root / ".learnnest" / "automation" / "intake" / f"{task_id}.json"
+        ).read_bytes(),
+        (
+            root
+            / ".learnnest"
+            / "automation"
+            / "tasks"
+            / task_id
+            / f"{policy_sha}.json"
+        ).read_bytes(),
+    )
+
+
+def _assert_retry_rejected_without_wake_or_factory(
+    root: Path,
+    task: TaskRecord,
+    state: AutomationTaskState,
+    *,
+    monkeypatch: Any,
+) -> None:
+    before = _retry_fact_bytes(root, task.task_id, state.policy_sha256)
+    wake_calls: list[str] = []
+    monkeypatch.setattr(
+        web_app.AutomationCoordinator,
+        "wake",
+        lambda _self: wake_calls.append(task.task_id) or True,
+    )
+    response = _client(root).post(
+        f"/api/learning/items/{task.task_id}/retry-automation"
+    )
+
+    assert response.status_code == 409
+    assert _retry_fact_bytes(root, task.task_id, state.policy_sha256) == before
+    assert wake_calls == []
+    factory_calls: list[str] = []
+    AutomationCoordinator(
+        root,
+        provider_factory=lambda _root, task_id: (
+            factory_calls.append(task_id),
+            AssertionError("Provider factory must not run"),
+        )[1],
+    ).tick_once()
+    assert factory_calls == []
 
 
 def test_web_app_lists_sanitized_tasks_and_serves_declared_artifacts(
@@ -170,6 +376,376 @@ def test_web_app_processes_one_source_in_background_with_evidence_profile(
     intake = load_intake(tmp_path, task.task_id)
     assert intake.source_kind == "local_video"
     assert intake.default_output == "complete_note_with_audio"
+
+
+def test_web_app_retries_a_durable_source_job_with_the_same_identity(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source = tmp_path / "lesson.mp4"
+    source.write_bytes(b"video")
+    _, task = _task(tmp_path)
+    calls = 0
+
+    def process_once(*_args: Any, **_kwargs: Any) -> TaskRecord:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PipelineError("transient source failure")
+        return task
+
+    monkeypatch.setattr(web_app, "process_video", process_once)
+    client = _client(tmp_path)
+    first = client.post("/api/learning/submit", json={"source": str(source)})
+    failed = _wait_for_job(client, first.json()["job_id"])
+    retried = client.post(f"/api/learning/jobs/{failed['job_id']}/retry")
+    completed = _wait_for_job(client, failed["job_id"])
+
+    assert failed["status"] == "failed"
+    assert retried.status_code == 202
+    assert retried.json()["job_id"] == failed["job_id"]
+    assert completed["status"] == "completed"
+    assert completed["attempts"] == 2
+    assert calls == 2
+
+
+def test_web_app_start_automation_persists_the_intake_without_a_provider_call(
+    tmp_path: Path,
+) -> None:
+    task_dir, task = _task(tmp_path)
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "stages": {"content_pack": StageStatus.COMPLETED},
+                "artifacts": {"content_pack": ["content_pack.json"]},
+            }
+        ),
+    )
+    client = _client(tmp_path)
+
+    response = client.post(f"/api/learning/items/{task.task_id}/start-automation")
+
+    assert response.status_code == 202
+    intake = load_intake(tmp_path, task.task_id)
+    assert intake.status == "pending"
+    assert intake.default_output == "complete_note_with_audio"
+
+
+def test_web_app_retries_only_a_due_retryable_automation_fact(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _task_dir, task, intake, state, provider = _prepare_due_automation_retry(tmp_path)
+    before_attempts = state.attempts
+    wake_calls: list[str] = []
+    monkeypatch.setattr(
+        web_app.AutomationCoordinator,
+        "wake",
+        lambda _self: wake_calls.append(task.task_id) or True,
+    )
+    client = _client(tmp_path)
+
+    response = client.post(f"/api/learning/items/{task.task_id}/retry-automation")
+
+    assert response.status_code == 202
+    assert wake_calls == [task.task_id]
+    assert load_intake(tmp_path, task.task_id) == intake.model_copy(
+        update={"status": "pending"}
+    )
+    requeued = load_task_state(tmp_path, task.task_id, state.policy_sha256)
+    assert requeued is not None
+    assert requeued.status == "pending"
+    assert requeued.blocked_reason is None
+    assert requeued.attempts == before_attempts
+
+    second_coordinator = AutomationCoordinator(
+        tmp_path,
+        clock=lambda: datetime.now(UTC),
+        run_tasks=lambda output_root, task_ids, *, default_outputs, now: (
+            run_automation_tasks(
+                output_root,
+                task_ids,
+                _retry_providers(provider),
+                default_outputs=default_outputs,
+                now=now,
+            )
+        ),
+    )
+    second = second_coordinator.tick_once()
+    assert second is not None
+    assert second.task_ids == (task.task_id,)
+    assert second.completed_task_ids == (task.task_id,)
+    assert provider.writer_calls == 2
+
+
+def test_web_app_rejects_handwritten_needs_attention_state(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task, _intake, state, _provider = _prepare_due_automation_retry(tmp_path)
+    handwritten = state.model_copy(update={"status": "needs_attention"})
+    save_task_state(tmp_path, handwritten)
+
+    _assert_retry_rejected_without_wake_or_factory(
+        tmp_path, load_task(task_dir), handwritten, monkeypatch=monkeypatch
+    )
+
+
+@pytest.mark.parametrize(
+    "blocked_reason",
+    ["unknown_result", "non_retryable_failure", "provider_budget_exhausted"],
+)
+def test_web_app_never_retries_an_unsafe_automation_fact(
+    tmp_path: Path, blocked_reason: str
+) -> None:
+    task_dir, task = _task(tmp_path)
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "stages": {"content_pack": StageStatus.COMPLETED},
+                "artifacts": {"content_pack": ["content_pack.json"]},
+            }
+        ),
+    )
+    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    set_role_binding(tmp_path, role="note_writer", connection_name="note")
+    set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
+    service = web_app.WebService(tmp_path)
+    service.configure_automation(
+        web_app.AutomationConfigureRequest(
+            default_output="complete_note",
+            check_interval_seconds=30,
+            max_items_per_tick=1,
+        )
+    )
+    service.authorize_automation(web_app.AutomationAuthorizeRequest(confirm_paid=True))
+    status = load_status(tmp_path)
+    assert status is not None
+    create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=task.task_id,
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime.now(UTC),
+            status="needs_attention",
+        ),
+    )
+    save_task_state(
+        tmp_path,
+        AutomationTaskState(
+            task_id=task.task_id,
+            policy_sha256=status.policy_sha256,
+            status="needs_attention",
+            blocked_reason=blocked_reason,  # type: ignore[arg-type]
+            attempts=[
+                AutomationAttempt(
+                    stage="writer",
+                    attempt=1,
+                    status="unknown"
+                    if blocked_reason == "unknown_result"
+                    else "failed",
+                    started_at=datetime.now(UTC),
+                    disposition="retryable",
+                    next_retry_at=datetime.now(UTC),
+                )
+            ],
+        ),
+    )
+    client = _client(tmp_path)
+
+    response = client.post(f"/api/learning/items/{task.task_id}/retry-automation")
+
+    assert response.status_code == 409
+    assert load_intake(tmp_path, task.task_id).status == "needs_attention"
+
+
+@pytest.mark.parametrize(
+    ("default_output", "role"),
+    [
+        ("complete_note", "note_writer"),
+        ("complete_note", "note_reviewer"),
+        ("complete_note_with_audio", "note_writer"),
+        ("complete_note_with_audio", "note_reviewer"),
+        ("complete_note_with_audio", "podcast"),
+        ("complete_note_with_audio", "tts"),
+    ],
+)
+def test_web_app_rejects_retry_when_any_frozen_role_is_inconsistent(
+    tmp_path: Path, default_output: str, role: str, monkeypatch: Any
+) -> None:
+    task_dir, task, _intake, state, _provider = _prepare_due_automation_retry(
+        tmp_path, default_output=default_output
+    )
+    binding = task.provider_bindings[role]
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "provider_bindings": {
+                    **task.provider_bindings,
+                    role: binding.model_copy(update={"connection_id": f"stale-{role}"}),
+                }
+            }
+        ),
+    )
+
+    _assert_retry_rejected_without_wake_or_factory(
+        tmp_path, load_task(task_dir), state, monkeypatch=monkeypatch
+    )
+
+
+def test_web_app_rejects_retry_when_intake_and_state_outputs_differ(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task, _intake, state, _provider = _prepare_due_automation_retry(
+        tmp_path, default_output="complete_note_with_audio"
+    )
+    mismatched = state.model_copy(update={"default_output": "complete_note"})
+    save_task_state(tmp_path, mismatched)
+
+    _assert_retry_rejected_without_wake_or_factory(
+        tmp_path, load_task(task_dir), mismatched, monkeypatch=monkeypatch
+    )
+
+
+@pytest.mark.parametrize("intake_status", ["pending", "claimed", "completed"])
+def test_web_app_rejects_retry_when_intake_is_not_needs_attention(
+    tmp_path: Path, intake_status: str, monkeypatch: Any
+) -> None:
+    task_dir, task, intake, state, _provider = _prepare_due_automation_retry(tmp_path)
+    save_intake(tmp_path, intake.model_copy(update={"status": intake_status}))
+
+    _assert_retry_rejected_without_wake_or_factory(
+        tmp_path, load_task(task_dir), state, monkeypatch=monkeypatch
+    )
+
+
+def test_web_app_rejects_retry_when_only_an_old_policy_state_exists(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task, _intake, state, _provider = _prepare_due_automation_retry(tmp_path)
+    status = load_status(tmp_path)
+    assert status is not None
+    from learnnest.automation_store import save_policy
+
+    save_policy(
+        tmp_path,
+        status.policy.model_copy(update={"max_items_per_tick": 2}),
+    )
+
+    _assert_retry_rejected_without_wake_or_factory(
+        tmp_path, load_task(task_dir), state, monkeypatch=monkeypatch
+    )
+
+
+def test_web_app_rejects_retry_before_the_persisted_due_time(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task, _intake, state, _provider = _prepare_due_automation_retry(tmp_path)
+    future = state.model_copy(
+        update={
+            "attempts": [
+                state.attempts[0].model_copy(
+                    update={"next_retry_at": datetime.now(UTC) + timedelta(minutes=1)}
+                )
+            ]
+        }
+    )
+    save_task_state(tmp_path, future)
+
+    _assert_retry_rejected_without_wake_or_factory(
+        tmp_path, load_task(task_dir), future, monkeypatch=monkeypatch
+    )
+
+
+@pytest.mark.parametrize(
+    "blocked_reason",
+    [
+        "unknown_result",
+        "non_retryable_failure",
+        "provider_budget_exhausted",
+        "stage_attempt_limit",
+    ],
+)
+def test_web_app_rejects_unsafe_reason_only_after_identity_is_current(
+    tmp_path: Path, blocked_reason: str, monkeypatch: Any
+) -> None:
+    task_dir, task, _intake, state, _provider = _prepare_due_automation_retry(tmp_path)
+    blocked = state.model_copy(update={"blocked_reason": blocked_reason})
+    save_task_state(tmp_path, blocked)
+
+    _assert_retry_rejected_without_wake_or_factory(
+        tmp_path, load_task(task_dir), blocked, monkeypatch=monkeypatch
+    )
+
+    wake_calls: list[str] = []
+    monkeypatch.setattr(
+        web_app.AutomationCoordinator,
+        "wake",
+        lambda _self: wake_calls.append(task.task_id) or True,
+    )
+    save_task_state(tmp_path, state)
+    response = _client(tmp_path).post(
+        f"/api/learning/items/{task.task_id}/retry-automation"
+    )
+
+    assert response.status_code == 202
+    assert wake_calls == [task.task_id]
+
+
+def test_web_app_requeues_only_the_legal_due_retry_without_mutating_history(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task, intake, state, _provider = _prepare_due_automation_retry(tmp_path)
+    wake_calls: list[str] = []
+    monkeypatch.setattr(
+        web_app.AutomationCoordinator,
+        "wake",
+        lambda _self: wake_calls.append(task.task_id) or True,
+    )
+
+    response = _client(tmp_path).post(
+        f"/api/learning/items/{task.task_id}/retry-automation"
+    )
+
+    assert response.status_code == 202
+    assert wake_calls == [task.task_id]
+    assert load_intake(tmp_path, task.task_id) == intake.model_copy(
+        update={"status": "pending"}
+    )
+    status = load_status(tmp_path)
+    assert status is not None
+    requeued = load_task_state(tmp_path, task.task_id, status.policy_sha256)
+    assert requeued is not None
+    assert requeued.status == "pending"
+    assert requeued.blocked_reason is None
+    assert requeued.attempts == state.attempts
+
+
+def test_web_app_rolls_back_state_when_intake_requeue_write_fails(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task, _intake, state, _provider = _prepare_due_automation_retry(tmp_path)
+    before = _retry_fact_bytes(tmp_path, task.task_id, state.policy_sha256)
+    wake_calls: list[str] = []
+    monkeypatch.setattr(
+        web_app.AutomationCoordinator,
+        "wake",
+        lambda _self: wake_calls.append(task.task_id) or True,
+    )
+    monkeypatch.setattr(
+        web_app,
+        "save_intake",
+        lambda *_args: (_ for _ in ()).throw(OSError("write failed")),
+    )
+
+    response = _client(tmp_path).post(
+        f"/api/learning/items/{task.task_id}/retry-automation"
+    )
+
+    assert response.status_code == 409
+    assert _retry_fact_bytes(tmp_path, task.task_id, state.policy_sha256) == before
+    assert wake_calls == []
 
 
 def test_web_app_recover_rejects_paid_stage_without_rerunning(
@@ -442,6 +1018,70 @@ def test_learning_api_adds_note_and_opens_safe_rendered_markdown(
         assert forbidden not in page.text.lower()
 
 
+def test_learning_note_has_a_readable_shell_and_only_shows_verified_audio(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task = _published_learning_task(
+        tmp_path, name="shell-note", markdown="# 正文\n\n![封面](cover.png)"
+    )
+    (task_dir / "cover.png").write_bytes(b"png")
+    safe_audio = task_dir / "podcast.mp3"
+    safe_audio.write_bytes(b"mp3")
+    client = _client(tmp_path)
+
+    monkeypatch.setattr(
+        learning_workspace.LearningWorkspace,
+        "audio",
+        lambda _self, _item_ref: safe_audio,
+    )
+    with_audio = client.get(f"/api/learning/items/{task.task_id}/note")
+    monkeypatch.setattr(
+        learning_workspace.LearningWorkspace,
+        "audio",
+        lambda _self, _item_ref: (_ for _ in ()).throw(
+            learning_workspace.LearningWorkspaceError("音频暂不可用。")
+        ),
+    )
+    without_audio = client.get(f"/api/learning/items/{task.task_id}/note")
+
+    assert with_audio.status_code == 200
+    assert "<!doctype html>" in with_audio.text.lower()
+    assert "<title>本地课程 · 语栖</title>" in with_audio.text
+    assert '<link rel="icon" href="data:," />' in with_audio.text
+    assert 'href="/#library"' in with_audio.text
+    assert 'href="/"' not in with_audio.text
+    assert 'aria-label="播放本篇笔记的音频"' in with_audio.text
+    assert f"/api/learning/items/{task.task_id}/audio" in with_audio.text
+    assert f"/api/learning/items/{task.task_id}/images/cover.png" in with_audio.text
+    assert without_audio.status_code == 200
+    assert 'aria-label="播放本篇笔记的音频"' not in without_audio.text
+
+
+def test_workspace_page_syncs_the_initial_navigation_hash(tmp_path: Path) -> None:
+    page = _client(tmp_path).get("/")
+
+    assert page.status_code == 200
+    assert "function syncInitialHashBookmark()" in page.text
+    assert (
+        'document.querySelector(`.bookmark[href="${CSS.escape(hash)}"]`)' in page.text
+    )
+
+
+def test_workspace_settings_polling_preserves_dirty_forms_and_uses_inline_feedback(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    script = client.get("/static/workspace.js").text
+
+    assert "const dirtySettingsForms = new Set();" in script
+    assert "function settingsFormNeedsProtection(form)" in script
+    assert "!settingsFormNeedsProtection(providerForm)" in script
+    assert "!settingsFormNeedsProtection(setupReadiness)" in script
+    assert "providerFeedback.textContent" in script
+    assert "const select = button.previousElementSibling;" in script
+    assert "window.setTimeout(() => refresh(), document.hidden ? 5000 : 2000)" in script
+
+
 def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
     tmp_path: Path,
 ) -> None:
@@ -460,7 +1100,13 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
         "ready",
     ):
         assert f'{state}: "' in script
-    for action_kind in ("open_note", "open_settings", "open_automation"):
+    for action_kind in (
+        "open_note",
+        "open_settings",
+        "open_automation",
+        "start_automation",
+        "retry_automation",
+    ):
         assert f'action === "{action_kind}"' in script
     assert 'action !== "continue"' in script
     assert 'item.state === "ready" ? "open" : "continue"' not in script
@@ -478,6 +1124,27 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
     assert action_block.index('action !== "continue"') < action_block.index("/continue")
     assert "@media (max-width: 760px)" in stylesheet
     assert ".learning-row { grid-template-columns: 9px minmax(0, 1fr); }" in stylesheet
+    assert "function renderSourceJobs" in script
+    assert '"材料已加入收件箱"' in script
+    assert "source_input" not in script
+
+
+def test_learning_job_api_replays_only_a_safe_public_projection(tmp_path: Path) -> None:
+    source = tmp_path / "private-lesson.mp4"
+    source.write_bytes(b"video")
+    client = _client(tmp_path)
+
+    submitted = client.post("/api/learning/submit", json={"source": str(source)})
+    job_id = submitted.json()["job_id"]
+    listed = client.get("/api/learning/jobs")
+    item = client.get(f"/api/learning/jobs/{job_id}")
+
+    assert submitted.status_code == 202
+    assert listed.status_code == item.status_code == 200
+    assert item.json()["job_id"] == job_id
+    for payload in (listed.text, item.text):
+        assert str(source) not in payload
+        assert "private-lesson.mp4" not in payload
 
 
 def test_douyin_webui_keeps_login_and_favorite_vocabulary_human_facing(

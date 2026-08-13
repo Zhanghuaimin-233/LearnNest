@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>语栖 · 学习收件箱</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/static/workspace.css" />
     <script src="/static/workspace.js" defer></script>
   </head>
@@ -12,9 +13,9 @@
       <aside class="bookmarks" aria-label="学习导航">
         <a class="wordmark" href="#inbox" aria-label="语栖学习收件箱">语栖<span>LearnNest</span></a>
         <nav>
-          <a class="bookmark active" href="#inbox">收件箱</a>
+          <a class="bookmark active" href="#inbox">添加内容</a>
+          <a class="bookmark" href="#processing">整理中</a>
           <a class="bookmark" href="#library">学习库</a>
-          <a class="bookmark" href="#processing">处理中</a>
           <a class="bookmark" href="#settings">设置</a>
         </nav>
         <p class="local-mark">内容留在这台设备上。</p>
@@ -123,23 +124,16 @@
               </div>
               <span id="provider-settings-state" class="status-pill">未配置</span>
             </div>
-            <p class="section-note">分别为笔记、播客、语音、字幕和识字选择连接。密钥只由 Windows 当前用户加密保存，页面不会再次显示。</p>
+            <p class="section-note">只添加完成所选结果需要的笔记、播客和语音连接。密钥只由 Windows 当前用户加密保存，页面不会再次显示。</p>
             <form id="provider-connection-form" class="provider-form">
               <label>连接名称<input name="name" required autocomplete="off" placeholder="例如 mimo-note" /><span class="field-hint">本地连接会自动填写名称；可按需修改。</span></label>
-              <label>Provider<select name="preset"><option value="windows-tts">Windows 系统语音（本地）</option><option value="mimo">MiMo（LLM）</option><option value="deepseek">DeepSeek（LLM）</option><option value="mimo-tts">MiMo TTS</option><option value="local-asr">本地 ASR</option><option value="local-ocr">本地 OCR</option></select></label>
+              <label>Provider<select name="preset"><option value="windows-tts">Windows 系统语音（本地）</option><option value="mimo">MiMo（LLM）</option><option value="deepseek">DeepSeek（LLM）</option><option value="mimo-tts">MiMo TTS</option></select></label>
               <label id="windows-voice-field">Windows 语音<select name="voice" id="windows-voice"></select></label>
-              <label>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="本地 ASR/OCR 无需填写" /></label>
-              <button type="submit">保存连接</button>
+              <label>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="本地 Windows 语音无需填写" /></label>
+              <div class="form-actions"><button type="submit">保存连接</button><button type="reset" class="text-button">取消更改</button></div>
             </form>
+            <p id="provider-feedback" class="section-note" aria-live="polite">保存、检查、绑定或删除后会在这里显示结果。</p>
             <div id="provider-connection-list" class="provider-list"></div>
-            <div class="provider-roles" aria-label="职责绑定">
-              <p class="chapter-label">职责绑定</p>
-              <form id="provider-role-form" class="provider-form"><label>职责<select name="role"><option value="note_writer">笔记 Writer</option><option value="note_reviewer">笔记 Reviewer</option><option value="podcast">播客</option><option value="tts">TTS</option><option value="asr">ASR</option><option value="ocr">OCR</option></select></label><label>连接<select name="connection_name" id="provider-role-connection"></select></label><button type="submit">绑定职责</button></form>
-              <p id="provider-role-feedback" class="section-note" aria-live="polite">选择职责和连接后保存。</p>
-              <div id="provider-role-list" class="provider-role-list" aria-live="polite"></div>
-            </div>
-            <form id="provider-limits-form" class="provider-form"><label>自动重试次数<input name="retries_per_role" type="number" min="0" max="3" value="1" /></label><label>UTC 每日调用上限<input name="global_calls_per_day" type="number" min="0" max="800" value="80" /></label><label>笔记每日上限<input name="note_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>播客每日上限<input name="podcast_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>TTS 每日上限<input name="tts_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>ASR 每日上限<input name="asr_calls_per_day" type="number" min="0" max="800" value="20" /></label><label>OCR 每日上限<input name="ocr_calls_per_day" type="number" min="0" max="800" value="20" /></label><button type="submit">保存限额</button></form>
-            <p id="provider-budget" class="section-note">重试 1 次；每日调用上限将在这里显示。</p>
           </div>
           <div class="connection-card automation-settings-card">
             <div class="connection-heading">
@@ -158,9 +152,10 @@
                 <span class="automation-favorite-copy"><strong>自动整理新收藏</strong><small>只处理首次同步之后出现的新收藏；历史收藏仍由你手动加入收件箱。</small></span>
               </label>
               <label>每次处理项数<input name="max_items_per_tick" type="number" min="1" max="20" value="1" /></label>
-              <button type="submit">保存自动整理设置</button>
+              <div class="form-actions"><button type="submit">保存自动整理设置</button><button type="reset" class="text-button">取消更改</button></div>
             </form>
-            <p class="section-note">开启前请确认：会向已绑定的笔记、播客和语音 Provider 发送完成整理所需的内容；可能产生费用，并按当前重试和预算执行。</p>
+            <section id="setup-readiness" class="setup-readiness" aria-live="polite" aria-label="所选结果的准备情况"></section>
+            <p class="section-note">开启前请确认：会向所选连接发送完成整理所需的内容，可能产生费用。</p>
             <div class="automation-actions"><label class="checkbox-label"><input id="confirm-paid" type="checkbox" /> 我确认上述可能付费的自动整理</label><button id="authorize-automation" type="button">确认并开启</button><button id="disable-automation" class="secondary-button" type="button">关闭自动处理</button></div>
           </div>
         </section>

@@ -58,7 +58,11 @@ class AutomationCoordinator:
         self._provider_factory = provider_factory or automation_providers_for_task
         self._run_tasks = run_tasks or self._run_authorized_tasks
         self._tick_lock = threading.Lock()
+        self._wake_lock = threading.Lock()
+        self._wake_generation = 0
         self._stop = asyncio.Event()
+        self._wake = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -69,6 +73,10 @@ class AutomationCoordinator:
         if self.running:
             return
         self._stop = asyncio.Event()
+        self._wake = asyncio.Event()
+        with self._wake_lock:
+            self._wake_generation = 0
+        self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._run_forever())
 
     async def shutdown(self) -> None:
@@ -77,16 +85,54 @@ class AutomationCoordinator:
         if task is not None:
             await task
         self._task = None
+        self._loop = None
+
+    def wake(self) -> bool:
+        """Request one prompt background tick without running it on this thread."""
+        loop = self._loop
+        if not self.running or loop is None or loop.is_closed():
+            return False
+        with self._wake_lock:
+            self._wake_generation += 1
+        loop.call_soon_threadsafe(self._wake.set)
+        return True
 
     async def _run_forever(self) -> None:
+        seen_wake_generation = 0
         while not self._stop.is_set():
             await asyncio.to_thread(self.tick_once)
             try:
-                await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._interval_seconds()
+                seen_wake_generation = await asyncio.wait_for(
+                    self._wait_for_wake_or_stop(seen_wake_generation),
+                    timeout=self._interval_seconds(),
                 )
             except TimeoutError:
                 continue
+
+    async def _wait_for_wake_or_stop(self, seen_generation: int) -> int:
+        with self._wake_lock:
+            current_generation = self._wake_generation
+        if current_generation != seen_generation:
+            return current_generation
+        # Clearing is guarded by a generation check: a cross-thread wake that
+        # races with this reset is observed immediately instead of being lost.
+        self._wake.clear()
+        with self._wake_lock:
+            current_generation = self._wake_generation
+        if current_generation != seen_generation:
+            self._wake.set()
+            return current_generation
+        stop = asyncio.create_task(self._stop.wait())
+        wake = asyncio.create_task(self._wake.wait())
+        done, pending = await asyncio.wait(
+            {stop, wake}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        if stop in done:
+            return seen_generation
+        with self._wake_lock:
+            return self._wake_generation
 
     def tick_once(self) -> AutomationRunResult | None:
         """Claim durable intakes once; a concurrent wake-up is intentionally ignored."""

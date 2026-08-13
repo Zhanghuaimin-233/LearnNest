@@ -95,7 +95,13 @@ def _configured_root(root: Path, *, authorized: bool) -> None:
         "expected_action_kind",
     ),
     [
-        ("materials", "materials_ready", "材料已准备，可以开始整理。", None, None),
+        (
+            "materials",
+            "materials_ready",
+            "材料已准备，可以开始整理。",
+            "开始整理",
+            "start_automation",
+        ),
         ("setup", "waiting_setup", "请先完成整理设置。", "完成设置", "open_settings"),
         (
             "authorization",

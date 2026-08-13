@@ -22,7 +22,7 @@ LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面�
 | 材料提取 | 支持 ASR、关键帧、OCR、evidence 和 `content_pack.json` |
 | 学习笔记 | 效率笔记是唯一默认产品路线；质量模式保留为开发调试链路 |
 | 播客与音频 | 已能从笔记生成播客稿、`speech.txt`，并通过 Windows 系统语音或可选 MiMo TTS 生成音频 |
-| WebUI | 已有统一收件箱、三类来源入口、自动整理与 Provider 设置、安全成品投影；收件箱动作、后台任务反馈、失败恢复和完整阅读体验仍在阶段 5.5 收口 |
+| WebUI | 已有统一收件箱、三类来源入口、持久来源任务、自动整理与恢复动作、按产物展示的 Provider 就绪状态，以及安全的笔记/音频阅读页；三类来源完整浏览器 E2E 仍待 Goal 4 验收 |
 | 恢复与事实 | 任务/批次 JSON 保存事实，SQLite 作为可重建查询投影 |
 
 抖音图文目前只下载为本地素材和 `image_text.json`，尚未进入视频的 ASR、关键帧、证据包和笔记流程。
@@ -52,12 +52,13 @@ LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面�
 - **效率模式**：`assisted-note` 的 Writer + Reviewer 路线，后续作为默认笔记产品路径。
 - **质量模式**：`quality-note`，仍处于开发调试阶段，成功率较低，不属于稳定承诺。
 - **严格生成路线**：已退出运行时；历史 V2/V3 产物只保留必要的只读兼容，不应反向影响标准笔记合同。
-- **Provider 范围**：产品连接注册表只包含 MiMo、DeepSeek、MiMo TTS、本地 ASR 和本地 OCR；保留新增 Provider 的模块接口。
+- **Provider 范围**：稳定 WebUI 只维护 MiMo、DeepSeek、MiMo TTS 和 Windows 系统语音。底层仍保留本地 ASR/OCR 注册与兼容配置，但当前确定性材料管线不消费这些 Web 设置，因此页面不作无效承诺；保留新增 Provider 的模块接口。
 - **TTS 边界**：Windows System.Speech 是默认本地方案，可在设置页选择并保存精确 voice；MiMo TTS 是独立的可选云端连接、密钥引用、预算和失败域。
 
-阶段 0–4 已完成；阶段 5 已交付自动收件箱、前台协调器、设置与页面外壳，并通过机器门禁、
-独立输出根启动和人工页面 smoke。全面审查发现普通用户的“加入内容 → 推进处理 → 阅读成品”仍有断点，
-当前阶段 5.5 专门收口这条 WebUI 产品闭环；阶段 6 的真实多来源稳定性与成品质量验收在其后执行。
+阶段 0–4 已完成；阶段 5 已交付自动收件箱、前台协调器、设置与页面外壳。阶段 5.5 的 Goal 1–3
+已经收口状态与执行准入、来源任务与恢复、设置反馈和成品阅读，并通过机器门禁及 1280px/390px
+浏览器 smoke。下一步 Goal 4 建立三类来源到完整笔记的非付费浏览器 E2E；阶段 6 再进行真实
+Provider、多来源稳定性与成品质量验收。
 
 ## 快速开始
 
@@ -119,8 +120,9 @@ uv run learnnest podcast --help
 uv run learnnest tts --help
 ```
 
-MiMo、DeepSeek、MiMo TTS、本地 ASR 和本地 OCR 连接可通过 WebUI 或相应 CLI 入口维护；
-Windows TTS 的精确 voice 当前通过 WebUI 选择。任务开始时冻结职责绑定，设置变化不会改写运行中任务。
+MiMo、DeepSeek、MiMo TTS 和 Windows TTS 连接可通过 WebUI 维护，Windows TTS 可选择精确 voice。
+本地 ASR/OCR 兼容配置仍保留在底层和高级入口，但在接入确定性材料管线前不显示于稳定 WebUI。
+任务开始时冻结职责绑定，设置变化不会改写运行中任务。
 `.env` 只保留显式旧 CLI 的迁移兼容入口，具体参数以命令帮助和
 [`.env.example`](.env.example) 为准。
 

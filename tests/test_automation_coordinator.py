@@ -243,6 +243,54 @@ def test_coordinator_shutdown_waits_for_the_active_tick_and_stops_future_ticks(
     assert calls == [("20260807-shutdown",)]
 
 
+def test_coordinator_coalesces_threadsafe_wakes_without_concurrent_runner(
+    tmp_path: Path,
+) -> None:
+    root = _authorized_root(tmp_path)
+    _material_task(root, "20260807-wake")
+    create_intake(
+        root,
+        AutomationIntake(
+            task_id="20260807-wake",
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime(2026, 8, 7, tzinfo=UTC),
+        ),
+    )
+    entered = Event()
+    release = Event()
+    calls: list[tuple[str, ...]] = []
+
+    def hold_runner(
+        _root: Path, task_ids: tuple[str, ...], **_kwargs: object
+    ) -> AutomationRunResult:
+        calls.append(task_ids)
+        entered.set()
+        release.wait(timeout=1)
+        return AutomationRunResult(task_ids, task_ids, ())
+
+    async def exercise() -> None:
+        coordinator = AutomationCoordinator(root, run_tasks=hold_runner)
+        await coordinator.start()
+        for _ in range(100):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered.is_set()
+        threads = [Thread(target=coordinator.wake) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1)
+        release.set()
+        await asyncio.sleep(0.05)
+        await coordinator.shutdown()
+        assert coordinator.wake() is False
+
+    asyncio.run(exercise())
+    assert calls == [("20260807-wake",)]
+
+
 def test_coordinator_keeps_the_intake_output_after_policy_changes(
     tmp_path: Path,
 ) -> None:

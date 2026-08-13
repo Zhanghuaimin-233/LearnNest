@@ -12,7 +12,11 @@ from urllib.parse import urlsplit
 
 from learnnest.execution import plan_recovery
 from learnnest.automation_store import find_intake
-from learnnest.learning_state import automation_readiness, automation_task_state
+from learnnest.learning_state import (
+    automation_readiness,
+    automation_retry_is_due,
+    automation_task_state,
+)
 from learnnest.locks import LockUnavailable, task_lock
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
@@ -23,7 +27,12 @@ from learnnest.tts_generation import probe_audio
 
 DesiredOutput = Literal["readable_note", "materials_only"]
 LearningActionKind = Literal[
-    "open_note", "open_settings", "open_automation", "continue"
+    "open_note",
+    "open_settings",
+    "open_automation",
+    "continue",
+    "start_automation",
+    "retry_automation",
 ]
 LearningState = Literal[
     "materials_ready",
@@ -306,14 +315,15 @@ class LearningWorkspace:
                 and intake.default_output == "complete_note_with_audio"
                 and task.stages.get("tts") is not StageStatus.COMPLETED
             ):
+                retryable = automation_retry_is_due(self.output_root, task.task_id)
                 return LearningItem(
                     task.task_id,
                     task.title,
                     _safe_source_label(task),
                     "partial_ready",
                     "笔记已完成，音频仍在处理中。",
-                    "打开笔记",
-                    "open_note",
+                    "重试音频" if retryable else "打开笔记",
+                    "retry_automation" if retryable else "open_note",
                 )
             return LearningItem(
                 task.task_id,
@@ -342,24 +352,26 @@ class LearningWorkspace:
             )
         execution_state = automation_task_state(self.output_root, task.task_id)
         if execution_state in {"invalid", "needs_attention", "completed"}:
+            retryable = automation_retry_is_due(self.output_root, task.task_id)
             return LearningItem(
                 task.task_id,
                 task.title,
                 _safe_source_label(task),
                 "needs_action",
                 "需要你处理；已保留完成的内容。",
-                None,
-                None,
+                "重试整理" if retryable else None,
+                "retry_automation" if retryable else None,
             )
         if intake is not None and intake.status == "needs_attention":
+            retryable = automation_retry_is_due(self.output_root, task.task_id)
             return LearningItem(
                 task.task_id,
                 task.title,
                 _safe_source_label(task),
                 "needs_action",
                 "需要你处理；已保留完成的内容。",
-                None,
-                None,
+                "重试整理" if retryable else None,
+                "retry_automation" if retryable else None,
             )
         if intake is not None and intake.status == "claimed":
             return LearningItem(
@@ -420,8 +432,8 @@ class LearningWorkspace:
                 _safe_source_label(task),
                 "materials_ready",
                 "材料已准备，可以开始整理。",
-                None,
-                None,
+                "开始整理",
+                "start_automation",
             )
         if task.active_attempt_id is not None or any(
             status is StageStatus.RUNNING for status in task.stages.values()

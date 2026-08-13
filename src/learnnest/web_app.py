@@ -8,7 +8,6 @@ from collections.abc import AsyncIterable
 import re
 import threading
 import uuid
-from dataclasses import asdict, dataclass
 from mimetypes import guess_type
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -31,7 +30,9 @@ from learnnest.automation_store import (
     authorize as authorize_automation,
     disable as disable_automation,
     load_status as load_automation_status,
+    save_intake,
     save_policy as save_automation_policy,
+    save_task_state,
 )
 from learnnest.adapters.douyin_http import DouyinAuthenticationError
 from learnnest.douyin_favorites import DouyinFavoritesError, DouyinFavoritesStore
@@ -45,7 +46,7 @@ from learnnest.learning_workspace import (
     validate_public_web_url,
 )
 from learnnest.locks import LockUnavailable, task_lock
-from learnnest.models import TaskRecord
+from learnnest.models import StageStatus, TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
 from learnnest.provider_profiles import (
     ProviderBudgetGroup,
@@ -71,12 +72,25 @@ from learnnest.tts_providers import (
 from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
 from learnnest.sources import SourceParseError, collect_sources
 from learnnest.task_store import find_task_by_id, load_task
+from learnnest.web_jobs import WebJob, WebJobStore
+from learnnest.learning_state import (
+    automation_retry_admission,
+    public_connection_readability,
+    public_provider_label,
+    public_setup_readiness,
+)
 
 _STATIC_DIRECTORY = Path(__file__).parent / "static"
 _WINDOWS_PATH = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n]*")
 _MARKDOWN = MarkdownIt("commonmark", {"html": False})
 _IMAGE_SUFFIXES = {".avif", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
 _VIDEO_SUFFIXES = {".avi", ".mkv", ".mov", ".mp4", ".mpeg", ".webm"}
+_SETUP_ROLE_NAMES = {
+    "笔记 Writer": "note_writer",
+    "笔记 Reviewer": "note_reviewer",
+    "播客": "podcast",
+    "TTS": "tts",
+}
 
 
 class ProcessRequest(BaseModel):
@@ -158,58 +172,6 @@ class LearningSubmitRequest(BaseModel):
     source: str = Field(min_length=1, max_length=4096)
 
 
-@dataclass
-class WebJob:
-    """In-memory status for one process or recovery operation."""
-
-    job_id: str
-    operation: str
-    status: str = "queued"
-    task_id: str | None = None
-    error: str | None = None
-
-
-class WebJobStore:
-    """Small thread-safe job registry; persisted task JSON remains authoritative."""
-
-    def __init__(self) -> None:
-        self._jobs: dict[str, WebJob] = {}
-        self._lock = threading.Lock()
-
-    def submit(self, operation: str, runner: Callable[[], str]) -> WebJob:
-        job = WebJob(job_id=uuid.uuid4().hex, operation=operation)
-        with self._lock:
-            self._jobs[job.job_id] = job
-        thread = threading.Thread(
-            target=self._run, args=(job.job_id, runner), daemon=True
-        )
-        thread.start()
-        return self.get(job.job_id)
-
-    def get(self, job_id: str) -> WebJob:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                raise KeyError(job_id)
-            return WebJob(**asdict(job))
-
-    def _run(self, job_id: str, runner: Callable[[], str]) -> None:
-        with self._lock:
-            self._jobs[job_id].status = "running"
-        try:
-            task_id = runner()
-        except Exception as error:  # Error text is sanitized before display.
-            with self._lock:
-                job = self._jobs[job_id]
-                job.status = "failed"
-                job.error = _safe_error_message(error)
-            return
-        with self._lock:
-            job = self._jobs[job_id]
-            job.status = "completed"
-            job.task_id = task_id
-
-
 class WebService:
     """Adapts the existing task and pipeline services for a local browser."""
 
@@ -219,15 +181,21 @@ class WebService:
         *,
         douyin_login: DouyinLoginSessionManager | None = None,
         douyin_favorites: DouyinFavoritesStore | None = None,
+        coordinator: AutomationCoordinator | None = None,
     ) -> None:
         self.output_root = Path(output_root).resolve()
-        self.jobs = WebJobStore()
+        self.jobs = WebJobStore(self.output_root)
         self.douyin_login = douyin_login or DouyinLoginSessionManager(
             cookie_store=DouyinCookieStore(self.output_root)
         )
         self.douyin_favorites = douyin_favorites or DouyinFavoritesStore(
             self.output_root
         )
+        self.coordinator = coordinator
+
+    def wake_automation(self) -> None:
+        if self.coordinator is not None:
+            self.coordinator.wake()
 
     def default_automation_output(
         self,
@@ -277,23 +245,13 @@ class WebService:
                 "输入无效，请提供存在的本地视频或公开 HTTP(S) URL。"
             ) from error
 
-        def runner() -> str:
-            if source_item.input_type == "local_file":
-                task = process_video(
-                    Path(source_item.input), self.output_root, "evidence"
-                )
-            else:
-                task = process_source(source_item, self.output_root, "evidence")
-            create_intake_for_task(
-                self.output_root,
-                task_id=task.task_id,
-                source_kind=source_kind
-                or ("public_url" if source_item.input_type == "url" else "local_video"),
-                default_output=self.default_automation_output(),
-            )
-            return task.task_id
+        kind = source_kind or (
+            "public_url" if source_item.input_type == "url" else "local_video"
+        )
+        job = self.jobs.create(kind, source_item.input)
 
-        return self.jobs.submit("process", runner)
+        self._start_job(job, self._process_job_runner(job))
+        return job
 
     def submit_recovery(self, task_id: str) -> WebJob:
         found = find_task_by_id(self.output_root, task_id)
@@ -316,7 +274,97 @@ class WebService:
                 )
                 return task.task_id
 
-        return self.jobs.submit("recover", runner)
+        job = self.jobs.create("local_video", "")
+        self._start_job(job, lambda: self.jobs.complete(job.job_id, runner()))
+        return job
+
+    def retry_source_job(self, job_id: str) -> WebJob:
+        job = self.jobs.retry(job_id)
+        self._start_job(job, self._process_job_runner(job))
+        return job
+
+    def _process_job_runner(self, job: WebJob) -> Callable[[], None]:
+        def runner() -> None:
+            self.jobs.start(job.job_id)
+            sources = collect_sources(input_value=job.source_input)
+            if len(sources) != 1:
+                raise ValueError("source job input is invalid")
+            source_item = sources[0]
+            if source_item.input_type == "url":
+                validate_public_web_url(source_item.input)
+            expected_kind = (
+                "public_url" if source_item.input_type == "url" else "local_video"
+            )
+            if job.source_kind not in {expected_kind, "douyin_favorite"}:
+                raise ValueError("source job identity is invalid")
+            if source_item.input_type == "local_file":
+                task = process_video(
+                    Path(source_item.input), self.output_root, "evidence"
+                )
+            else:
+                task = process_source(source_item, self.output_root, "evidence")
+            create_intake_for_task(
+                self.output_root,
+                task_id=task.task_id,
+                source_kind=job.source_kind,
+                default_output=self.default_automation_output(),
+            )
+            self.jobs.complete(job.job_id, task.task_id)
+            self.wake_automation()
+
+        return runner
+
+    def start_automation(self, task_id: str) -> None:
+        with task_lock(self.output_root, task_id, timeout=0):
+            found = find_task_by_id(self.output_root, task_id)
+            if found is None:
+                raise KeyError(task_id)
+            _task_dir, task = found
+            if task.stages.get("content_pack") is not StageStatus.COMPLETED:
+                raise ValueError("材料尚未准备完成。")
+            create_intake_for_task(
+                self.output_root,
+                task_id=task.task_id,
+                source_kind=(
+                    "public_url" if task.source_type == "url" else "local_video"
+                ),
+                default_output=self.default_automation_output(),
+            )
+        self.wake_automation()
+
+    def retry_automation(self, task_id: str) -> None:
+        try:
+            with task_lock(self.output_root, task_id, timeout=0):
+                admission = automation_retry_admission(self.output_root, task_id)
+                if admission is None:
+                    raise ValueError("当前整理不能安全重试。")
+                pending_state = admission.state.model_copy(
+                    update={"status": "pending", "blocked_reason": None}
+                )
+                pending_intake = admission.intake.model_copy(
+                    update={"status": "pending"}
+                )
+                save_task_state(self.output_root, pending_state)
+                try:
+                    save_intake(self.output_root, pending_intake)
+                except (OSError, ValueError) as error:
+                    try:
+                        save_task_state(self.output_root, admission.state)
+                    except (OSError, ValueError) as rollback_error:
+                        raise ValueError("当前整理不能安全重试。") from rollback_error
+                    raise ValueError("当前整理不能安全重试。") from error
+        except (LockUnavailable, OSError) as error:
+            raise ValueError("当前整理不能安全重试。") from error
+        self.wake_automation()
+
+    def _start_job(self, job: WebJob, runner: Callable[[], None]) -> None:
+        def run() -> None:
+            try:
+                runner()
+            except Exception as error:
+                self.jobs.fail(job.job_id, _safe_error_message(error))
+
+        threading.Thread(target=run, daemon=True).start()
 
     async def save_uploaded_video(
         self, name: str, chunks: AsyncIterable[bytes]
@@ -406,6 +454,7 @@ class WebService:
             )
         except ValueError as error:
             raise ValueError("自动处理设置无法保存。") from error
+        self.wake_automation()
         return self.automation_status()
 
     def authorize_automation(
@@ -416,6 +465,7 @@ class WebService:
             authorize_automation(self.output_root)
         except ValueError as error:
             raise ValueError("自动处理尚未完成设置。") from error
+        self.wake_automation()
         return self.automation_status()
 
     def disable_automation(self) -> dict[str, Any]:
@@ -425,9 +475,29 @@ class WebService:
             raise ValueError("自动处理尚未完成设置。") from error
         return self.automation_status()
 
-    def provider_settings(self) -> dict[str, object]:
+    def provider_settings(
+        self,
+        default_output: Literal["complete_note", "complete_note_with_audio"]
+        | None = None,
+    ) -> dict[str, object]:
         """Return the intentionally public projection, never settings JSON itself."""
-        return public_provider_settings(self.output_root)
+        settings = public_provider_settings(self.output_root)
+        current = load_settings(self.output_root)
+        return {
+            "connections": [
+                {
+                    "name": item["name"],
+                    "provider": public_provider_label(str(item["provider"])),
+                    "state": public_connection_readability(
+                        self.output_root,
+                        current.connections.get(str(item["name"])),
+                    ),
+                }
+                for item in settings["connections"]
+                if item["capability"] in {"llm", "tts"}
+            ],
+            "readiness": public_setup_readiness(self.output_root, default_output),
+        }
 
     def save_provider_connection(
         self, request: ProviderConnectionRequest
@@ -496,7 +566,7 @@ class WebService:
                 ProviderSecretStore(self.output_root).read(stored.secret_id)
             except SecretStoreError as error:
                 raise ValueError("连接密钥不可用。") from error
-        return {"name": name, "status": "configured"}
+        return {"message": "已完成本地配置校验；未调用 Provider。"}
 
     def save_provider_limits(self, request: ProviderLimitsRequest) -> dict[str, object]:
         try:
@@ -612,13 +682,14 @@ def create_web_app(
     douyin_favorites: DouyinFavoritesStore | None = None,
 ) -> FastAPI:
     """Create the loopback WebUI application without starting a server."""
+    workspace = LearningWorkspace(output_root)
+    coordinator = AutomationCoordinator(output_root)
     service = WebService(
         output_root,
         douyin_login=douyin_login,
         douyin_favorites=douyin_favorites,
+        coordinator=coordinator,
     )
-    workspace = LearningWorkspace(output_root)
-    coordinator = AutomationCoordinator(output_root)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> Any:
@@ -642,8 +713,20 @@ def create_web_app(
     app.mount("/static", StaticFiles(directory=_STATIC_DIRECTORY), name="static")
 
     @app.get("/", include_in_schema=False)
-    def index() -> FileResponse:
-        return FileResponse(_STATIC_DIRECTORY / "index.html")
+    def index() -> HTMLResponse:
+        page = (_STATIC_DIRECTORY / "index.html").read_text(encoding="utf-8")
+        initial_hash_sync = """
+<script>
+function syncInitialHashBookmark() {
+  const hash = window.location.hash;
+  if (!hash) return;
+  const current = document.querySelector(`.bookmark[href="${CSS.escape(hash)}"]`);
+  if (!current) return;
+  document.querySelectorAll(".bookmark").forEach((item) => item.classList.toggle("active", item === current));
+}
+syncInitialHashBookmark();
+</script>"""
+        return HTMLResponse(page.replace("</body>", f"{initial_hash_sync}\n  </body>"))
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -747,7 +830,7 @@ def create_web_app(
     @app.post("/api/douyin/favorites/select", status_code=202)
     def select_douyin_favorites(
         request: DouyinFavoritesSelectRequest,
-    ) -> dict[str, list[dict[str, str | None]]]:
+    ) -> dict[str, list[dict[str, str | int | None]]]:
         try:
             return {
                 "jobs": [
@@ -774,11 +857,42 @@ def create_web_app(
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.post("/api/learning/submit", status_code=202)
-    def submit_learning_item(request: LearningSubmitRequest) -> dict[str, str | None]:
+    def submit_learning_item(
+        request: LearningSubmitRequest,
+    ) -> dict[str, str | int | None]:
         try:
             return _job_payload(service.submit_process(request.source))
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/api/learning/jobs")
+    def learning_jobs() -> dict[str, list[dict[str, str | int | None]]]:
+        try:
+            return {"jobs": [_job_payload(job) for job in service.jobs.list()]}
+        except ValueError as error:
+            raise HTTPException(
+                status_code=409, detail="来源操作记录无法读取。"
+            ) from error
+
+    @app.get("/api/learning/jobs/{job_id}")
+    def learning_job(job_id: str) -> dict[str, str | int | None]:
+        try:
+            return _job_payload(service.jobs.get(job_id))
+        except (KeyError, ValueError) as error:
+            raise HTTPException(
+                status_code=404, detail="来源操作不存在或不可读取。"
+            ) from error
+
+    @app.post("/api/learning/jobs/{job_id}/retry", status_code=202)
+    def retry_learning_job(job_id: str) -> dict[str, str | int | None]:
+        try:
+            return _job_payload(service.retry_source_job(job_id))
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="来源操作不存在。") from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=409, detail="来源操作当前不能重试。"
+            ) from error
 
     @app.post("/api/learning/uploads", status_code=202)
     async def upload_learning_video(request: Request, name: str) -> dict[str, Any]:
@@ -809,6 +923,28 @@ def create_web_app(
         except LearningWorkspaceError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
+    @app.post("/api/learning/items/{item_ref}/start-automation", status_code=202)
+    def start_learning_automation(item_ref: str) -> Response:
+        try:
+            service.start_automation(item_ref)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="内容不存在。") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail="材料尚未准备完成。") from error
+        return Response(status_code=202)
+
+    @app.post("/api/learning/items/{item_ref}/retry-automation", status_code=202)
+    def retry_learning_automation(item_ref: str) -> Response:
+        try:
+            service.retry_automation(item_ref)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="内容不存在。") from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=409, detail="当前整理不能安全重试。"
+            ) from error
+        return Response(status_code=202)
+
     @app.get("/api/learning/items/{item_ref}/audio")
     def learning_audio(item_ref: str) -> FileResponse:
         try:
@@ -822,8 +958,14 @@ def create_web_app(
     def learning_note(item_ref: str) -> HTMLResponse:
         try:
             note = workspace.note(item_ref)
-            html, _ = _render_learning_note(note)
-            return HTMLResponse(html)
+            fragment, _ = _render_learning_note(note)
+            try:
+                workspace.audio(item_ref)
+            except (KeyError, LearningWorkspaceError):
+                audio_href = None
+            else:
+                audio_href = f"/api/learning/items/{quote(item_ref, safe='')}/audio"
+            return HTMLResponse(_learning_note_page(note, fragment, audio_href))
         except KeyError as error:
             raise HTTPException(status_code=404, detail="内容不存在。") from error
         except LearningWorkspaceError as error:
@@ -884,9 +1026,9 @@ def create_web_app(
     def job_status(job_id: str) -> dict[str, Any]:
         try:
             return _job_payload(service.jobs.get(job_id))
-        except KeyError as error:
+        except (KeyError, ValueError) as error:
             raise HTTPException(
-                status_code=404, detail="作业不存在或服务已重启。"
+                status_code=404, detail="作业不存在或不可读取。"
             ) from error
 
     @app.post("/api/tasks/{task_id}/recover", status_code=202)
@@ -898,9 +1040,12 @@ def create_web_app(
         return _job_payload(job)
 
     @app.get("/api/providers/settings")
-    def provider_settings() -> dict[str, object]:
+    def provider_settings(
+        default_output: Literal["complete_note", "complete_note_with_audio"]
+        | None = None,
+    ) -> dict[str, object]:
         try:
-            return service.provider_settings()
+            return service.provider_settings(default_output)
         except ValueError as error:
             raise HTTPException(
                 status_code=500, detail="Provider 设置无效。"
@@ -954,10 +1099,33 @@ def create_web_app(
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
+    @app.post("/api/providers/setup-roles/{role_name}")
+    def save_provider_setup_role(
+        role_name: Literal["笔记 Writer", "笔记 Reviewer", "播客", "TTS"],
+        request: ProviderRoleBindingRequest,
+    ) -> dict[str, object]:
+        try:
+            return service.set_provider_role(_SETUP_ROLE_NAMES[role_name], request)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     @app.delete("/api/providers/roles/{role}")
     def clear_provider_role(role: ProviderRole) -> dict[str, object]:
         try:
             return service.clear_provider_role(role)
+        except ProviderRoleNotBoundError as error:
+            raise HTTPException(
+                status_code=404, detail="该职责尚未绑定连接。"
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail="职责无法解绑。") from error
+
+    @app.delete("/api/providers/setup-roles/{role_name}")
+    def clear_provider_setup_role(
+        role_name: Literal["笔记 Writer", "笔记 Reviewer", "播客", "TTS"],
+    ) -> dict[str, object]:
+        try:
+            return service.clear_provider_role(_SETUP_ROLE_NAMES[role_name])
         except ProviderRoleNotBoundError as error:
             raise HTTPException(
                 status_code=404, detail="该职责尚未绑定连接。"
@@ -1088,14 +1256,8 @@ def _public_artifacts(task_dir: Path, task: TaskRecord) -> list[dict[str, str]]:
     return public
 
 
-def _job_payload(job: WebJob) -> dict[str, str | None]:
-    return {
-        "job_id": job.job_id,
-        "operation": job.operation,
-        "status": job.status,
-        "task_id": job.task_id,
-        "error": job.error,
-    }
+def _job_payload(job: WebJob) -> dict[str, str | int | None]:
+    return job.public()
 
 
 def _learning_item_payload(
@@ -1140,7 +1302,8 @@ def _learning_snapshot_payload(
 
 def _render_learning_note(note: Any) -> tuple[str, dict[str, Path]]:
     """Render safe Markdown and expose only image files actually referenced by it."""
-    tokens = _MARKDOWN.parse(note.markdown)
+    markdown = re.sub(r"^<!-- learnnest-task-id: [^>]+ -->\s*", "", note.markdown)
+    tokens = _MARKDOWN.parse(markdown)
     images: dict[str, Path] = {}
     for token in tokens:
         for child in token.children or ():
@@ -1158,6 +1321,30 @@ def _render_learning_note(note: Any) -> tuple[str, dict[str, Path]]:
                 f"{quote(relative, safe='/')}",
             )
     return _MARKDOWN.renderer.render(tokens, _MARKDOWN.options, {}), images
+
+
+def _learning_note_page(note: Any, fragment: str, audio_href: str | None) -> str:
+    """Wrap one already-safe note fragment in a readable, same-origin document."""
+    from html import escape
+
+    title = escape(str(note.item.title))
+    audio = (
+        f'<section class="note-audio" aria-label="本篇笔记的音频">'
+        f'<p>边读边听</p><audio controls preload="metadata" '
+        f'aria-label="播放本篇笔记的音频" src="{escape(audio_href)}">'
+        "音频暂时不能播放。</audio></section>"
+        if audio_href is not None
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{title} · 语栖</title><link rel="icon" href="data:," />
+<link rel="stylesheet" href="/static/workspace.css" />
+</head><body class="note-page"><main class="note-shell">
+<a class="note-back" href="/#library">返回学习库</a><header><p class="eyebrow">语栖学习笔记</p><h1>{title}</h1></header>
+{audio}<article class="note-content">{fragment}</article>
+</main></body></html>"""
 
 
 def _resolve_note_image(note_path: Path, task_dir: Path, source: str) -> Path:

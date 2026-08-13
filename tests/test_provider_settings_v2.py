@@ -72,9 +72,69 @@ def test_dpapi_secret_is_ciphertext_and_never_enters_settings_or_web_api(
     assert secret not in settings
     assert secret not in response.text
     assert response.status_code == 200
-    assert response.json()["connections"][0]["secret_status"] == "configured"
+    assert response.json()["connections"][0]["state"] == "连接配置可读取"
     assert "secret_id" not in response.text
     assert connection.secret_id is not None
+
+
+@pytest.mark.parametrize(
+    ("name", "preset", "secret_value", "expected_provider"),
+    [
+        ("mimo", "mimo", "mimo-label-secret", "MiMo"),
+        ("deepseek", "deepseek", "deepseek-label-secret", "DeepSeek"),
+        ("mimo-tts", "mimo-tts", "mimo-tts-label-secret", "MiMo TTS"),
+        ("windows-tts", "windows-tts", None, "Windows 系统语音"),
+    ],
+)
+def test_webui_provider_settings_labels_persistent_provider_ids(
+    tmp_path: Path,
+    name: str,
+    preset: str,
+    secret_value: str | None,
+    expected_provider: str,
+) -> None:
+    connect(tmp_path, name=name, preset=preset, secret_value=secret_value)
+
+    response = TestClient(create_web_app(tmp_path)).get("/api/providers/settings")
+
+    assert response.status_code == 200
+    assert response.json()["connections"] == [
+        {
+            "name": name,
+            "provider": expected_provider,
+            "state": (
+                "本地配置可读取" if preset == "windows-tts" else "连接配置可读取"
+            ),
+        }
+    ]
+
+
+def test_webui_provider_settings_projects_a_corrupt_dpapi_secret_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    secret = "corrupt-dpapi-secret-never-disclose"
+    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value=secret)
+    set_role_binding(tmp_path, role="note_writer", connection_name=connection.name)
+    set_role_binding(tmp_path, role="note_reviewer", connection_name=connection.name)
+    assert connection.secret_id is not None
+    ProviderSecretStore(tmp_path).path_for(connection.secret_id).write_bytes(
+        b"corrupt-dpapi-payload"
+    )
+
+    response = TestClient(create_web_app(tmp_path)).get(
+        "/api/providers/settings?default_output=complete_note"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["connections"][0]["state"] == "连接密钥不可用"
+    assert [role["state"] for role in payload["readiness"]["required_roles"]] == [
+        "连接密钥不可用",
+        "连接密钥不可用",
+    ]
+    assert secret not in response.text
+    assert connection.secret_id not in response.text
+    assert ".dpapi" not in response.text
 
 
 def test_dpapi_corruption_unknown_secret_and_cross_user_failure_are_fail_closed(
@@ -627,7 +687,7 @@ def test_note_and_podcast_cannot_share_connection_or_secret_even_if_json_is_tamp
         load_settings(tmp_path)
 
 
-def test_webui_settings_page_and_api_expose_roles_budget_retry_but_never_a_key(
+def test_webui_settings_page_and_api_expose_selected_readiness_but_never_a_key(
     tmp_path: Path,
 ) -> None:
     connect(tmp_path, name="mimo", preset="mimo", secret_value="never-show-this")
@@ -638,18 +698,10 @@ def test_webui_settings_page_and_api_expose_roles_budget_retry_but_never_a_key(
     settings = client.get("/api/providers/settings")
 
     assert page.status_code == 200
-    assert "笔记 Writer" in page.text
+    assert "所选结果的准备情况" in page.text
     assert "never-show-this" not in page.text
     assert settings.status_code == 200
-    assert settings.json()["global_calls_per_day"] >= 0
-    assert settings.json()["retries_per_role"] == 1
-    assert settings.json()["budget_group_calls_per_day"] == {
-        "note": 20,
-        "podcast": 20,
-        "tts": 20,
-        "asr": 20,
-        "ocr": 20,
-    }
+    assert settings.json()["readiness"]["state"] == "等待设置"
     assert "never-show-this" not in settings.text
 
     updated = client.put(
@@ -668,10 +720,92 @@ def test_webui_settings_page_and_api_expose_roles_budget_retry_but_never_a_key(
     )
 
     assert updated.status_code == 200
-    assert updated.json()["retries_per_role"] == 0
-    assert updated.json()["global_calls_per_day"] == 2
-    assert updated.json()["budget_group_calls_per_day"]["note"] == 1
+    assert load_settings(tmp_path).retries_per_role == 0
+    assert load_settings(tmp_path).global_calls_per_day == 2
+    assert load_settings(tmp_path).budget_group_calls_per_day["note"] == 1
     assert "secret_id" not in updated.text
+
+
+@pytest.mark.parametrize(
+    ("default_output", "expected_roles", "expected_states"),
+    [
+        (
+            "complete_note",
+            ["笔记 Writer", "笔记 Reviewer"],
+            ["连接配置可读取", "连接配置可读取"],
+        ),
+        (
+            "complete_note_with_audio",
+            ["笔记 Writer", "笔记 Reviewer", "播客", "TTS"],
+            [
+                "连接配置可读取",
+                "连接配置可读取",
+                "连接配置可读取",
+                "本地配置可读取",
+            ],
+        ),
+    ],
+)
+def test_webui_projects_only_selected_output_readiness_without_exposing_internal_settings(
+    tmp_path: Path,
+    default_output: str,
+    expected_roles: list[str],
+    expected_states: list[str],
+) -> None:
+    note = connect(tmp_path, name="note", preset="mimo", secret_value="never-show")
+    podcast = connect(
+        tmp_path, name="podcast", preset="deepseek", secret_value="never-show"
+    )
+    voice = connect(tmp_path, name="voice", preset="windows-tts")
+    for role, connection in (
+        ("note_writer", note),
+        ("note_reviewer", note),
+        ("podcast", podcast),
+        ("tts", voice),
+    ):
+        set_role_binding(tmp_path, role=role, connection_name=connection.name)
+    connect(tmp_path, name="legacy-asr", preset="local-asr")
+    connect(tmp_path, name="legacy-ocr", preset="local-ocr")
+    client = TestClient(create_web_app(tmp_path))
+
+    configured = client.post(
+        "/api/automation/configure",
+        json={
+            "default_output": default_output,
+            "auto_organize_new_favorites": False,
+            "check_interval_seconds": 300,
+            "max_items_per_tick": 1,
+        },
+    )
+    response = client.get("/api/providers/settings")
+
+    assert configured.status_code == 200
+    assert response.status_code == 200
+    readiness = response.json()["readiness"]
+    assert readiness["default_output"] in {"完整笔记", "完整笔记和播客音频"}
+    assert [role["name"] for role in readiness["required_roles"]] == expected_roles
+    assert [role["state"] for role in readiness["required_roles"]] == expected_states
+    assert readiness["authorization"]["state"] == "等待授权"
+    assert "settings_sha256" not in response.text
+    assert "never-show" not in response.text
+
+
+def test_webui_hides_unsupported_input_and_budget_controls_but_keeps_existing_settings(
+    tmp_path: Path,
+) -> None:
+    connect(tmp_path, name="legacy-asr", preset="local-asr")
+    connect(tmp_path, name="legacy-ocr", preset="local-ocr")
+    before = load_settings(tmp_path).model_dump(mode="json")
+    client = TestClient(create_web_app(tmp_path))
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert "local-asr" not in page.text
+    assert "local-ocr" not in page.text
+    assert "每日调用上限" not in page.text
+    assert 'id="provider-role-form"' not in page.text
+    assert load_settings(tmp_path).model_dump(mode="json") == before
 
 
 def test_webui_local_connections_save_without_api_keys(tmp_path: Path) -> None:
@@ -693,21 +827,20 @@ def test_webui_local_connections_save_without_api_keys(tmp_path: Path) -> None:
 
     settings = client.get("/api/providers/settings").json()
 
-    assert {item["name"] for item in settings["connections"]} == {
+    assert {item["name"] for item in settings["connections"]} == {"windows-tts"}
+    assert settings["connections"][0]["state"] == "本地配置可读取"
+    assert {item.name for item in load_settings(tmp_path).connections.values()} == {
         "local-asr",
         "local-ocr",
         "windows-tts",
     }
-    assert all(
-        item["secret_status"] == "local_configured" for item in settings["connections"]
-    )
 
 
 def test_webui_deletes_only_unbound_connections_without_exposing_secrets(
     tmp_path: Path,
 ) -> None:
     cloud = connect(tmp_path, name="mimo", preset="mimo", secret_value="never-show")
-    local = connect(tmp_path, name="local-asr", preset="local-asr")
+    connect(tmp_path, name="local-asr", preset="local-asr")
     client = TestClient(create_web_app(tmp_path))
     assert cloud.secret_id is not None
     secret_path = ProviderSecretStore(tmp_path).path_for(cloud.secret_id)
@@ -718,17 +851,7 @@ def test_webui_deletes_only_unbound_connections_without_exposing_secrets(
 
     assert deleted.status_code == 200
     assert deleted_local.status_code == 200
-    assert deleted.json()["connections"] == [
-        {
-            "name": local.name,
-            "capability": "asr",
-            "provider": "local-asr",
-            "model": "local-installed",
-            "configured": True,
-            "secret_status": "local_configured",
-            "voice": None,
-        }
-    ]
+    assert deleted.json()["connections"] == []
     assert not secret_path.exists()
     assert missing.status_code == 404
     assert "never-show" not in deleted.text + missing.text
@@ -759,13 +882,13 @@ def test_webui_unbinds_a_role_without_deleting_its_connection(tmp_path: Path) ->
     missing = client.delete("/api/providers/roles/note_writer")
 
     assert cleared.status_code == 200
-    assert cleared.json()["role_bindings"] == {}
+    assert load_settings(tmp_path).role_bindings == {}
     assert "mimo" in {item["name"] for item in cleared.json()["connections"]}
     assert missing.status_code == 404
     assert secret not in cleared.text + missing.text
 
 
-def test_webui_renders_bound_role_with_connection_provider_and_model(
+def test_webui_renders_only_selected_role_readiness_with_inline_feedback(
     tmp_path: Path,
 ) -> None:
     connect(tmp_path, name="mimo", preset="mimo", secret_value="never-show-this")
@@ -773,31 +896,28 @@ def test_webui_renders_bound_role_with_connection_provider_and_model(
     client = TestClient(create_web_app(tmp_path))
 
     page = client.get("/").text
-    settings = client.get("/api/providers/settings").json()
     script = (web_app._STATIC_DIRECTORY / "workspace.js").read_text(encoding="utf-8")
 
-    assert settings["role_bindings"] == {"note_writer": "mimo"}
-    assert 'id="provider-role-list"' in page
-    assert 'id="provider-role-feedback"' in page
+    assert load_settings(tmp_path).role_bindings == {
+        "note_writer": load_settings(tmp_path).role_bindings["note_writer"]
+    }
+    assert 'id="setup-readiness"' in page
+    assert 'id="provider-feedback"' in page
     assert "provider-role-summary" in script
     assert "已绑定" in script
-    assert '"local-asr": "local-asr"' in script
-    assert '"local-ocr": "local-ocr"' in script
     assert '"windows-tts": "windows-tts"' in script
     assert "function startProviderSave(event)" in script
-    assert script.count("const finishSaving = startProviderSave(event);") == 3
+    assert script.count("const finishSaving = startProviderSave(event);") == 1
     assert 'const current = await api("/api/providers/settings");' not in script
     assert 'data-delete-connection="${escapeHtml(item.name)}"' in script
     assert "window.confirm" in script
     assert "await loadAutomationStatus();" in script
-    assert 'data-unbind-role="${escapeHtml(role)}"' in script
-    assert "async function clearProviderRole(button)" in script
+    assert 'data-unbind-setup-role="${escapeHtml(role.name)}"' in script
+    assert "async function clearSetupRole(button)" in script
     assert "const submittedForm = event.currentTarget;" in script
     assert "submittedForm.reset();" in script
     assert "event.currentTarget.reset();" not in script
-    for group in ("note", "podcast", "tts", "asr", "ocr"):
-        assert f'name="{group}_calls_per_day"' in page
-        assert f'"{group}"' in script
+    assert "每日调用上限" not in page
 
 
 def test_legacy_automation_budget_still_maps_to_global_cap() -> None:
@@ -883,7 +1003,7 @@ def test_provider_settings_join_the_live_refresh_without_repainting_active_forms
     script = (web_app._STATIC_DIRECTORY / "workspace.js").read_text(encoding="utf-8")
 
     assert "Promise.all([loadFavorites(), refreshProviderSettingsWhenIdle()])" in script
-    assert "function providerSettingsFormActive()" in script
+    assert "function settingsFormNeedsProtection(form)" in script
 
 
 def test_synthetic_check_persists_one_safe_attempt_and_never_retries(

@@ -652,7 +652,6 @@ def public_settings(output_root: str | Path) -> dict[str, object]:
         "retries_per_role": settings.retries_per_role,
         "global_calls_per_day": settings.global_calls_per_day,
         "budget_group_calls_per_day": settings.budget_group_calls_per_day,
-        "settings_sha256": settings_sha256(settings),
     }
 
 

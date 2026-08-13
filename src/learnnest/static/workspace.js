@@ -14,6 +14,10 @@ const api = async (path, options = {}) => {
 };
 
 const notice = document.querySelector("#notice");
+const sourceJobs = document.createElement("section");
+sourceJobs.className = "source-jobs";
+sourceJobs.hidden = true;
+notice?.insertAdjacentElement("afterend", sourceJobs);
 const uploadForm = document.querySelector("#upload-form");
 const urlForm = document.querySelector("#url-form");
 const lists = {
@@ -35,12 +39,8 @@ const cancelDouyinButton = document.querySelector("#cancel-douyin");
 const providerForm = document.querySelector("#provider-connection-form");
 const providerList = document.querySelector("#provider-connection-list");
 const providerState = document.querySelector("#provider-settings-state");
-const providerBudget = document.querySelector("#provider-budget");
-const providerRoleForm = document.querySelector("#provider-role-form");
-const providerRoleConnection = document.querySelector("#provider-role-connection");
-const providerLimitsForm = document.querySelector("#provider-limits-form");
-const providerRoleFeedback = document.querySelector("#provider-role-feedback");
-const providerRoleList = document.querySelector("#provider-role-list");
+const providerFeedback = document.querySelector("#provider-feedback");
+const setupReadiness = document.querySelector("#setup-readiness");
 const windowsVoiceField = document.querySelector("#windows-voice-field");
 const windowsVoice = document.querySelector("#windows-voice");
 const automationForm = document.querySelector("#automation-form");
@@ -52,14 +52,6 @@ const disableAutomationButton = document.querySelector("#disable-automation");
 const addSelectedFavoritesButton = document.querySelector("#add-selected-favorites");
 const favoriteSelection = document.querySelector("#favorite-selection");
 let windowsVoicesLoaded = false;
-const providerRoleLabels = {
-  note_writer: "笔记 Writer", note_reviewer: "笔记 Reviewer", podcast: "播客",
-  tts: "TTS", asr: "ASR", ocr: "OCR",
-};
-const providerRoleCapabilities = {
-  note_writer: "llm", note_reviewer: "llm", podcast: "llm",
-  tts: "tts", asr: "asr", ocr: "ocr",
-};
 const stateLabel = {
   materials_ready: "材料已准备",
   waiting_setup: "等待设置",
@@ -70,7 +62,7 @@ const stateLabel = {
   needs_action: "需要处理",
   ready: "可阅读",
 };
-const learningActionKinds = new Set(["open_note", "open_settings", "open_automation", "continue"]);
+const learningActionKinds = new Set(["open_note", "open_settings", "open_automation", "continue", "start_automation", "retry_automation"]);
 const loginLabel = {
   disconnected: "未连接",
   starting: "准备中",
@@ -94,6 +86,7 @@ let loginCountdownTimer = null;
 let loginRefreshInFlight = false;
 let selectedFavoriteIdsState = new Set();
 let suggestedProviderConnectionName = "";
+const dirtySettingsForms = new Set();
 const providerConnectionNameDefaults = {
   "windows-tts": "windows-tts",
   "local-asr": "local-asr",
@@ -104,45 +97,26 @@ function say(message) { notice.textContent = message; }
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value ?? ""; return node.innerHTML; }
 
 function renderProviderSettings(settings) {
-  const configured = settings.connections.filter((item) => item.configured).length;
+  const configured = settings.connections.length;
   providerState.textContent = configured ? `已配置 ${configured} 个` : "未配置";
   providerState.className = `status-pill ${configured ? "connected" : ""}`;
-  providerBudget.textContent = `每个职责自动重试 ${settings.retries_per_role} 次；UTC 每日最多 ${settings.global_calls_per_day} 次调用。`;
-  renderProviderRoleOptions(settings);
-  providerLimitsForm.elements.retries_per_role.value = settings.retries_per_role;
-  providerLimitsForm.elements.global_calls_per_day.value = settings.global_calls_per_day;
-  for (const group of ["note", "podcast", "tts", "asr", "ocr"]) providerLimitsForm.elements[`${group}_calls_per_day`].value = settings.budget_group_calls_per_day[group];
-  const rolesByConnection = new Map();
-  Object.entries(settings.role_bindings).forEach(([role, name]) => {
-    const roles = rolesByConnection.get(name) || [];
-    roles.push(providerRoleLabels[role] || role);
-    rolesByConnection.set(name, roles);
-  });
   providerList.innerHTML = settings.connections.length
     ? settings.connections.map((item) => {
-      const roles = rolesByConnection.get(item.name) || [];
-      const deleteControl = roles.length
-        ? `<span class="provider-bound">已绑定 ${escapeHtml(roles.join("、"))}；请先替换</span>`
-        : `<button type="button" data-delete-connection="${escapeHtml(item.name)}">删除</button>`;
-      return `<div class="provider-row"><span>${escapeHtml(item.name)}</span><span>${escapeHtml(item.provider)} · ${escapeHtml(item.voice || item.model)}</span><span>${item.secret_status === "local_configured" ? "本地已配置" : item.configured ? "已配置" : "未配置"}</span><div class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查</button>${deleteControl}</div></div>`;
+      return `<div class="provider-row"><span>${escapeHtml(item.name)}</span><span>${escapeHtml(item.provider)}</span><span>${escapeHtml(item.state)}</span><div class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查连接</button><button type="button" data-delete-connection="${escapeHtml(item.name)}">删除</button></div></div>`;
     }).join("")
     : '<p class="empty">还没有学习连接。</p>';
   providerList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", async () => {
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = "检查中…";
     try {
-      await api(`/api/providers/connections/${encodeURIComponent(button.dataset.checkConnection)}/check`, { method: "POST" });
-      say("连接配置可用；这次检查没有调用 Provider。");
-    } catch (error) { say(error.message); }
+      const result = await api(`/api/providers/connections/${encodeURIComponent(button.dataset.checkConnection)}/check`, { method: "POST" });
+      providerFeedback.textContent = result.message;
+      say(result.message);
+    } catch (error) { providerFeedback.textContent = error.message; say(error.message); } finally { button.disabled = false; button.textContent = label; }
   }));
   providerList.querySelectorAll("button[data-delete-connection]").forEach((button) => button.addEventListener("click", () => deleteProviderConnection(button)));
-  const connections = new Map(settings.connections.map((item) => [item.name, item]));
-  const bindings = Object.entries(settings.role_bindings);
-  providerRoleList.innerHTML = bindings.length
-    ? bindings.map(([role, name]) => {
-      const connection = connections.get(name);
-      return `<div class="provider-role-summary"><span>${escapeHtml(providerRoleLabels[role] || role)}</span><span>${escapeHtml(name)} · ${escapeHtml(connection?.provider || "连接不可用")} · ${escapeHtml(connection?.model || "")}</span><div class="provider-role-actions"><strong>已绑定</strong><button type="button" data-unbind-role="${escapeHtml(role)}">解绑</button></div></div>`;
-    }).join("")
-    : '<p class="empty">尚未绑定职责。</p>';
-  providerRoleList.querySelectorAll("button[data-unbind-role]").forEach((button) => button.addEventListener("click", () => clearProviderRole(button)));
+  renderSetupReadiness(settings.readiness);
 }
 
 function suggestProviderConnectionName() {
@@ -167,29 +141,61 @@ function startProviderSave(event) {
 function showProviderUpdateFailure(error) {
   providerState.textContent = "操作失败";
   providerState.className = "status-pill";
+  providerFeedback.textContent = error.message;
   say(error.message);
 }
 
-async function clearProviderRole(button) {
-  const role = button.dataset.unbindRole;
-  const label = providerRoleLabels[role] || role;
-  if (!window.confirm(`确定解绑“${label}”职责吗？自动整理需要重新确认。`)) return;
+function renderSetupReadiness(readiness) {
+  if (!readiness) return;
+  setupReadiness.innerHTML = `<p class="chapter-label">所选结果：${escapeHtml(readiness.default_output)}</p>`
+    + `<p class="section-note">${escapeHtml(readiness.message)}</p>`
+    + `<div class="provider-role-list">${readiness.required_roles.map((role) => {
+      const options = role.options.map((item) => `<option value="${escapeHtml(item.name)}"${item.name === role.connection ? " selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.provider)}</option>`).join("");
+      const control = role.connection
+        ? `<button type="button" data-unbind-setup-role="${escapeHtml(role.name)}">解绑</button>`
+        : `<select aria-label="为${escapeHtml(role.name)}选择连接" data-setup-role-select="${escapeHtml(role.name)}"><option value="">选择连接</option>${options}</select><button type="button" data-bind-setup-role="${escapeHtml(role.name)}">绑定</button>`;
+      return `<div class="provider-role-summary"><span>${escapeHtml(role.name)}</span><span>${escapeHtml(role.connection || role.state)}</span><div class="provider-role-actions"><strong>${escapeHtml(role.state)}</strong>${control}</div></div>`;
+    }).join("")}</div><p class="section-note">自动整理：${escapeHtml(readiness.authorization.state)}。${escapeHtml(readiness.authorization.message)}</p>`;
+  setupReadiness.querySelectorAll("button[data-bind-setup-role]").forEach((button) => button.addEventListener("click", () => bindSetupRole(button)));
+  setupReadiness.querySelectorAll("button[data-unbind-setup-role]").forEach((button) => button.addEventListener("click", () => clearSetupRole(button)));
+  setupReadiness.querySelectorAll("select[data-setup-role-select]").forEach((select) => select.addEventListener("change", () => dirtySettingsForms.add(setupReadiness)));
+}
+
+async function bindSetupRole(button) {
+  const label = button.dataset.bindSetupRole;
+  const select = button.previousElementSibling;
+  if (!select?.value) { providerFeedback.textContent = `请先为${label}选择连接。`; return; }
   const buttonLabel = button.textContent;
   button.disabled = true;
-  button.textContent = "解绑中…";
-  providerState.textContent = "解绑中";
+  button.textContent = "保存中…";
   try {
-    const settings = await api(`/api/providers/roles/${encodeURIComponent(role)}`, { method: "DELETE" });
+    const settings = await api(`/api/providers/setup-roles/${encodeURIComponent(label)}`, { method: "POST", body: JSON.stringify({ connection_name: select.value }) });
+    dirtySettingsForms.delete(setupReadiness);
     renderProviderSettings(settings);
     await loadAutomationStatus();
-    providerRoleFeedback.textContent = `已解绑：${label}`;
-    say(`已解绑 ${label}；自动整理需要重新确认。`);
+    providerFeedback.textContent = `已绑定：${label}。自动整理需要重新确认。`;
+    say(providerFeedback.textContent);
   } catch (error) {
     showProviderUpdateFailure(error);
   } finally {
     button.disabled = false;
     button.textContent = buttonLabel;
   }
+}
+
+async function clearSetupRole(button) {
+  const label = button.dataset.unbindSetupRole;
+  const buttonLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "解绑中…";
+  try {
+    const settings = await api(`/api/providers/setup-roles/${encodeURIComponent(label)}`, { method: "DELETE" });
+    dirtySettingsForms.delete(setupReadiness);
+    renderProviderSettings(settings);
+    await loadAutomationStatus();
+    providerFeedback.textContent = `已解绑：${label}。自动整理需要重新确认。`;
+    say(providerFeedback.textContent);
+  } catch (error) { showProviderUpdateFailure(error); } finally { button.disabled = false; button.textContent = buttonLabel; }
 }
 
 async function deleteProviderConnection(button) {
@@ -203,7 +209,8 @@ async function deleteProviderConnection(button) {
     const settings = await api(`/api/providers/connections/${encodeURIComponent(name)}`, { method: "DELETE" });
     renderProviderSettings(settings);
     await loadAutomationStatus();
-    say(`已删除连接：${name}。如自动整理此前已授权，请重新确认。`);
+    providerFeedback.textContent = `已删除连接：${name}。如自动整理此前已授权，请重新确认。`;
+    say(providerFeedback.textContent);
   } catch (error) {
     showProviderUpdateFailure(error);
   } finally {
@@ -224,28 +231,17 @@ async function refreshWindowsVoices() {
   windowsVoicesLoaded = true;
 }
 
-function renderProviderRoleOptions(settings) {
-  const role = providerRoleForm.elements.role.value;
-  const expectedCapability = providerRoleCapabilities[role];
-  const current = settings.role_bindings[role];
-  const matching = settings.connections.filter((item) => item.capability === expectedCapability);
-  providerRoleConnection.innerHTML = matching.map((item) => `<option value="${escapeHtml(item.name)}" ${item.name === current ? "selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.provider)} · ${escapeHtml(item.model)}</option>`).join("");
-  providerRoleFeedback.textContent = matching.length
-    ? "选择连接后保存；已绑定职责会显示在下方。"
-    : `还没有可用于${providerRoleLabels[role] || "此职责"}的连接。`;
+async function loadProviderSettings(defaultOutput = null) {
+  try { renderProviderSettings(await api(`/api/providers/settings${defaultOutput ? `?default_output=${encodeURIComponent(defaultOutput)}` : ""}`)); await refreshWindowsVoices(); } catch (error) { providerState.textContent = "无法读取"; }
 }
 
-async function loadProviderSettings() {
-  try { renderProviderSettings(await api("/api/providers/settings")); await refreshWindowsVoices(); } catch (error) { providerState.textContent = "无法读取"; }
-}
-
-function providerSettingsFormActive() {
+function settingsFormNeedsProtection(form) {
   const active = document.activeElement;
-  return [providerForm, providerRoleForm, providerLimitsForm].some((form) => form.contains(active));
+  return form.contains(active) || dirtySettingsForms.has(form);
 }
 
 async function refreshProviderSettingsWhenIdle() {
-  if (!providerSettingsFormActive()) await loadProviderSettings();
+  if (!settingsFormNeedsProtection(providerForm) && !settingsFormNeedsProtection(setupReadiness)) await loadProviderSettings(automationForm.elements.default_output.value);
 }
 
 function renderList(target, items, empty) {
@@ -312,6 +308,31 @@ function renderFavorites(snapshot) {
   updateFavoriteSelection();
 }
 
+function renderSourceJobs(jobs) {
+  const visible = jobs.slice(0, 8);
+  sourceJobs.hidden = visible.length === 0;
+  if (!visible.length) return;
+  sourceJobs.innerHTML = `<h2>来源处理</h2>${visible.map((job) => `
+    <article class="source-job">
+      <span>${escapeHtml(job.source_kind === "douyin_favorite" ? "抖音收藏" : job.source_kind === "public_url" ? "公开链接" : "本地视频")}</span>
+      <span>${escapeHtml(job.status === "queued" ? "等待开始" : job.status === "running" ? "正在处理材料" : job.status === "completed" ? "材料已加入收件箱" : job.status === "interrupted" ? "处理已中断" : "处理失败")}</span>
+      ${["failed", "interrupted"].includes(job.status) ? `<button type="button" data-retry-job="${escapeHtml(job.job_id)}">重试</button>` : ""}
+    </article>`).join("")}`;
+  sourceJobs.querySelectorAll("button[data-retry-job]").forEach((button) => button.addEventListener("click", () => retrySourceJob(button.dataset.retryJob)));
+}
+
+async function loadSourceJobs() {
+  try { renderSourceJobs((await api("/api/learning/jobs")).jobs); } catch (error) { sourceJobs.hidden = true; }
+}
+
+async function retrySourceJob(jobId) {
+  try {
+    await api(`/api/learning/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });
+    say("已重新加入来源处理。");
+    await refresh(true);
+  } catch (error) { say(error.message); }
+}
+
 function selectedFavoriteIds() { return [...selectedFavoriteIdsState]; }
 function updateFavoriteSelection() {
   selectedFavoriteIdsState = new Set(
@@ -337,7 +358,7 @@ function renderAutomationStatus(status) {
   automationSummary.textContent = enabled
     ? `会按 ${status.check_interval_seconds} 秒检查收件箱；默认生成${status.default_output === "complete_note" ? "完整笔记" : "完整笔记和播客音频"}。`
     : "保存设置后，需要勾选付费确认才会开始自动整理。";
-  if (status.configured) {
+  if (status.configured && !settingsFormNeedsProtection(automationForm)) {
     automationForm.elements.default_output.value = status.default_output;
     automationForm.elements.check_interval_seconds.value = status.check_interval_seconds;
     automationForm.elements.auto_organize_new_favorites.checked = status.auto_organize_new_favorites;
@@ -523,6 +544,7 @@ async function refresh(force = false) {
       render(snapshot);
     }
     await Promise.all([loadFavorites(), refreshProviderSettingsWhenIdle()]);
+    await loadSourceJobs();
     await loadAutomationStatus();
   } catch (error) {
     say(error.message);
@@ -549,6 +571,18 @@ async function actOnItem(itemRef, action) {
     if (action === "open_automation") {
       document.querySelector("#settings")?.scrollIntoView({ behavior: "smooth", block: "start" });
       window.requestAnimationFrame(() => confirmPaid?.focus({ preventScroll: true }));
+      return;
+    }
+    if (action === "start_automation") {
+      await api(`/api/learning/items/${encodeURIComponent(itemRef)}/start-automation`, { method: "POST" });
+      say("已加入整理队列。");
+      await refresh(true);
+      return;
+    }
+    if (action === "retry_automation") {
+      await api(`/api/learning/items/${encodeURIComponent(itemRef)}/retry-automation`, { method: "POST" });
+      say("已重新加入整理队列。");
+      await refresh(true);
       return;
     }
     if (action !== "continue") return;
@@ -608,6 +642,8 @@ automationForm.addEventListener("submit", async (event) => {
   const form = new FormData(event.currentTarget);
   try {
     renderAutomationStatus(await api("/api/automation/configure", { method: "POST", body: JSON.stringify({ default_output: form.get("default_output"), auto_organize_new_favorites: form.has("auto_organize_new_favorites"), check_interval_seconds: Number(form.get("check_interval_seconds")), max_items_per_tick: Number(form.get("max_items_per_tick")) }) }));
+    dirtySettingsForms.delete(automationForm);
+    await loadProviderSettings(String(form.get("default_output")));
     confirmPaid.checked = false;
     say("自动整理设置已保存；请阅读提示并明确确认后开启。");
   } catch (error) { say(error.message); }
@@ -639,9 +675,11 @@ providerForm.addEventListener("submit", async (event) => {
       }),
     });
     submittedForm.reset();
+    dirtySettingsForms.delete(providerForm);
     suggestProviderConnectionName();
     renderProviderSettings(settings);
-    say("连接已保存；密钥不会显示在页面中。");
+    providerFeedback.textContent = "连接已保存；密钥不会显示在页面中。";
+    say(providerFeedback.textContent);
   } catch (error) { showProviderUpdateFailure(error); } finally { finishSaving(); }
 });
 
@@ -651,30 +689,27 @@ providerForm.elements.preset.addEventListener("change", () => {
   refreshWindowsVoices().catch((error) => say(error.message));
 });
 
-providerRoleForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = new FormData(event.currentTarget);
-  const finishSaving = startProviderSave(event);
-  try {
-    const settings = await api(`/api/providers/roles/${encodeURIComponent(form.get("role"))}`, { method: "POST", body: JSON.stringify({ connection_name: form.get("connection_name") }) });
-    renderProviderSettings(settings);
-    const connection = settings.connections.find((item) => item.name === form.get("connection_name"));
-    const detail = `${providerRoleLabels[form.get("role")]} → ${connection.provider} · ${connection.model}`;
-    providerRoleFeedback.textContent = `已绑定：${detail}`;
-    say(`职责已绑定：${detail}`);
-  } catch (error) { showProviderUpdateFailure(error); } finally { finishSaving(); }
-});
+for (const form of [providerForm, automationForm]) {
+  form.addEventListener("input", () => dirtySettingsForms.add(form));
+  form.addEventListener("change", () => dirtySettingsForms.add(form));
+  form.addEventListener("reset", () => {
+    dirtySettingsForms.delete(form);
+    window.setTimeout(() => {
+      if (form === providerForm) loadProviderSettings(automationForm.elements.default_output.value);
+      else loadAutomationStatus();
+    });
+  });
+}
 
-providerRoleForm.elements.role.addEventListener("change", () => loadProviderSettings());
+document.querySelectorAll(".bookmark").forEach((link) => link.addEventListener("click", () => {
+  document.querySelectorAll(".bookmark").forEach((item) => item.classList.remove("active"));
+  link.classList.add("active");
+}));
 
-providerLimitsForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = new FormData(event.currentTarget);
-  const finishSaving = startProviderSave(event);
-  try {
-    renderProviderSettings(await api("/api/providers/limits", { method: "PUT", body: JSON.stringify({ retries_per_role: Number(form.get("retries_per_role")), global_calls_per_day: Number(form.get("global_calls_per_day")), budget_group_calls_per_day: Object.fromEntries(["note", "podcast", "tts", "asr", "ocr"].map((group) => [group, Number(form.get(`${group}_calls_per_day`))])) }) }));
-    say("调用限额已保存；自动授权已需要按新设置重新确认。");
-  } catch (error) { showProviderUpdateFailure(error); } finally { finishSaving(); }
+window.addEventListener("hashchange", () => {
+  const current = document.querySelector(`.bookmark[href="${CSS.escape(window.location.hash)}"]`);
+  if (!current) return;
+  document.querySelectorAll(".bookmark").forEach((item) => item.classList.toggle("active", item === current));
 });
 
 connectDouyinButton.addEventListener("click", connectDouyin);

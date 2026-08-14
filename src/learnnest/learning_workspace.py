@@ -22,7 +22,7 @@ from learnnest.models import StageStatus, TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
 from learnnest.publication import note_belongs_to_task, read_audio_ownership_marker
 from learnnest.sources import SourceParseError, collect_sources
-from learnnest.task_store import find_task_by_id, load_task
+from learnnest.task_store import find_task_by_id, parse_task_bytes
 from learnnest.tts_generation import probe_audio
 
 DesiredOutput = Literal["readable_note", "materials_only"]
@@ -272,7 +272,12 @@ class LearningWorkspace:
                     continue
                 _digest_fact(digest, "task", task_json.parent.name, raw)
                 try:
-                    entries.append((task_json.parent, load_task(task_json)))
+                    entries.append(
+                        (
+                            task_json.parent,
+                            parse_task_bytes(raw, base_dir=task_json.parent),
+                        )
+                    )
                 except (OSError, ValueError):
                     continue
         intake_root = self.output_root / ".learnnest" / "automation" / "intake"

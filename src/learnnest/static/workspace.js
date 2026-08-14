@@ -153,7 +153,9 @@ function renderSetupReadiness(readiness) {
       const options = role.options.map((item) => `<option value="${escapeHtml(item.name)}"${item.name === role.connection ? " selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.provider)}</option>`).join("");
       const control = role.connection
         ? `<button type="button" data-unbind-setup-role="${escapeHtml(role.name)}">解绑</button>`
-        : `<select aria-label="为${escapeHtml(role.name)}选择连接" data-setup-role-select="${escapeHtml(role.name)}"><option value="">选择连接</option>${options}</select><button type="button" data-bind-setup-role="${escapeHtml(role.name)}">绑定</button>`;
+        : role.options.length
+          ? `<select aria-label="为${escapeHtml(role.name)}选择连接" data-setup-role-select="${escapeHtml(role.name)}"><option value="">选择连接</option>${options}</select><button type="button" data-bind-setup-role="${escapeHtml(role.name)}">绑定</button>`
+          : `<span class="field-hint">${escapeHtml(role.hint || "请先添加兼容连接。")}</span>`;
       return `<div class="provider-role-summary"><span>${escapeHtml(role.name)}</span><span>${escapeHtml(role.connection || role.state)}</span><div class="provider-role-actions"><strong>${escapeHtml(role.state)}</strong>${control}</div></div>`;
     }).join("")}</div><p class="section-note">自动整理：${escapeHtml(readiness.authorization.state)}。${escapeHtml(readiness.authorization.message)}</p>`;
   setupReadiness.querySelectorAll("button[data-bind-setup-role]").forEach((button) => button.addEventListener("click", () => bindSetupRole(button)));
@@ -231,8 +233,13 @@ async function refreshWindowsVoices() {
   windowsVoicesLoaded = true;
 }
 
-async function loadProviderSettings(defaultOutput = null) {
-  try { renderProviderSettings(await api(`/api/providers/settings${defaultOutput ? `?default_output=${encodeURIComponent(defaultOutput)}` : ""}`)); await refreshWindowsVoices(); } catch (error) { providerState.textContent = "无法读取"; }
+async function loadProviderSettings(defaultOutput = null, protectDirty = false) {
+  try {
+    const settings = await api(`/api/providers/settings${defaultOutput ? `?default_output=${encodeURIComponent(defaultOutput)}` : ""}`);
+    if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(setupReadiness))) return;
+    renderProviderSettings(settings);
+    await refreshWindowsVoices();
+  } catch (error) { providerState.textContent = "无法读取"; }
 }
 
 function settingsFormNeedsProtection(form) {
@@ -241,7 +248,7 @@ function settingsFormNeedsProtection(form) {
 }
 
 async function refreshProviderSettingsWhenIdle() {
-  if (!settingsFormNeedsProtection(providerForm) && !settingsFormNeedsProtection(setupReadiness)) await loadProviderSettings(automationForm.elements.default_output.value);
+  if (!settingsFormNeedsProtection(providerForm) && !settingsFormNeedsProtection(setupReadiness)) await loadProviderSettings(automationForm.elements.default_output.value, true);
 }
 
 function renderList(target, items, empty) {

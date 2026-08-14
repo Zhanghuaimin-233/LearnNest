@@ -687,6 +687,48 @@ def test_note_and_podcast_cannot_share_connection_or_secret_even_if_json_is_tamp
         load_settings(tmp_path)
 
 
+def test_webui_podcast_options_exclude_note_domain_connections_and_explain_isolation(
+    tmp_path: Path,
+) -> None:
+    note = connect(tmp_path, name="mimo-note", preset="mimo", secret_value="same-key")
+    set_role_binding(tmp_path, role="note_writer", connection_name=note.name)
+    set_role_binding(tmp_path, role="note_reviewer", connection_name=note.name)
+    client = TestClient(create_web_app(tmp_path))
+
+    response = client.get(
+        "/api/providers/settings?default_output=complete_note_with_audio"
+    )
+    podcast_role = next(
+        role
+        for role in response.json()["readiness"]["required_roles"]
+        if role["name"] == "播客"
+    )
+
+    assert response.status_code == 200
+    assert podcast_role["options"] == []
+    assert (
+        podcast_role["hint"] == "播客需要单独的 MiMo/DeepSeek 连接，不能复用笔记连接。"
+    )
+
+    connect(
+        tmp_path,
+        name="mimo-podcast",
+        preset="mimo",
+        secret_value="same-key",
+    )
+    response = client.get(
+        "/api/providers/settings?default_output=complete_note_with_audio"
+    )
+    podcast_role = next(
+        role
+        for role in response.json()["readiness"]["required_roles"]
+        if role["name"] == "播客"
+    )
+
+    assert podcast_role["options"] == [{"name": "mimo-podcast", "provider": "MiMo"}]
+    assert podcast_role["hint"] is None
+
+
 def test_webui_settings_page_and_api_expose_selected_readiness_but_never_a_key(
     tmp_path: Path,
 ) -> None:

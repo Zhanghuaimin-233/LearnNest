@@ -1077,8 +1077,18 @@ def test_workspace_settings_polling_preserves_dirty_forms_and_uses_inline_feedba
     assert "function settingsFormNeedsProtection(form)" in script
     assert "!settingsFormNeedsProtection(providerForm)" in script
     assert "!settingsFormNeedsProtection(setupReadiness)" in script
+    assert (
+        "loadProviderSettings(automationForm.elements.default_output.value, true)"
+        in script
+    )
+    assert (
+        "if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(setupReadiness))) return;"
+        in script
+    )
     assert "providerFeedback.textContent" in script
     assert "const select = button.previousElementSibling;" in script
+    assert "role.options.length" in script
+    assert "role.hint" in script
     assert "window.setTimeout(() => refresh(), document.hidden ? 5000 : 2000)" in script
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,11 +37,14 @@ from learnnest.automation_store import (
     save_tick_result,
 )
 from learnnest.execution import RETRY_DELAYS, classify_failure
-from learnnest.locks import automation_lock
+from learnnest.locks import automation_lock, task_lock
+from learnnest.models import ContentPack, StageStatus, TaskRecord
 from learnnest.podcast_providers import PodcastProvider
+from learnnest.publication import atomic_replace_bytes, read_audio_ownership_marker
 from learnnest.provider_profiles import load_settings, settings_sha256
 from learnnest.provider_service import assisted_snapshot_from_binding
-from learnnest.task_store import find_task_by_id, load_task
+from learnnest.standard_note_publication import load_active_standard_note
+from learnnest.task_store import find_task_by_id, load_task, write_task_atomic
 from learnnest.tts_generation import DEFAULT_TTS_STYLE
 from learnnest.tts_providers import TtsProvider
 
@@ -298,6 +303,14 @@ def _run_task(
     )
     if not podcast_ok or podcast is None:
         return False
+    if not isinstance(podcast, PodcastArtifact):
+        _attention(
+            root,
+            state,
+            "non_retryable_failure",
+            "podcast result could not be confirmed",
+        )
+        return False
 
     tts_provider = provider_for_stage("tts")
     run_tts_stage = (
@@ -328,11 +341,249 @@ def _run_task(
     )
     if not tts_ok:
         return False
+    try:
+        _activate_automated_audio(root, source, podcast, delivery_dir)
+    except Exception as error:
+        _attention(
+            root,
+            state,
+            "non_retryable_failure",
+            f"audio activation: {_safe_summary(error)}",
+        )
+        raise RuntimeError(f"automated audio activation failed: {_safe_summary(error)}")
     save_task_state(
         root,
         state.model_copy(update={"status": "completed", "blocked_reason": None}),
     )
     return True
+
+
+def _activate_automated_audio(
+    root: Path,
+    source: ReviewedMarkdownSource,
+    podcast: PodcastArtifact,
+    delivery_dir: Path,
+) -> None:
+    """Promote only a fully validated automated delivery into TaskRecord facts."""
+    found = find_task_by_id(root, source.task_id)
+    if found is None:
+        raise ValueError("automation task is missing")
+    task_dir, _task = found
+    task_root = task_dir.resolve()
+    delivery_root = delivery_dir.resolve()
+    if not delivery_root.is_relative_to(task_root):
+        raise ValueError("automated audio delivery is outside its task")
+    try:
+        persisted_script = (
+            delivery_root / "podcast" / "podcast_script.json"
+        ).read_bytes()
+        persisted_speech = (delivery_root / "podcast" / "speech.txt").read_bytes()
+    except OSError as error:
+        raise ValueError("automated podcast artifact is incomplete") from error
+    if (
+        hashlib.sha256(persisted_script).hexdigest() != podcast.script_sha256
+        or hashlib.sha256(persisted_speech).hexdigest() != podcast.speech_sha256
+    ):
+        raise ValueError("automated podcast artifact changed before activation")
+    audio_dir = delivery_root / "tts"
+    metadata_path = audio_dir / "metadata.json"
+    audio_path = audio_dir / "audio.mp3"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        audio = audio_path.read_bytes()
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("automated audio artifact is incomplete") from error
+    if not isinstance(metadata, dict):
+        raise ValueError("automated audio metadata is invalid")
+    published_path = metadata.get("published_path")
+    expected = {
+        "schema_version": "1.0",
+        "route": "assisted_draft",
+        "review_status": "model_reviewed",
+        "task_id": source.task_id,
+        "source_fingerprint": source.content_pack.source_fingerprint,
+        "assisted_plan_id": source.plan_id,
+        "dossier_sha256": source.dossier_sha256,
+        "content_pack_sha256": source.content_pack_sha256,
+        "note_content_sha256": source.markdown_sha256,
+        "podcast_script_sha256": podcast.script_sha256,
+        "speech_sha256": podcast.speech_sha256,
+        "mp3_sha256": hashlib.sha256(audio).hexdigest(),
+        "status": "completed",
+    }
+    if (
+        not isinstance(published_path, str)
+        or not published_path
+        or any(metadata.get(key) != value for key, value in expected.items())
+    ):
+        raise ValueError("automated audio artifact does not match its identity")
+    published = (root / published_path).resolve()
+    if not published.is_relative_to(root) or published.suffix.lower() != ".mp3":
+        raise ValueError("automated audio publication path is invalid")
+    try:
+        owner = read_audio_ownership_marker(published)
+    except ValueError as error:
+        raise ValueError("automated audio ownership is invalid") from error
+    if (
+        owner is None
+        or owner.get("task_id") != source.task_id
+        or owner.get("mp3_sha256") != expected["mp3_sha256"]
+        or owner.get("status") != "completed"
+        or not published.is_file()
+        or hashlib.sha256(published.read_bytes()).hexdigest() != expected["mp3_sha256"]
+    ):
+        raise ValueError("automated audio publication cannot be confirmed")
+    podcast_metadata_path = delivery_root / "podcast" / "metadata.json"
+    try:
+        podcast_metadata = json.loads(podcast_metadata_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("automated podcast metadata is invalid") from error
+    if not isinstance(podcast_metadata, dict) or any(
+        podcast_metadata.get(key) != value
+        for key, value in {
+            "schema_version": "1.0",
+            "route": "assisted_draft",
+            "review_status": "model_reviewed",
+            "task_id": source.task_id,
+            "source_fingerprint": source.content_pack.source_fingerprint,
+            "assisted_plan_id": source.plan_id,
+            "dossier_sha256": source.dossier_sha256,
+            "content_pack_sha256": source.content_pack_sha256,
+            "note_content_sha256": source.markdown_sha256,
+            "status": "completed",
+        }.items()
+    ):
+        raise ValueError("automated podcast artifact does not match its identity")
+    if (
+        not isinstance(metadata.get("provider"), str)
+        or not isinstance(metadata.get("model"), str)
+        or not isinstance(podcast_metadata.get("provider"), str)
+        or not isinstance(podcast_metadata.get("model"), str)
+    ):
+        raise ValueError("automated delivery provider metadata is invalid")
+    with task_lock(root, source.task_id, timeout=0):
+        task = load_task(task_root)
+        _assert_activation_current(task_root, task, source)
+        relative_delivery = delivery_root.relative_to(task_root)
+        activation_dir = delivery_root / "task-record-activation"
+        activated_script = activation_dir / "podcast_script.json"
+        activated_speech = activation_dir / "speech.txt"
+        script = podcast.script.model_dump_json(indent=2)
+        speech = podcast.speech.rstrip() + "\n"
+        _write_activation_text(activated_script, script)
+        _write_activation_text(activated_speech, speech)
+        activated_script_sha256 = hashlib.sha256(
+            activated_script.read_bytes()
+        ).hexdigest()
+        activated_speech_sha256 = hashlib.sha256(
+            activated_speech.read_bytes()
+        ).hexdigest()
+        generation = {
+            **podcast_metadata,
+            "podcast_script_sha256": activated_script_sha256,
+            "speech_sha256": activated_speech_sha256,
+        }
+        _write_activation_projection(activation_dir / "generation.json", generation)
+        audio_projection = {
+            "task_id": source.task_id,
+            "source_fingerprint": source.content_pack.source_fingerprint,
+            "podcast_script_sha256": activated_script_sha256,
+            "speech_sha256": activated_speech_sha256,
+            "published_path": published_path,
+            "mp3_sha256": expected["mp3_sha256"],
+        }
+        _write_activation_projection(
+            delivery_root / "tts" / "audio.json", audio_projection
+        )
+        podcast_artifacts = [
+            (relative_delivery / "task-record-activation" / filename).as_posix()
+            for filename in ("generation.json", "podcast_script.json", "speech.txt")
+        ]
+        tts_artifacts = [
+            (relative_delivery / "tts" / filename).as_posix()
+            for filename in ("audio.json", "audio.wav")
+        ]
+        artifacts = {
+            **{
+                stage: paths
+                for stage, paths in task.artifacts.items()
+                if stage not in {"podcast_script", "tts"}
+            },
+            "podcast_script": podcast_artifacts,
+            "tts": tts_artifacts,
+        }
+        updated = task.model_copy(
+            update={
+                "stages": {
+                    **task.stages,
+                    "podcast_script": StageStatus.COMPLETED,
+                    "tts": StageStatus.COMPLETED,
+                },
+                "artifacts": artifacts,
+                "providers": {
+                    **task.providers,
+                    "podcast_script": str(podcast_metadata["provider"]),
+                    "tts": str(metadata["provider"]),
+                },
+                "models": {
+                    **task.models,
+                    "podcast_script": str(podcast_metadata["model"]),
+                    "tts": str(metadata["model"]),
+                },
+                "error_summary": None,
+            }
+        )
+        write_task_atomic(task_root, updated)
+
+
+def _assert_activation_current(
+    task_dir: Path, task: TaskRecord, source: ReviewedMarkdownSource
+) -> None:
+    if task.task_id != source.task_id:
+        raise ValueError("automation task identity changed before audio activation")
+    pack_paths = [
+        task_dir / path
+        for path in task.artifacts.get("content_pack", [])
+        if Path(path).name == "content_pack.json"
+    ]
+    if len(pack_paths) != 1:
+        raise ValueError("automation content pack is missing or ambiguous")
+    try:
+        pack_bytes = pack_paths[0].read_bytes()
+        pack = ContentPack.model_validate_json(pack_bytes)
+        note = load_active_standard_note(task_dir)
+    except (OSError, UnicodeError, ValueError) as error:
+        raise ValueError(
+            "automation task facts changed before audio activation"
+        ) from error
+    if (
+        not pack_paths[0].resolve().is_relative_to(task_dir)
+        or pack.task_id != source.task_id
+        or pack.source_fingerprint != source.content_pack.source_fingerprint
+        or hashlib.sha256(pack_bytes).hexdigest() != source.content_pack_sha256
+        or note.metadata.route != "assisted_draft"
+        or note.metadata.status != "model_reviewed"
+        or hashlib.sha256(note.body_bytes).hexdigest() != source.markdown_sha256
+    ):
+        raise ValueError("automation task facts changed before audio activation")
+
+
+def _write_activation_projection(path: Path, payload: object) -> None:
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    if path.exists() and path.read_bytes() != encoded:
+        raise ValueError("automated delivery activation projection conflicts")
+    if not path.exists():
+        atomic_replace_bytes(path, encoded)
+
+
+def _write_activation_text(path: Path, value: str) -> None:
+    encoded = value.encode("utf-8")
+    if path.exists() and path.read_bytes() != encoded:
+        raise ValueError("automated delivery activation projection conflicts")
+    if not path.exists():
+        atomic_replace_bytes(path, encoded)
 
 
 def _run_assisted_role(

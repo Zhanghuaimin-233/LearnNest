@@ -115,6 +115,7 @@ def _configure(root: Path, *, budget: int = 80, retries: int = 3) -> str:
             schedule_id="douyin-favorites",
             writer=snapshot,
             reviewer=snapshot,
+            default_output="complete_note",
             retries_per_stage=retries,
             budget=AutomationBudget(provider_calls_per_day=budget),
         ),
@@ -583,26 +584,10 @@ def test_local_failure_queue_counts_opportunities_per_stage(tmp_path: Path) -> N
     )
 
 
-def test_paid_retryable_stage_uses_four_due_opportunities(
-    monkeypatch, tmp_path: Path
-) -> None:
-    import learnnest.automation_runner as automation_runner
-
+def test_paid_retryable_stage_uses_four_due_opportunities(tmp_path: Path) -> None:
     root = _root(tmp_path)
     _configure(root)
     provider = _WriterReviewer(failures=3)
-    monkeypatch.setattr(
-        automation_runner,
-        "generate_model_reviewed_podcast",
-        lambda source, provider, *, delivery_dir: object(),
-    )
-    monkeypatch.setattr(
-        automation_runner,
-        "generate_model_reviewed_tts",
-        lambda source, podcast, provider, *, output_root, delivery_dir, style_instruction: (
-            output_root / "audio.mp3"
-        ),
-    )
     results = []
     for minutes in (0, 1, 6, 36):
         results.append(

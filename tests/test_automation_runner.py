@@ -1,4 +1,8 @@
 from datetime import UTC, datetime
+import json
+import wave
+from contextlib import contextmanager
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -20,7 +24,12 @@ from learnnest.models import (
     TaskRecord,
 )
 from learnnest.provider_profiles import load_settings, settings_sha256
-from learnnest.task_store import write_task_atomic
+from learnnest.standard_note_publication import (
+    load_active_standard_note,
+    write_standard_note_bundle,
+)
+from learnnest.task_store import load_task, write_task_atomic
+from learnnest.validation import validate_task
 
 
 class FakeAssistedProvider:
@@ -50,6 +59,63 @@ class UnusedProvider:
     name = "fake"
     model = "fake"
     voice = "fake"
+
+
+class FakePodcastProvider:
+    name = "fake-podcast"
+    model = "fake-podcast-1"
+    endpoint_identity = "https://example.test/podcast"
+
+    def generate(self, context: str, _images: tuple[object, ...]) -> str:
+        payload = json.loads(context)
+        pack = payload["content_pack"]
+        return json.dumps(
+            {
+                "schema_version": "1.0",
+                "task_id": pack["task_id"],
+                "source_fingerprint": pack["source_fingerprint"],
+                "note_content_sha256": payload["note_content_sha256"],
+                "title": "自动化音频",
+                "segments": [
+                    {
+                        "order": 1,
+                        "kind": "intro",
+                        "text": "欢迎收听自动化音频",
+                        "evidence_ids": ["tr_0001"],
+                    },
+                    {
+                        "order": 2,
+                        "kind": "body",
+                        "text": "这里是已经验证的材料内容",
+                        "evidence_ids": ["tr_0001"],
+                    },
+                    {
+                        "order": 3,
+                        "kind": "outro",
+                        "text": "感谢收听",
+                        "evidence_ids": ["tr_0001"],
+                    },
+                ],
+                "ai_supplements": [],
+            },
+            ensure_ascii=False,
+        )
+
+
+class FakeLocalTtsProvider:
+    name = "fake-local-tts"
+    model = "fake-local-tts-1"
+    voice = "Test"
+    billing = "local"
+
+    def synthesize(self, _speech_text: str, _style_instruction: str) -> bytes:
+        stream = BytesIO()
+        with wave.open(stream, "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(16_000)
+            output.writeframes(b"\0\0" * 1_600)
+        return stream.getvalue()
 
 
 def _root(tmp_path: Path) -> Path:
@@ -166,8 +232,6 @@ def _assert_pre_provider_attention(
 def test_authorized_runner_retries_writer_on_the_next_due_tick_and_preserves_attempt_facts(
     monkeypatch, tmp_path: Path
 ) -> None:
-    import learnnest.automation_runner as runner
-
     root = _root(tmp_path)
     snapshot = _snapshot()
     save_policy(
@@ -176,6 +240,7 @@ def test_authorized_runner_retries_writer_on_the_next_due_tick_and_preserves_att
             schedule_id="douyin-favorites",
             writer=snapshot,
             reviewer=snapshot,
+            default_output="complete_note",
             paid_retry_limit=1,
             budget=AutomationBudget(
                 writer_per_day=2, reviewer_per_day=1, podcast_per_day=1, tts_per_day=1
@@ -185,19 +250,6 @@ def test_authorized_runner_retries_writer_on_the_next_due_tick_and_preserves_att
     authorize(root, now=datetime(2026, 7, 28, tzinfo=UTC))
     writer = FakeAssistedProvider(fail_first_writer=True)
     reviewer = FakeAssistedProvider()
-
-    monkeypatch.setattr(
-        runner,
-        "generate_model_reviewed_podcast",
-        lambda source, provider, *, delivery_dir: object(),
-    )
-    monkeypatch.setattr(
-        runner,
-        "generate_model_reviewed_tts",
-        lambda source, podcast, provider, *, output_root, delivery_dir, style_instruction: (
-            root / "audio.mp3"
-        ),
-    )
 
     first = run_automation_tasks(
         root,
@@ -235,9 +287,209 @@ def test_authorized_runner_retries_writer_on_the_next_due_tick_and_preserves_att
         ("writer", 1, "failed"),
         ("writer", 2, "completed"),
         ("reviewer", 1, "completed"),
-        ("podcast", 1, "completed"),
-        ("tts", 1, "completed"),
     ]
+
+
+def test_audio_success_activates_validated_delivery_in_task_record(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import learnnest.automation_delivery as delivery
+    import learnnest.validation as validation
+
+    root = _root(tmp_path)
+    snapshot = _snapshot()
+    save_policy(
+        root,
+        AutomationPolicy(
+            schedule_id="audio",
+            writer=snapshot,
+            reviewer=snapshot,
+            default_output="complete_note_with_audio",
+        ),
+    )
+    authorize(root, now=datetime(2026, 7, 28, tzinfo=UTC))
+    monkeypatch.setattr(
+        delivery,
+        "probe_audio",
+        lambda _path: {
+            "streams": [{"codec_type": "audio", "codec_name": "mp3"}],
+            "format": {"duration": "1.0"},
+        },
+    )
+    monkeypatch.setattr(
+        validation,
+        "probe_audio",
+        lambda _path: {
+            "streams": [{"codec_type": "audio", "codec_name": "mp3"}],
+            "format": {"duration": "1.0"},
+        },
+    )
+    monkeypatch.setattr(
+        delivery,
+        "convert_wav_to_mp3",
+        lambda _source, destination: destination.write_bytes(b"fake-mp3"),
+    )
+    writer = FakeAssistedProvider()
+    result = run_automation_tasks(
+        root,
+        ["20260728-automation"],
+        AutomationProviders(
+            writer=writer,
+            reviewer=writer,
+            podcast=FakePodcastProvider(),
+            tts=FakeLocalTtsProvider(),
+        ),
+        now=datetime(2026, 7, 28, tzinfo=UTC),
+    )
+
+    task_dir = root / "视频学习素材" / "automation-task"
+    task = load_task(task_dir)
+    status = load_status(root)
+    assert status is not None
+    state = load_task_state(root, "20260728-automation", status.policy_sha256)
+    assert result.completed_task_ids == ("20260728-automation",)
+    assert state is not None and state.status == "completed", state
+    assert task.stages["podcast_script"] is StageStatus.COMPLETED
+    assert task.stages["tts"] is StageStatus.COMPLETED
+    assert {Path(item).name for item in task.artifacts["podcast_script"]} == {
+        "generation.json",
+        "podcast_script.json",
+        "speech.txt",
+    }
+    assert {Path(item).name for item in task.artifacts["tts"]} == {
+        "audio.json",
+        "audio.wav",
+    }
+    validation_errors = validate_task(task_dir)
+    assert validation_errors == [], validation_errors
+
+
+def test_audio_activation_rejects_a_non_podcast_artifact_result(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import learnnest.automation_runner as automation_runner
+
+    root = _root(tmp_path)
+    snapshot = _snapshot()
+    save_policy(
+        root,
+        AutomationPolicy(
+            schedule_id="audio",
+            writer=snapshot,
+            reviewer=snapshot,
+            default_output="complete_note_with_audio",
+        ),
+    )
+    authorize(root, now=datetime(2026, 7, 28, tzinfo=UTC))
+    monkeypatch.setattr(
+        automation_runner,
+        "generate_model_reviewed_podcast",
+        lambda _source, _provider, *, delivery_dir: object(),
+    )
+
+    result = run_automation_tasks(
+        root,
+        ["20260728-automation"],
+        AutomationProviders(
+            writer=FakeAssistedProvider(),
+            reviewer=FakeAssistedProvider(),
+            podcast=FakePodcastProvider(),
+            tts=FakeLocalTtsProvider(),
+        ),
+        now=datetime(2026, 7, 28, tzinfo=UTC),
+    )
+
+    task_dir = root / "视频学习素材" / "automation-task"
+    task = load_task(task_dir)
+    status = load_status(root)
+    assert status is not None
+    state = load_task_state(root, "20260728-automation", status.policy_sha256)
+    assert result.failed_task_ids == ("20260728-automation",)
+    assert state is not None
+    assert state.status == "needs_attention"
+    assert state.blocked_reason == "non_retryable_failure"
+    assert [attempt.stage for attempt in state.attempts] == [
+        "writer",
+        "reviewer",
+        "podcast",
+    ]
+    assert task.stages.get("podcast_script") is not StageStatus.COMPLETED
+    assert task.stages.get("tts") is not StageStatus.COMPLETED
+
+
+def test_audio_activation_rejects_a_standard_note_replaced_while_waiting_for_lock(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import learnnest.automation_delivery as delivery
+    import learnnest.automation_runner as automation_runner
+
+    root = _root(tmp_path)
+    snapshot = _snapshot()
+    save_policy(
+        root,
+        AutomationPolicy(
+            schedule_id="audio",
+            writer=snapshot,
+            reviewer=snapshot,
+            default_output="complete_note_with_audio",
+        ),
+    )
+    authorize(root, now=datetime(2026, 7, 28, tzinfo=UTC))
+    monkeypatch.setattr(
+        delivery,
+        "probe_audio",
+        lambda _path: {
+            "streams": [{"codec_type": "audio", "codec_name": "mp3"}],
+            "format": {"duration": "1.0"},
+        },
+    )
+    monkeypatch.setattr(
+        delivery,
+        "convert_wav_to_mp3",
+        lambda _source, destination: destination.write_bytes(b"fake-mp3"),
+    )
+    real_task_lock = automation_runner.task_lock
+
+    @contextmanager
+    def replace_active_note_at_lock(output_root: Path, task_id: str, *, timeout: float):
+        with real_task_lock(output_root, task_id, timeout=timeout):
+            task_dir = root / "视频学习素材" / "automation-task"
+            task = load_task(task_dir)
+            active = load_active_standard_note(task_dir)
+            write_standard_note_bundle(
+                task_dir,
+                active.bundle_dir,
+                task,
+                "# 并发更新的笔记\n",
+                route="assisted_draft",
+                status="model_reviewed",
+            )
+            yield
+
+    monkeypatch.setattr(automation_runner, "task_lock", replace_active_note_at_lock)
+    result = run_automation_tasks(
+        root,
+        ["20260728-automation"],
+        AutomationProviders(
+            writer=FakeAssistedProvider(),
+            reviewer=FakeAssistedProvider(),
+            podcast=FakePodcastProvider(),
+            tts=FakeLocalTtsProvider(),
+        ),
+        now=datetime(2026, 7, 28, tzinfo=UTC),
+    )
+
+    task_dir = root / "视频学习素材" / "automation-task"
+    task = load_task(task_dir)
+    status = load_status(root)
+    assert status is not None
+    state = load_task_state(root, "20260728-automation", status.policy_sha256)
+    assert result.failed_task_ids == ("20260728-automation",)
+    assert state is not None and state.status == "needs_attention"
+    assert state.blocked_reason == "non_retryable_failure"
+    assert task.stages.get("podcast_script") is not StageStatus.COMPLETED
+    assert task.stages.get("tts") is not StageStatus.COMPLETED
+    assert not list(task_dir.glob("automated-delivery/*/task-record-activation"))
 
 
 def test_runner_rejects_disabled_policy_before_provider_calls(tmp_path: Path) -> None:

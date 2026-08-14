@@ -452,7 +452,7 @@ class WebService:
                     ),
                 ),
             )
-        except ValueError as error:
+        except (KeyError, ValueError) as error:
             raise ValueError("自动处理设置无法保存。") from error
         self.wake_automation()
         return self.automation_status()
@@ -680,10 +680,11 @@ def create_web_app(
     *,
     douyin_login: DouyinLoginSessionManager | None = None,
     douyin_favorites: DouyinFavoritesStore | None = None,
+    coordinator: AutomationCoordinator | None = None,
 ) -> FastAPI:
     """Create the loopback WebUI application without starting a server."""
     workspace = LearningWorkspace(output_root)
-    coordinator = AutomationCoordinator(output_root)
+    coordinator = coordinator or AutomationCoordinator(output_root)
     service = WebService(
         output_root,
         douyin_login=douyin_login,

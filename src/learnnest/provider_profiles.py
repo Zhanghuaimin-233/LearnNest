@@ -525,11 +525,13 @@ def profile_for_connection(
     return None
 
 
-def set_role_binding(
-    output_root: str | Path, *, role: ProviderRole, connection_name: str
+def _validated_role_binding_candidate(
+    settings: ProviderSettings, *, role: ProviderRole, connection_name: str
 ) -> ProviderSettings:
-    settings = load_settings(output_root)
-    connection = get_connection(output_root, connection_name)
+    try:
+        connection = settings.connections[connection_name]
+    except KeyError as error:
+        raise ValueError("provider connection is not configured") from error
     if connection.capability != _ROLE_CAPABILITIES[role]:
         raise ValueError("provider role capability does not match connection")
     candidate = settings.model_copy(
@@ -541,9 +543,31 @@ def set_role_binding(
         }
     )
     try:
-        validated = ProviderSettings.model_validate(candidate.model_dump(mode="python"))
+        return ProviderSettings.model_validate(candidate.model_dump(mode="python"))
     except ValidationError as error:
         raise ValueError("provider role binding is incompatible") from error
+
+
+def role_binding_is_compatible(
+    settings: ProviderSettings, *, role: ProviderRole, connection_name: str
+) -> bool:
+    """Whether one visible role candidate passes the authoritative binding rules."""
+    try:
+        _validated_role_binding_candidate(
+            settings, role=role, connection_name=connection_name
+        )
+    except ValueError:
+        return False
+    return True
+
+
+def set_role_binding(
+    output_root: str | Path, *, role: ProviderRole, connection_name: str
+) -> ProviderSettings:
+    settings = load_settings(output_root)
+    validated = _validated_role_binding_candidate(
+        settings, role=role, connection_name=connection_name
+    )
     save_settings(output_root, validated)
     return validated
 

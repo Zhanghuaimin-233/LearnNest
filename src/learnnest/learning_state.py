@@ -13,6 +13,7 @@ from learnnest.automation_store import find_intake, load_status, load_task_state
 from learnnest.provider_profiles import (
     freeze_role_bindings,
     load_settings,
+    role_binding_is_compatible,
     settings_sha256,
 )
 from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
@@ -31,6 +32,12 @@ _ROLE_CAPABILITIES = {
     "note_reviewer": "llm",
     "podcast": "llm",
     "tts": "tts",
+}
+_ROLE_SETUP_HINTS = {
+    "note_writer": "请先添加可用的 MiMo/DeepSeek 连接。",
+    "note_reviewer": "请先添加可用的 MiMo/DeepSeek 连接。",
+    "podcast": "播客需要单独的 MiMo/DeepSeek 连接，不能复用笔记连接。",
+    "tts": "请先添加可用的 Windows 系统语音或 MiMo TTS 连接。",
 }
 _OUTPUT_LABELS = {
     "complete_note": "完整笔记",
@@ -196,6 +203,9 @@ def public_setup_readiness(
                 settings.connections.values(), key=lambda item: item.name
             )
             if item.capability == _ROLE_CAPABILITIES[role]
+            and role_binding_is_compatible(
+                settings, role=role, connection_name=item.name
+            )
         ]
         roles.append(
             {
@@ -205,6 +215,11 @@ def public_setup_readiness(
                     connection_state if connection is not None else "尚未绑定连接"
                 ),
                 "options": options,
+                "hint": (
+                    _ROLE_SETUP_HINTS[role]
+                    if connection is None and not options
+                    else None
+                ),
             }
         )
     configured = all(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 from learnnest.execution_models import SourceIdentities
@@ -16,6 +17,19 @@ from learnnest.models import (
     TaskRecord,
 )
 from learnnest.note_types import ConcreteNoteType
+
+
+_WINDOWS_REPLACE_RETRY_DELAYS = (0.02, 0.05, 0.1)
+_IS_WINDOWS = os.name == "nt"
+
+
+def _is_windows_replace_conflict(error: OSError) -> bool:
+    if not _IS_WINDOWS:
+        return False
+    error_code = getattr(error, "winerror", None)
+    if error_code is None:
+        error_code = error.errno
+    return error_code in {5, 32}
 
 
 def create_task(
@@ -68,7 +82,14 @@ def write_task_atomic(task_dir: str | Path, task: TaskRecord) -> Path:
             temporary.write(f"{serialized}\n")
             temporary.flush()
             os.fsync(temporary.fileno())
-        os.replace(temporary_path, destination)
+        for delay in (*_WINDOWS_REPLACE_RETRY_DELAYS, None):
+            try:
+                os.replace(temporary_path, destination)
+                break
+            except OSError as error:
+                if delay is None or not _is_windows_replace_conflict(error):
+                    raise
+                time.sleep(delay)
     except Exception:
         if temporary_path is not None:
             try:

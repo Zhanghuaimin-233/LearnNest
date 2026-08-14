@@ -99,6 +99,118 @@ def test_task_store_cleans_up_temporary_file_when_replacement_fails(
     assert list(tmp_path.glob("*.tmp")) == []
 
 
+@pytest.mark.parametrize("winerror", [5, 32])
+def test_task_store_retries_transient_windows_replacement_conflicts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, winerror: int
+) -> None:
+    task = create_task(
+        task_id="20260711-a1b2c3d4",
+        source_path="C:/videos/lesson.mp4",
+        source_fingerprint="a1b2c3d4",
+        title="retried",
+    )
+    calls = 0
+    real_replace = task_store.os.replace
+
+    def flaky_replace(source: Path, destination: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise PermissionError(winerror, "sharing violation", str(destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(task_store.os, "replace", flaky_replace)
+    monkeypatch.setattr(task_store.time, "sleep", lambda _delay: None)
+
+    assert write_task_atomic(tmp_path, task) == tmp_path / "task.json"
+    assert calls == 3
+    assert load_task(tmp_path) == task
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("winerror", [5, 32])
+def test_task_store_keeps_the_previous_fact_when_windows_conflict_exhausts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, winerror: int
+) -> None:
+    old_task = create_task(
+        task_id="20260711-a1b2c3d4",
+        source_path="C:/videos/lesson.mp4",
+        source_fingerprint="a1b2c3d4",
+        title="old",
+    )
+    new_task = old_task.model_copy(update={"title": "new"})
+    write_task_atomic(tmp_path, old_task)
+    calls = 0
+
+    def always_conflicted(_source: Path, destination: Path) -> None:
+        nonlocal calls
+        calls += 1
+        raise PermissionError(winerror, "sharing violation", str(destination))
+
+    monkeypatch.setattr(task_store.os, "replace", always_conflicted)
+    monkeypatch.setattr(task_store.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(PermissionError):
+        write_task_atomic(tmp_path, new_task)
+
+    assert calls == len(task_store._WINDOWS_REPLACE_RETRY_DELAYS) + 1
+    assert load_task(tmp_path) == old_task
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_task_store_does_not_retry_a_non_windows_replacement_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = create_task(
+        task_id="20260711-a1b2c3d4",
+        source_path="C:/videos/lesson.mp4",
+        source_fingerprint="a1b2c3d4",
+        title="no retry",
+    )
+    calls = 0
+
+    def fail_replace(_source: Path, destination: Path) -> None:
+        nonlocal calls
+        calls += 1
+        raise OSError(22, "invalid argument", str(destination))
+
+    monkeypatch.setattr(task_store.os, "replace", fail_replace)
+    monkeypatch.setattr(task_store.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(OSError):
+        write_task_atomic(tmp_path, task)
+
+    assert calls == 1
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_task_store_does_not_retry_errno_5_outside_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = create_task(
+        task_id="20260711-a1b2c3d4",
+        source_path="C:/videos/lesson.mp4",
+        source_fingerprint="a1b2c3d4",
+        title="non-windows error",
+    )
+    calls = 0
+
+    def fail_replace(_source: Path, destination: Path) -> None:
+        nonlocal calls
+        calls += 1
+        raise OSError(5, "input/output error", str(destination))
+
+    monkeypatch.setattr(task_store, "_IS_WINDOWS", False)
+    monkeypatch.setattr(task_store.os, "replace", fail_replace)
+    monkeypatch.setattr(task_store.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(OSError):
+        write_task_atomic(tmp_path, task)
+
+    assert calls == 1
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
 def test_task_store_revalidates_model_copy_before_persisting(tmp_path: Path) -> None:
     task = create_task(
         task_id="20260712-a1b2c3d4",

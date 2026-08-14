@@ -274,6 +274,64 @@ def test_snapshot_projects_existing_tasks_and_isolates_corrupt_records(
     )
 
 
+def test_snapshot_builds_revision_and_task_projection_from_one_read(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task = _task(
+        tmp_path,
+        "single-read",
+        stages={"content_pack": StageStatus.COMPLETED},
+        artifacts={"content_pack": ["content_pack.json"]},
+    )
+    import learnnest.learning_workspace as workspace_module
+
+    reads = 0
+    original = Path.read_bytes
+
+    def counted_read_bytes(path: Path) -> bytes:
+        nonlocal reads
+        if path == task_dir / "task.json":
+            reads += 1
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    snapshot = workspace_module.LearningWorkspace(tmp_path).snapshot()
+
+    assert reads == 1
+    assert snapshot.inbox[0].item_ref == task.task_id
+
+
+def test_snapshot_isolates_oserror_while_parsing_one_task(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    broken_dir, _ = _task(
+        tmp_path,
+        "parse-oserror",
+        stages={"content_pack": StageStatus.COMPLETED},
+        artifacts={"content_pack": ["content_pack.json"]},
+    )
+    _, healthy = _task(
+        tmp_path,
+        "healthy-task",
+        stages={"content_pack": StageStatus.COMPLETED},
+        artifacts={"content_pack": ["content_pack.json"]},
+    )
+    original = learning_workspace.parse_task_bytes
+
+    def fail_one_parse(data: bytes, *, base_dir: Path) -> TaskRecord:
+        if base_dir == broken_dir:
+            raise OSError(f"cannot normalize {base_dir.name}")
+        return original(data, base_dir=base_dir)
+
+    monkeypatch.setattr(learning_workspace, "parse_task_bytes", fail_one_parse)
+
+    snapshot = learning_workspace.LearningWorkspace(tmp_path).snapshot()
+
+    assert snapshot.library == ()
+    assert [item.item_ref for item in snapshot.inbox] == [healthy.task_id]
+    assert snapshot.processing == ()
+
+
 @pytest.mark.parametrize(
     ("desired_output", "expected_profile"),
     [("readable_note", "note"), ("materials_only", "evidence")],

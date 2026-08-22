@@ -77,6 +77,7 @@ from learnnest.provider_profiles import (
     public_settings as public_provider_settings,
     profile_for_connection,
     set_role_binding,
+    settings_sha256,
 )
 from learnnest.provider_service import (
     AdmittedAssistedProvider,
@@ -583,11 +584,16 @@ def automation_configure(
             schedule = load_schedule(schedule_path(root, schedule_id))
             if schedule.source.kind != "douyin":
                 raise ValueError("automation monitor must be a Douyin schedule")
-        writer = _assisted_connection_snapshot(get_connection(root, writer_connection))
-        reviewer = _assisted_connection_snapshot(
-            get_connection(root, reviewer_connection or writer_connection)
-        )
         settings = load_settings(root)
+        current_settings_sha256 = settings_sha256(settings)
+        writer = _assisted_connection_snapshot(
+            get_connection(root, writer_connection),
+            settings_sha256=current_settings_sha256,
+        )
+        reviewer = _assisted_connection_snapshot(
+            get_connection(root, reviewer_connection or writer_connection),
+            settings_sha256=current_settings_sha256,
+        )
         policy = AutomationPolicy(
             schedule_id=schedule_id,
             writer=writer,
@@ -2454,6 +2460,8 @@ def _safe_error(error: Exception, secret: SecretStr | None) -> str:
 
 def _assisted_connection_snapshot(
     connection: ProviderConnection,
+    *,
+    settings_sha256: str,
 ) -> AssistedConnectionSnapshot:
     if connection.api_family != "openai_chat":
         raise ValueError(
@@ -2467,6 +2475,7 @@ def _assisted_connection_snapshot(
         endpoint_identity=connection.endpoint.strip().rstrip("/").lower(),
         model=connection.model,
         adapter_revision=connection.adapter_revision,
+        settings_sha256=settings_sha256,
     )
 
 

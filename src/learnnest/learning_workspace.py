@@ -13,6 +13,9 @@ from urllib.parse import urlsplit
 from learnnest.execution import plan_recovery
 from learnnest.automation_store import find_intake
 from learnnest.learning_state import (
+    automation_budget_blocked,
+    automation_budget_restart_is_due,
+    automation_restart_is_safe,
     automation_readiness,
     automation_retry_is_due,
     automation_task_state,
@@ -30,6 +33,7 @@ LearningActionKind = Literal[
     "open_note",
     "open_settings",
     "open_automation",
+    "open_single_video",
     "continue",
     "start_automation",
     "retry_automation",
@@ -351,32 +355,120 @@ class LearningWorkspace:
                 task.title,
                 _safe_source_label(task),
                 "needs_action",
-                "需要你处理；已保留完成的内容。",
-                None,
-                None,
+                "任务状态无法安全读取。请重新选择原视频处理。",
+                "重新选择原视频",
+                "open_single_video",
+            )
+        if automation_budget_blocked(self.output_root, task.task_id):
+            readiness = (
+                automation_readiness(self.output_root, intake)
+                if intake is not None
+                else "waiting_setup"
+            )
+            if readiness == "waiting_setup":
+                return LearningItem(
+                    task.task_id,
+                    task.title,
+                    _safe_source_label(task),
+                    "needs_action",
+                    "模型设置已经变化；请恢复原连接后再继续。",
+                    "检查模型设置",
+                    "open_settings",
+                )
+            if readiness == "waiting_authorization":
+                return LearningItem(
+                    task.task_id,
+                    task.title,
+                    _safe_source_label(task),
+                    "waiting_authorization",
+                    "调用额度已调整；重新授权后即可继续。",
+                    "重新授权",
+                    "open_automation",
+                )
+            if automation_budget_restart_is_due(self.output_root, task.task_id):
+                note_only = (
+                    intake is not None and intake.default_output == "complete_note"
+                )
+                return LearningItem(
+                    task.task_id,
+                    task.title,
+                    _safe_source_label(task),
+                    "needs_action",
+                    (
+                        "新的调用额度已经可用，可以继续生成笔记。"
+                        if note_only
+                        else "新的调用额度已经可用，可以继续生成笔记和音频。"
+                    ),
+                    "继续生成笔记" if note_only else "继续完整生产",
+                    "start_automation",
+                )
+            return LearningItem(
+                task.task_id,
+                task.title,
+                _safe_source_label(task),
+                "needs_action",
+                "今日模型调用额度已用完；材料已经保存。",
+                "调整调用额度",
+                "open_settings",
             )
         execution_state = automation_task_state(self.output_root, task.task_id)
         if execution_state in {"invalid", "needs_attention", "completed"}:
             retryable = automation_retry_is_due(self.output_root, task.task_id)
+            if retryable:
+                return LearningItem(
+                    task.task_id,
+                    task.title,
+                    _safe_source_label(task),
+                    "needs_action",
+                    "上次整理遇到临时问题，现在可以安全重试。",
+                    "重试整理",
+                    "retry_automation",
+                )
             return LearningItem(
                 task.task_id,
                 task.title,
                 _safe_source_label(task),
                 "needs_action",
-                "需要你处理；已保留完成的内容。",
-                "重试整理" if retryable else None,
-                "retry_automation" if retryable else None,
+                (
+                    "整理已经结束，但没有可打开的标准笔记。请重新选择原视频处理。"
+                    if execution_state == "completed"
+                    else "任务状态无法安全读取。请重新选择原视频处理。"
+                    if execution_state == "invalid"
+                    else "上次整理已停止，不能安全重试。请重新选择原视频处理。"
+                ),
+                "重新选择原视频",
+                "open_single_video",
             )
         if intake is not None and intake.status == "needs_attention":
-            retryable = automation_retry_is_due(self.output_root, task.task_id)
+            if automation_retry_is_due(self.output_root, task.task_id):
+                return LearningItem(
+                    task.task_id,
+                    task.title,
+                    _safe_source_label(task),
+                    "needs_action",
+                    "上次整理遇到临时问题，现在可以安全重试。",
+                    "重试整理",
+                    "retry_automation",
+                )
+            if automation_restart_is_safe(self.output_root, task.task_id):
+                return LearningItem(
+                    task.task_id,
+                    task.title,
+                    _safe_source_label(task),
+                    "needs_action",
+                    "上次整理没有真正开始。当前设置已就绪，可以重新开始整理。",
+                    "重新开始整理",
+                    "start_automation",
+                )
             return LearningItem(
                 task.task_id,
                 task.title,
                 _safe_source_label(task),
                 "needs_action",
-                "需要你处理；已保留完成的内容。",
-                "重试整理" if retryable else None,
-                "retry_automation" if retryable else None,
+                "这项旧任务缺少可打开的标准笔记，不能在原任务上安全继续。"
+                "请重新选择原视频处理。",
+                "重新选择原视频",
+                "open_single_video",
             )
         if intake is not None and intake.status == "claimed":
             return LearningItem(

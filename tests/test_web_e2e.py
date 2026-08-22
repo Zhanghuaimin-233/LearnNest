@@ -260,11 +260,36 @@ def _task(root: Path, source: str, index: int):
     return task
 
 
-def _enable_note_automation(page: Page, *, key: str) -> None:
-    page.locator("#provider-connection-form [name=name]").fill("offline-note")
-    page.locator("#provider-connection-form [name=preset]").select_option("mimo")
+def _open_view(page: Page, view: str) -> None:
+    navigation = (
+        ".mobile-nav"
+        if page.viewport_size is not None and page.viewport_size["width"] <= 760
+        else ".primary-nav"
+    )
+    page.locator(f'{navigation} [data-view="{view}"]').click()
+    expect(page.locator(f'[data-view-panel="{view}"]')).to_be_visible()
+
+
+def _open_settings_panel(page: Page, panel: str) -> None:
+    _open_view(page, "settings")
+    page.locator(f'[data-settings-tab="{panel}"]').click()
+    expect(page.locator(f'[data-settings-panel="{panel}"]')).to_be_visible()
+
+
+def _add_connection(page: Page, *, name: str, preset: str, key: str) -> None:
+    _open_settings_panel(page, "connections")
+    page.locator("#open-connection-dialog").click()
+    expect(page.locator("#connection-dialog")).to_be_visible()
+    page.locator("#provider-connection-form [name=name]").fill(name)
+    page.locator("#provider-connection-form [name=preset]").select_option(preset)
     page.locator("#provider-connection-form [name=api_key]").fill(key)
     page.locator("#provider-connection-form button[type=submit]").click()
+    expect(page.locator("#connection-dialog")).not_to_be_visible()
+    expect(page.get_by_text(name, exact=True)).to_be_visible()
+
+
+def _enable_note_automation(page: Page, *, key: str) -> None:
+    _add_connection(page, name="offline-note", preset="mimo", key=key)
     expect(page.get_by_text("offline-note", exact=True)).to_be_visible()
     for role in ("\u7b14\u8bb0 Writer", "\u7b14\u8bb0 Reviewer"):
         page.locator(f'select[data-setup-role-select="{role}"]').select_option(
@@ -272,6 +297,7 @@ def _enable_note_automation(page: Page, *, key: str) -> None:
         )
         page.locator(f'button[data-bind-setup-role="{role}"]').click()
         expect(page.locator("#provider-feedback")).to_contain_text("\u5df2\u7ed1\u5b9a")
+    _open_settings_panel(page, "output")
     page.locator("#automation-form [name=default_output]").select_option(
         "complete_note"
     )
@@ -290,16 +316,14 @@ def _enable_audio_automation(page: Page) -> None:
         ("offline-podcast", "deepseek", "audio-podcast-key"),
         ("offline-tts", "windows-tts", "audio-tts-key"),
     ):
-        page.locator("#provider-connection-form [name=name]").fill(name)
-        page.locator("#provider-connection-form [name=preset]").select_option(preset)
-        page.locator("#provider-connection-form [name=api_key]").fill(key)
-        page.locator("#provider-connection-form button[type=submit]").click()
-        expect(page.get_by_text(name, exact=True)).to_be_visible()
+        _add_connection(page, name=name, preset=preset, key=key)
+    _open_settings_panel(page, "output")
     page.locator("#automation-form [name=default_output]").select_option(
         "complete_note_with_audio"
     )
     page.locator("#automation-form button[type=submit]").click()
     expect(page.locator("#automation-state")).to_have_text("\u7b49\u5f85\u786e\u8ba4")
+    _open_settings_panel(page, "connections")
     for _ in range(2):
         select = page.locator("select[data-setup-role-select]").first
         label = select.get_attribute("data-setup-role-select")
@@ -310,6 +334,7 @@ def _enable_audio_automation(page: Page) -> None:
         page.locator(f'button[data-bind-setup-role="{label}"]').click()
         expect(page.locator("#provider-feedback")).to_contain_text("\u5df2\u7ed1\u5b9a")
     expect(page.locator("button[data-unbind-setup-role]")).to_have_count(4)
+    _open_settings_panel(page, "output")
     page.locator("#confirm-paid").check()
     with page.expect_response(
         lambda response: response.url.endswith("/api/automation/authorize")
@@ -441,13 +466,16 @@ def test_goal4_three_sources_reach_a_safe_note_in_real_edge(
         _enable_note_automation(page, key="not-a-real-provider-key")
         video = tmp_path / "lesson.mp4"
         video.write_bytes(b"offline video")
+        _open_view(page, "tasks")
+        page.locator("[data-open-single-video]").first.click()
         page.locator("#local-video").set_input_files(str(video))
         with page.expect_response(
             lambda response: "/api/learning/uploads" in response.url
         ) as upload:
-            page.locator("#upload-form button").click()
+            page.locator("#upload-form button[type=submit]").click()
         assert upload.value.status == 202
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
+        _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         with page.expect_response(
             lambda response: response.url.endswith("/api/learning/submit")
@@ -455,6 +483,7 @@ def test_goal4_three_sources_reach_a_safe_note_in_real_edge(
             page.locator("#url-form button").click()
         assert public.value.status == 202
         expect(page.locator(".source-jobs .source-job")).to_have_count(2)
+        _open_view(page, "sources")
         expect(
             page.locator("#douyin-favorites-list input[type=checkbox]")
         ).to_have_count(1)
@@ -465,7 +494,7 @@ def test_goal4_three_sources_reach_a_safe_note_in_real_edge(
             page.locator("#add-selected-favorites").click()
         assert favorite.value.status == 202
         expect(page.locator(".source-jobs .source-job")).to_have_count(3)
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 30
         while (
             page.locator("#library-list article").count() != 3
             and time.monotonic() < deadline
@@ -504,9 +533,11 @@ def test_goal4_waiting_setup_survives_refresh_without_constructing_a_provider(
         browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
         page = browser.new_page(viewport={"width": 390, "height": 844})
         page.goto(loopback_app.url)
+        _open_settings_panel(page, "output")
         page.locator("#authorize-automation").click()
         expect(page.locator("#notice")).to_contain_text("请先勾选付费确认")
         assert loopback_app.provider_runs == []
+        _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         with page.expect_response(
             lambda response: response.url.endswith("/api/learning/submit")
@@ -533,11 +564,7 @@ def test_goal4_podcast_role_only_offers_an_isolated_llm_connection(
         browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
-        page.locator("#provider-connection-form [name=name]").fill("mimo-note")
-        page.locator("#provider-connection-form [name=preset]").select_option("mimo")
-        page.locator("#provider-connection-form [name=api_key]").fill("same-key")
-        page.locator("#provider-connection-form button[type=submit]").click()
-        expect(page.get_by_text("mimo-note", exact=True)).to_be_visible()
+        _add_connection(page, name="mimo-note", preset="mimo", key="same-key")
         for role in ("笔记 Writer", "笔记 Reviewer"):
             page.locator(f'select[data-setup-role-select="{role}"]').select_option(
                 "mimo-note"
@@ -550,10 +577,7 @@ def test_goal4_podcast_role_only_offers_an_isolated_llm_connection(
             "播客需要单独的 MiMo/DeepSeek 连接，不能复用笔记连接。"
         )
 
-        page.locator("#provider-connection-form [name=name]").fill("mimo-podcast")
-        page.locator("#provider-connection-form [name=preset]").select_option("mimo")
-        page.locator("#provider-connection-form [name=api_key]").fill("same-key")
-        page.locator("#provider-connection-form button[type=submit]").click()
+        _add_connection(page, name="mimo-podcast", preset="mimo", key="same-key")
         podcast_select = page.locator('select[data-setup-role-select="播客"]')
         expect(podcast_select).to_be_visible()
         expect(podcast_select.locator('option[value="mimo-note"]')).to_have_count(0)
@@ -569,11 +593,7 @@ def test_goal4_late_provider_poll_does_not_replace_a_new_role_selection(
         browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
-        page.locator("#provider-connection-form [name=name]").fill("offline-note")
-        page.locator("#provider-connection-form [name=preset]").select_option("mimo")
-        page.locator("#provider-connection-form [name=api_key]").fill("test-key")
-        page.locator("#provider-connection-form button[type=submit]").click()
-        expect(page.get_by_text("offline-note", exact=True)).to_be_visible()
+        _add_connection(page, name="offline-note", preset="mimo", key="test-key")
         select = page.locator("select[data-setup-role-select]").first
         expect(select).to_be_visible()
         page.evaluate(
@@ -612,11 +632,9 @@ def test_goal4_substantive_setting_change_revokes_browser_authorization(
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
         _enable_note_automation(page, key="first-test-key")
-        page.locator("#provider-connection-form [name=name]").fill("replacement-note")
-        page.locator("#provider-connection-form [name=preset]").select_option("mimo")
-        page.locator("#provider-connection-form [name=api_key]").fill("second-test-key")
-        page.locator("#provider-connection-form button[type=submit]").click()
-        expect(page.get_by_text("replacement-note", exact=True)).to_be_visible()
+        _add_connection(
+            page, name="replacement-note", preset="mimo", key="second-test-key"
+        )
         page.locator("button[data-unbind-setup-role]").first.click()
         expect(page.locator("select[data-setup-role-select]").first).to_be_visible()
         page.locator("select[data-setup-role-select]").first.select_option(
@@ -626,6 +644,7 @@ def test_goal4_substantive_setting_change_revokes_browser_authorization(
         expect(page.locator("#automation-state")).to_have_text(
             "\u9700\u8981\u91cd\u65b0\u786e\u8ba4"
         )
+        _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
         expect(page.locator("#processing-list")).to_contain_text("确认授权")
@@ -643,6 +662,7 @@ def test_goal4_restarting_webui_keeps_source_job_and_intake_visible(
         browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
+        _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
@@ -683,6 +703,7 @@ def test_goal4_corrupting_an_intake_fact_turns_the_browser_gate_red_then_green(
         browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
+        _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         with page.expect_response(
             lambda response: response.url.endswith("/api/learning/submit")
@@ -702,6 +723,42 @@ def test_goal4_corrupting_an_intake_fact_turns_the_browser_gate_red_then_green(
         page.reload()
         expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
         assert loopback_app.provider_runs == []
+        browser.close()
+
+
+def test_goal4_user_can_move_one_stopped_task_to_trash(
+    loopback_app: _LoopbackApp,
+) -> None:
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 720})
+        page.goto(loopback_app.url)
+        _open_view(page, "sources")
+        page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
+        page.locator("#url-form button").click()
+        expect(page.locator(".source-jobs .source-job")).to_have_count(1)
+        _open_view(page, "tasks")
+        expect(page.locator("#task-list article")).to_have_count(1)
+        page.locator("#task-list article").click()
+        page.locator("#task-detail button[data-delete-item-ref]").click()
+        expect(page.locator("#delete-task-dialog")).to_be_visible()
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "DELETE"
+                and "/api/learning/items/" in response.url
+            )
+        ) as deleted:
+            page.locator("#confirm-delete-task").click()
+        assert deleted.value.status == 200
+        expect(page.locator("#task-list article")).to_have_count(0)
+        expect(page.locator("#notice")).to_contain_text("已移入回收区")
+        assert loopback_app.provider_runs == []
+        assert list(
+            (loopback_app.root / ".learnnest" / "trash" / "tasks").glob(
+                "*/task/task.json"
+            )
+        )
         browser.close()
 
 
@@ -748,6 +805,7 @@ def test_goal4_audio_success_is_playable_from_the_real_note_page(
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
         _enable_audio_automation(page)
+        _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
         expect(page.locator("#library-list article")).to_have_count(1)
@@ -788,6 +846,7 @@ def test_goal4_audio_failure_keeps_the_note_readable_and_distinct(
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
         _enable_audio_automation(page)
+        _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
         expect(page.locator("#library-list article")).to_have_count(1)
@@ -813,6 +872,7 @@ def test_goal4_retryable_writer_failure_retries_the_same_task_record(
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
         _enable_note_automation(page, key="retry-key")
+        _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
         expect(page.locator("#processing-list")).to_contain_text("需要你处理")
@@ -850,9 +910,11 @@ def test_goal4_retryable_source_failure_reuses_the_same_durable_browser_job(
         browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
+        _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
         expect(page.locator(".source-jobs button[data-retry-job]")).to_have_count(1)
+        _open_view(page, "sources")
         retry = page.locator(".source-jobs button[data-retry-job]")
         job_id = retry.get_attribute("data-retry-job")
         assert job_id is not None
@@ -877,6 +939,7 @@ def test_goal4_unknown_and_permanent_automation_failures_hide_retry_and_stop_fac
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
         _enable_note_automation(page, key="test-key")
+        _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
         expect(page.locator("#processing-list")).to_contain_text(

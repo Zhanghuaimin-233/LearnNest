@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 import os
 import tempfile
 from pathlib import Path
@@ -227,16 +228,38 @@ def _remove_superseded_root_note_copies(root: Path, task: TaskRecord) -> None:
 
 
 def note_belongs_to_task(path: Path, task_id: str) -> bool:
-    """Accept current and legacy renderer ownership comments without rewriting notes."""
+    """Accept standard bundle metadata and legacy inline ownership comments."""
     try:
-        content = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
+        content = raw.decode("utf-8")
     except (OSError, UnicodeError):
         return False
-    return (
+    if (
         f"<!-- learnnest-task-id: {task_id} -->" in content
         or f"<!-- learnpipe-task-id: {task_id} -->" in content
         or f"- 任务：`{task_id}`" in content
-    )
+    ):
+        return True
+    try:
+        metadata = json.loads(
+            path.with_name("metadata.json").read_text(encoding="utf-8")
+        )
+        body_path = Path(str(metadata["body_path"]))
+        return (
+            metadata["task_id"] == task_id
+            and body_path.parent == Path(".")
+            and body_path.name == path.name
+            and metadata["body_sha256"] == sha256(raw).hexdigest()
+        )
+    except (
+        KeyError,
+        OSError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return False
 
 
 def read_audio_ownership_marker(destination: Path) -> dict[str, object] | None:

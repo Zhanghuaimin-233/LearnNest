@@ -19,8 +19,12 @@ from learnnest.automation_models import (
     AutomationIntake,
     AutomationTaskState,
 )
-from learnnest.automation_coordinator import AutomationCoordinator
-from learnnest.automation_runner import AutomationProviders, run_automation_tasks
+from learnnest.automation_coordinator import AutomationCoordinator, _has_paid_task_trace
+from learnnest.automation_runner import (
+    AutomationProviders,
+    AutomationRunResult,
+    run_automation_tasks,
+)
 from learnnest.automation_store import (
     create_intake,
     load_intake,
@@ -38,6 +42,7 @@ from learnnest.provider_profiles import (
     load_settings,
     set_role_binding,
     settings_sha256,
+    update_limits,
 )
 
 
@@ -408,6 +413,36 @@ def test_web_app_retries_a_durable_source_job_with_the_same_identity(
     assert calls == 2
 
 
+def test_source_job_reuses_an_existing_tasks_frozen_intake(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source = tmp_path / "same-video.mp4"
+    source.write_bytes(b"video")
+    _, task = _task(tmp_path)
+    frozen = AutomationIntake(
+        task_id=task.task_id,
+        source_kind="local_video",
+        default_output="complete_note_with_audio",
+        created_at=datetime.now(UTC),
+        status="needs_attention",
+    )
+    create_intake(tmp_path, frozen)
+    monkeypatch.setattr(web_app, "process_video", lambda *_args, **_kwargs: task)
+    monkeypatch.setattr(
+        web_app.WebService,
+        "default_automation_output",
+        lambda _self: "complete_note",
+    )
+    client = _client(tmp_path)
+
+    submitted = client.post("/api/learning/submit", json={"source": str(source)})
+    completed = _wait_for_job(client, submitted.json()["job_id"])
+
+    assert completed["status"] == "completed"
+    assert completed["task_id"] == task.task_id
+    assert load_intake(tmp_path, task.task_id) == frozen
+
+
 def test_web_app_start_automation_persists_the_intake_without_a_provider_call(
     tmp_path: Path,
 ) -> None:
@@ -429,6 +464,285 @@ def test_web_app_start_automation_persists_the_intake_without_a_provider_call(
     intake = load_intake(tmp_path, task.task_id)
     assert intake.status == "pending"
     assert intake.default_output == "complete_note_with_audio"
+
+
+def test_web_app_restarts_attention_that_never_reached_a_provider(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task = _task(tmp_path)
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "stages": {
+                    "content_pack": StageStatus.COMPLETED,
+                    "note": StageStatus.SKIPPED,
+                    "publish": StageStatus.SKIPPED,
+                    "podcast_script": StageStatus.SKIPPED,
+                    "tts": StageStatus.SKIPPED,
+                },
+                "artifacts": {"content_pack": ["content_pack.json"]},
+            }
+        ),
+    )
+    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    set_role_binding(tmp_path, role="note_writer", connection_name="note")
+    set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
+    service = web_app.WebService(tmp_path)
+    service.configure_automation(
+        web_app.AutomationConfigureRequest(
+            default_output="complete_note",
+            check_interval_seconds=30,
+            max_items_per_tick=1,
+        )
+    )
+    service.authorize_automation(web_app.AutomationAuthorizeRequest(confirm_paid=True))
+    create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=task.task_id,
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime.now(UTC),
+            status="needs_attention",
+        ),
+    )
+    wake_calls: list[str] = []
+    monkeypatch.setattr(
+        web_app.AutomationCoordinator,
+        "wake",
+        lambda _self: wake_calls.append(task.task_id) or True,
+    )
+
+    response = _client(tmp_path).post(
+        f"/api/learning/items/{task.task_id}/start-automation"
+    )
+
+    assert response.status_code == 202
+    assert load_intake(tmp_path, task.task_id).status == "pending"
+    assert wake_calls == [task.task_id]
+
+
+def test_web_app_restarts_with_the_intake_frozen_output_not_the_new_default(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task = _task(tmp_path)
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "stages": {
+                    "content_pack": StageStatus.COMPLETED,
+                    "note": StageStatus.SKIPPED,
+                    "publish": StageStatus.SKIPPED,
+                    "podcast_script": StageStatus.SKIPPED,
+                    "tts": StageStatus.SKIPPED,
+                },
+                "artifacts": {"content_pack": ["content_pack.json"]},
+            }
+        ),
+    )
+    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    set_role_binding(tmp_path, role="note_writer", connection_name="note")
+    set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
+    connect(tmp_path, name="podcast", preset="deepseek", secret_value="fake-key")
+    set_role_binding(tmp_path, role="podcast", connection_name="podcast")
+    connect(tmp_path, name="voice", preset="windows-tts")
+    set_role_binding(tmp_path, role="tts", connection_name="voice")
+    service = web_app.WebService(tmp_path)
+    service.configure_automation(
+        web_app.AutomationConfigureRequest(
+            default_output="complete_note",
+            check_interval_seconds=30,
+            max_items_per_tick=1,
+        )
+    )
+    service.authorize_automation(web_app.AutomationAuthorizeRequest(confirm_paid=True))
+    create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=task.task_id,
+            source_kind="local_video",
+            default_output="complete_note_with_audio",
+            created_at=datetime.now(UTC),
+            status="needs_attention",
+        ),
+    )
+    monkeypatch.setattr(web_app.AutomationCoordinator, "wake", lambda _self: True)
+
+    response = _client(tmp_path).post(
+        f"/api/learning/items/{task.task_id}/start-automation"
+    )
+
+    assert response.status_code == 202
+    restarted = load_intake(tmp_path, task.task_id)
+    assert restarted.status == "pending"
+    assert restarted.default_output == "complete_note_with_audio"
+
+
+def test_learning_api_moves_one_task_to_the_internal_trash(tmp_path: Path) -> None:
+    task_dir, task = _task(tmp_path)
+    other_dir = tmp_path / "视频学习素材" / "other"
+    other = create_task(
+        task_id="20260814-other",
+        source_path="C:/private-media/other.mp4",
+        source_fingerprint="other",
+        title="其他任务",
+    )
+    write_task_atomic(other_dir, other)
+
+    response = _client(tmp_path).delete(f"/api/learning/items/{task.task_id}")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "trashed", "task_id": task.task_id}
+    assert not task_dir.exists()
+    assert other_dir.is_dir()
+    assert list((tmp_path / ".learnnest" / "trash" / "tasks").glob("*/task/task.json"))
+
+
+def test_skipped_provider_stages_are_not_a_paid_execution_trace(tmp_path: Path) -> None:
+    _task_dir, task = _task(tmp_path)
+    task = task.model_copy(
+        update={
+            "stages": {
+                "content_pack": StageStatus.COMPLETED,
+                "note": StageStatus.SKIPPED,
+                "publish": StageStatus.SKIPPED,
+                "podcast_script": StageStatus.SKIPPED,
+                "tts": StageStatus.SKIPPED,
+            }
+        }
+    )
+
+    assert _has_paid_task_trace(task) is False
+
+
+def test_web_app_explains_and_resumes_a_zero_call_budget_block(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    set_role_binding(tmp_path, role="note_writer", connection_name="note")
+    set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
+    update_limits(
+        tmp_path,
+        retries_per_role=0,
+        global_calls_per_day=0,
+        budget_group_calls_per_day={
+            "note": 0,
+            "podcast": 0,
+            "tts": 0,
+            "asr": 1,
+            "ocr": 1,
+        },
+    )
+    service = web_app.WebService(tmp_path)
+    service.configure_automation(
+        web_app.AutomationConfigureRequest(
+            default_output="complete_note",
+            check_interval_seconds=30,
+            max_items_per_tick=1,
+        )
+    )
+    service.authorize_automation(web_app.AutomationAuthorizeRequest(confirm_paid=True))
+    old_status = load_status(tmp_path)
+    assert old_status is not None
+    task_dir, task = _task(tmp_path)
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "stages": {
+                    "content_pack": StageStatus.COMPLETED,
+                    "note": StageStatus.SKIPPED,
+                    "publish": StageStatus.SKIPPED,
+                    "podcast_script": StageStatus.SKIPPED,
+                    "tts": StageStatus.SKIPPED,
+                },
+                "artifacts": {"content_pack": ["content_pack.json"]},
+                "provider_bindings": freeze_role_bindings(tmp_path),
+                "provider_settings_sha256": settings_sha256(load_settings(tmp_path)),
+            }
+        ),
+    )
+    create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=task.task_id,
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime.now(UTC),
+            status="needs_attention",
+        ),
+    )
+    save_task_state(
+        tmp_path,
+        AutomationTaskState(
+            task_id=task.task_id,
+            policy_sha256=old_status.policy_sha256,
+            status="pending",
+            blocked_reason="provider_budget_exhausted",
+        ),
+    )
+
+    blocked = _client(tmp_path).get("/api/learning/snapshot").json()["processing"][0]
+
+    assert blocked["message"] == "今日模型调用额度已用完；材料已经保存。"
+    assert blocked["action"] == "调整调用额度"
+    assert blocked["action_kind"] == "open_settings"
+
+    update_limits(
+        tmp_path,
+        retries_per_role=0,
+        global_calls_per_day=2,
+        budget_group_calls_per_day={
+            "note": 2,
+            "podcast": 0,
+            "tts": 0,
+            "asr": 1,
+            "ocr": 1,
+        },
+    )
+    service.authorize_automation(web_app.AutomationAuthorizeRequest(confirm_paid=True))
+    ready = _client(tmp_path).get("/api/learning/snapshot").json()["processing"][0]
+
+    assert ready["message"] == "新的调用额度已经可用，可以继续生成笔记。"
+    assert ready["action"] == "继续生成笔记"
+    assert ready["action_kind"] == "start_automation"
+
+    wake_calls: list[str] = []
+    monkeypatch.setattr(
+        web_app.AutomationCoordinator,
+        "wake",
+        lambda _self: wake_calls.append(task.task_id) or True,
+    )
+    response = _client(tmp_path).post(
+        f"/api/learning/items/{task.task_id}/start-automation"
+    )
+
+    assert response.status_code == 202
+    assert load_intake(tmp_path, task.task_id).status == "pending"
+    assert wake_calls == [task.task_id]
+
+    runs: list[tuple[str, ...]] = []
+    coordinator = AutomationCoordinator(
+        tmp_path,
+        run_tasks=lambda _root, task_ids, **_kwargs: (
+            runs.append(task_ids),
+            AutomationRunResult(task_ids, task_ids, ()),
+        )[1],
+    )
+    coordinator.tick_once()
+
+    assert runs == [(task.task_id,)]
+    rebound = load_task(task_dir)
+    assert {
+        role: binding.model_dump(mode="json")
+        for role, binding in rebound.provider_bindings.items()
+    } == {
+        role: binding.model_dump(mode="json")
+        for role, binding in freeze_role_bindings(tmp_path).items()
+    }
+    assert rebound.provider_settings_sha256 == settings_sha256(load_settings(tmp_path))
 
 
 def test_web_app_retries_only_a_due_retryable_automation_fact(
@@ -808,12 +1122,17 @@ def test_web_app_configures_authorizes_and_disables_automation_without_calls(
     )
     authorized = client.post("/api/automation/authorize", json={"confirm_paid": True})
     disabled = client.post("/api/automation/disable")
+    status = web_app.load_automation_status(tmp_path)
+    expected_settings_sha256 = web_app.settings_sha256(web_app.load_settings(tmp_path))
 
     assert configured.status_code == 200
     assert configured.json()["enabled"] is False
     assert configured.json()["default_output"] == "complete_note"
     assert authorized.json()["enabled"] is True
     assert disabled.json()["enabled"] is False
+    assert status is not None
+    assert status.policy.writer.settings_sha256 == expected_settings_sha256
+    assert status.policy.reviewer.settings_sha256 == expected_settings_sha256
     assert "fake-key" not in configured.text + authorized.text + disabled.text
 
 
@@ -837,6 +1156,39 @@ def test_web_automation_authorization_requires_explicit_paid_confirmation(
     for payload in ({}, {"confirm_paid": False}, {"confirm_paid": True, "extra": 1}):
         assert client.post("/api/automation/authorize", json=payload).status_code == 422
     assert client.get("/api/automation/status").json()["enabled"] is False
+
+
+def test_web_automation_authorization_refreshes_unchanged_note_identity_after_audio_setup(
+    tmp_path: Path,
+) -> None:
+    connect(tmp_path, name="note", preset="mimo", secret_value="fake-note-key")
+    set_role_binding(tmp_path, role="note_writer", connection_name="note")
+    set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
+    client = _client(tmp_path)
+    client.post(
+        "/api/automation/configure",
+        json={
+            "default_output": "complete_note_with_audio",
+            "auto_organize_new_favorites": False,
+            "check_interval_seconds": 300,
+            "max_items_per_tick": 1,
+        },
+    )
+    connect(
+        tmp_path, name="podcast", preset="deepseek", secret_value="fake-podcast-key"
+    )
+    set_role_binding(tmp_path, role="podcast", connection_name="podcast")
+    connect(tmp_path, name="voice", preset="windows-tts")
+    set_role_binding(tmp_path, role="tts", connection_name="voice")
+
+    response = client.post("/api/automation/authorize", json={"confirm_paid": True})
+
+    status = web_app.load_automation_status(tmp_path)
+    expected_settings_sha256 = web_app.settings_sha256(web_app.load_settings(tmp_path))
+    assert response.status_code == 200
+    assert status is not None
+    assert status.policy.writer.settings_sha256 == expected_settings_sha256
+    assert status.policy.reviewer.settings_sha256 == expected_settings_sha256
 
 
 def test_web_upload_uses_controlled_storage_and_rejects_unsafe_names(
@@ -999,6 +1351,7 @@ def test_learning_api_adds_note_and_opens_safe_rendered_markdown(
     assert observed["profile"] == "note"
     assert snapshot.json()["library"][0]["state"] == "ready"
     assert snapshot.json()["library"][0]["action_kind"] == "open_note"
+    assert snapshot.json()["library"][0]["note_href"].endswith("/note")
     assert "<h1>一篇笔记</h1>" in note.text
     assert "<script>bad()</script>" not in note.text
     assert f"/api/learning/items/{task.task_id}/images/cover.png" in note.text
@@ -1067,6 +1420,33 @@ def test_workspace_page_syncs_the_initial_navigation_hash(tmp_path: Path) -> Non
     )
 
 
+def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    page = client.get("/").text
+    script = client.get("/static/workspace.js").text
+    stylesheet = client.get("/static/workspace.css").text
+
+    assert page.count("data-view-panel=") == 3
+    for view in ("tasks", "sources", "settings"):
+        assert f'data-view="{view}"' in page
+        assert f'data-view-panel="{view}"' in page
+    for element_id in (
+        "task-list",
+        "task-detail",
+        "single-video-dialog",
+        "single-video-output",
+    ):
+        assert f'id="{element_id}"' in page
+    assert "学习库" not in page
+    assert "function showView" in script
+    assert "api(`/api/learning/uploads?name=${encodeURIComponent(file.name)}`" in script
+    assert 'api("/api/learning/submit"' in script
+    assert ".control-room {" in stylesheet
+    assert ".production-track {" in stylesheet
+
+
 def test_workspace_settings_polling_preserves_dirty_forms_and_uses_inline_feedback(
     tmp_path: Path,
 ) -> None:
@@ -1114,6 +1494,7 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
         "open_note",
         "open_settings",
         "open_automation",
+        "open_single_video",
         "start_automation",
         "retry_automation",
     ):
@@ -1124,6 +1505,11 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
     assert "partial_ready" in stylesheet
     assert "waiting_setup" in stylesheet
     assert "waiting_authorization" in stylesheet
+    assert ".detail-heading > div { min-width: 0; }" in stylesheet
+    assert "overflow-wrap: anywhere" in stylesheet
+    assert 'data-delete-item-ref="${escapeHtml(item.item_ref)}"' in script
+    assert 'method: "DELETE"' in script
+    assert "移入回收区" in client.get("/").text
     assert "confirmPaid.checked = true" not in script
     action_block = script.split("async function actOnItem", maxsplit=1)[1].split(
         "uploadForm.addEventListener", maxsplit=1

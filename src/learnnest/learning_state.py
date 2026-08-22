@@ -9,7 +9,16 @@ from typing import Literal
 
 from learnnest.automation_models import AutomationIntake, AutomationTaskState
 
-from learnnest.automation_store import find_intake, load_status, load_task_state
+from learnnest.automation_store import (
+    find_intake,
+    load_status,
+    load_task_state,
+    provider_budget_group_call_usage,
+    provider_call_usage,
+    task_has_execution_facts,
+    task_is_zero_attempt_budget_blocked,
+)
+from learnnest.models import StageStatus, TaskRecord
 from learnnest.provider_profiles import (
     freeze_role_bindings,
     load_settings,
@@ -74,6 +83,103 @@ def automation_task_state(output_root: str | Path, task_id: str) -> str | None:
 def automation_retry_is_due(output_root: str | Path, task_id: str) -> bool:
     """Whether durable, current-policy facts permit one explicit retry."""
     return automation_retry_admission(output_root, task_id) is not None
+
+
+def task_has_paid_automation_trace(task: TaskRecord) -> bool:
+    """Whether a provider-owned stage has actually started for this task."""
+    return any(
+        task.stages.get(stage) not in {None, StageStatus.PENDING, StageStatus.SKIPPED}
+        for stage in ("note", "publish", "podcast_script", "tts")
+    )
+
+
+def automation_restart_is_safe(output_root: str | Path, task_id: str) -> bool:
+    """Whether a pre-provider attention item may return to the pending queue."""
+    root = Path(output_root).resolve()
+    try:
+        intake = find_intake(root, task_id)
+        found = find_task_by_id(root, task_id)
+        if intake is None or intake.status != "needs_attention" or found is None:
+            return False
+        _task_dir, task = found
+        return (
+            task.stages.get("content_pack") is StageStatus.COMPLETED
+            and not task_has_execution_facts(root, task_id)
+            and not task_has_paid_automation_trace(task)
+            and automation_readiness(root, intake) == "ready"
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def automation_budget_blocked(output_root: str | Path, task_id: str) -> bool:
+    """Whether a task stopped at the budget gate before any Provider attempt."""
+    try:
+        return task_is_zero_attempt_budget_blocked(output_root, task_id)
+    except ValueError:
+        return False
+
+
+def automation_budget_restart_is_due(output_root: str | Path, task_id: str) -> bool:
+    """Whether a zero-call budget stop can be explicitly restarted now."""
+    root = Path(output_root).resolve()
+    try:
+        if not task_is_zero_attempt_budget_blocked(root, task_id):
+            return False
+        status = load_status(root)
+        settings = load_settings(root)
+        if (
+            status is None
+            or not status.policy.enabled
+            or status.policy.authorized_at is None
+            or status.policy.provider_settings_sha256 != settings_sha256(settings)
+        ):
+            return False
+        intake = find_intake(root, task_id)
+        found = find_task_by_id(root, task_id)
+        if intake is None or intake.status != "needs_attention" or found is None:
+            return False
+        _task_dir, task = found
+        if task_has_paid_automation_trace(task):
+            return False
+        current = freeze_role_bindings(root)
+        required = required_automation_roles(intake.default_output)
+        if any(
+            task.provider_bindings.get(role) is None
+            or current.get(role) is None
+            or task.provider_bindings[role].model_dump(
+                mode="json", exclude={"settings_sha256"}
+            )
+            != current[role].model_dump(  # type: ignore[union-attr]
+                mode="json", exclude={"settings_sha256"}
+            )
+            for role in required
+        ):
+            return False
+        required_groups = {"note": 2, "podcast": 0, "tts": 0}
+        if intake.default_output == "complete_note_with_audio":
+            required_groups["podcast"] = 1
+            tts = current["tts"]
+            if getattr(tts, "provider", None) != "windows-tts":
+                required_groups["tts"] = 1
+        required_global = sum(required_groups.values())
+        now = datetime.now(UTC)
+        _used, _limit, remaining = provider_call_usage(
+            root,
+            status.policy_sha256,
+            now=now,
+            limit=status.policy.budget.provider_calls_per_day,
+        )
+        if remaining < required_global:
+            return False
+        return all(
+            status.policy.budget.budget_group_calls_per_day[group]
+            - provider_budget_group_call_usage(root, group, now=now)
+            >= needed
+            for group, needed in required_groups.items()
+        )
+    except (KeyError, ValueError):
+        return False
 
 
 def automation_retry_admission(

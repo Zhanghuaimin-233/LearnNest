@@ -3,163 +3,212 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>语栖 · 学习收件箱</title>
+    <meta name="color-scheme" content="light" />
+    <title>语栖 · 本地产出控制台</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/static/workspace.css" />
     <script src="/static/workspace.js" defer></script>
   </head>
   <body>
-    <main class="app-shell">
-      <aside class="bookmarks" aria-label="学习导航">
-        <a class="wordmark" href="#inbox" aria-label="语栖学习收件箱">语栖<span>LearnNest</span></a>
-        <nav>
-          <a class="bookmark active" href="#inbox">添加内容</a>
-          <a class="bookmark" href="#processing">整理中</a>
-          <a class="bookmark" href="#library">学习库</a>
-          <a class="bookmark" href="#settings">设置</a>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <a class="brand" href="#tasks" aria-label="语栖本地产出控制台">
+          <span class="brand-mark" aria-hidden="true">语</span>
+          <span><strong>语栖</strong><small>LEARNNEST</small></span>
+        </a>
+
+        <nav class="primary-nav">
+          <a class="bookmark active" href="#tasks" data-view="tasks"><span aria-hidden="true">⌁</span><strong>任务</strong><small id="task-count">0</small></a>
+          <a class="bookmark" href="#sources" data-view="sources"><span aria-hidden="true">＋</span><strong>来源</strong></a>
+          <a class="bookmark" href="#settings" data-view="settings"><span aria-hidden="true">◌</span><strong>设置</strong></a>
         </nav>
-        <p class="local-mark">内容留在这台设备上。</p>
+
+        <div class="runtime-state">
+          <i aria-hidden="true"></i>
+          <span><strong id="runtime-title">正在读取状态</strong><small id="runtime-copy">仅在语栖运行时工作</small></span>
+        </div>
       </aside>
 
-      <section class="reading-room" aria-label="学习收件箱">
-        <header class="page-head">
-          <p class="eyebrow">你的学习收件箱</p>
-          <h1>把想学的内容，<em>放进今天。</em></h1>
-          <p class="intro">添加一项内容，语栖会整理成可以打开阅读的学习笔记。</p>
-        </header>
-
-        <section id="inbox" class="chapter intake" aria-labelledby="add-title">
-          <div class="chapter-heading">
-            <p class="chapter-label">新内容</p>
-            <h2 id="add-title">添加内容</h2>
-          </div>
-          <form id="upload-form" class="source-form">
-            <label for="local-video">本地视频</label>
-            <div class="source-entry">
-              <input id="local-video" name="video" type="file" accept=".avi,.mkv,.mov,.mp4,.mpeg,.webm" required />
-              <button type="submit">加入收件箱</button>
+      <main class="main-surface">
+        <section class="view is-visible" id="tasks" data-view-panel="tasks">
+          <header class="page-header">
+            <div>
+              <p class="eyebrow">本地产出控制台</p>
+              <h1>任务</h1>
+              <p class="page-summary" id="task-summary">正在读取真实任务。</p>
             </div>
-          </form>
-          <form id="url-form" class="source-form">
-            <label for="public-url">公开链接</label>
-            <div class="source-entry">
-              <input id="public-url" name="source" required autocomplete="url" placeholder="粘贴公开 HTTP(S) 链接" />
-              <button type="submit">加入收件箱</button>
-            </div>
-          </form>
-          <p class="section-note">新内容会使用设置中的默认结果，不需要逐项重复选择。</p>
-          <p id="notice" class="notice" aria-live="polite">准备好后，从这里添加第一项内容。</p>
+            <button class="primary-action" data-open-single-video type="button"><span aria-hidden="true">＋</span> 处理单个视频</button>
+          </header>
 
-          <div class="favorites-heading">
-            <div class="chapter-heading">
-              <div>
-                <p class="chapter-label">抖音收藏</p>
-                <h2 id="favorites-title">默认视频收藏</h2>
+          <nav class="task-tabs" aria-label="任务筛选">
+            <button class="is-active" data-filter="all" type="button"><span>全部任务</span><strong data-filter-count="all">0</strong></button>
+            <button data-filter="attention" type="button"><span><i class="state-dot attention"></i>需要处理</span><strong data-filter-count="attention">0</strong></button>
+            <button data-filter="processing" type="button"><span><i class="state-dot processing"></i>处理中</span><strong data-filter-count="processing">0</strong></button>
+            <button data-filter="queued" type="button"><span><i class="state-dot queued"></i>等待中</span><strong data-filter-count="queued">0</strong></button>
+            <button data-filter="completed" type="button"><span><i class="state-dot completed"></i>已完成</span><strong data-filter-count="completed">0</strong></button>
+            <span class="task-default">默认成品：<strong id="default-output-label">读取中</strong><button type="button" data-go-settings>更改</button></span>
+          </nav>
+
+          <div class="control-room">
+            <section class="task-list-panel" aria-labelledby="task-list-title">
+              <div class="panel-heading">
+                <div><p class="panel-kicker">最近更新</p><h2 id="task-list-title">全部任务</h2></div>
+                <button class="icon-button" id="refresh-tasks" type="button" aria-label="刷新任务">↻</button>
               </div>
-              <button id="sync-favorites" class="secondary-button" type="button">手动同步</button>
-            </div>
-            <p id="favorites-status" class="section-note" aria-live="polite">连接抖音后，收藏会出现在这里。</p>
-          </div>
-          <div class="favorite-actions"><button id="add-selected-favorites" class="secondary-button" type="button" disabled>加入收件箱</button><span id="favorite-selection" class="section-note">可多选历史收藏；首次同步不会自动处理。</span></div>
-          <div id="douyin-favorites-list" class="favorite-grid"></div>
-        </section>
-
-        <section id="library" class="chapter" aria-labelledby="library-title">
-          <div class="chapter-heading">
-            <p class="chapter-label">可阅读</p>
-            <h2 id="library-title">学习库</h2>
-          </div>
-          <div id="library-list" class="book-list"></div>
-        </section>
-
-        <section id="processing" class="chapter split-chapter" aria-labelledby="processing-title">
-          <div>
-            <div class="chapter-heading">
-              <p class="chapter-label">正在发生</p>
-              <h2 id="processing-title">处理中</h2>
-            </div>
-            <div id="processing-list" class="book-list"></div>
-          </div>
-          <div>
-            <div class="chapter-heading">
-              <p class="chapter-label">等待你选</p>
-              <h2>收件箱</h2>
-            </div>
-            <div id="inbox-list" class="book-list"></div>
-          </div>
-        </section>
-
-        <section id="settings" class="chapter settings" aria-labelledby="settings-title">
-          <div class="chapter-heading">
-            <p class="chapter-label">使用方式</p>
-            <h2 id="settings-title">设置</h2>
-          </div>
-          <div class="connection-card">
-            <div class="connection-heading">
-              <div>
-                <p class="chapter-label">抖音</p>
-                <h3>连接抖音</h3>
+              <div class="task-list" id="task-list">
+                <div id="processing-list" class="task-group"></div>
+                <div id="inbox-list" class="task-group"></div>
+                <div id="library-list" class="task-group"></div>
               </div>
-              <span id="douyin-connection-state" class="status-pill">未连接</span>
+            </section>
+            <section class="task-detail-panel" id="task-detail" aria-live="polite">
+              <div class="empty-detail"><span aria-hidden="true">⌁</span><h2>选择一个任务</h2><p>这里会显示真实处理状态、产出轨道和当前可用操作。</p></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="sources" data-view-panel="sources" hidden>
+          <header class="page-header compact-header">
+            <div>
+              <p class="eyebrow">内容从这里进入</p>
+              <h1>来源</h1>
+              <p class="page-summary">添加本地视频、公开链接或抖音收藏；处理状态统一回到任务页。</p>
             </div>
-            <p class="section-note">请在同一个抖音官方窗口完成手机号验证码和抖音 App 扫码确认；登录状态使用 Windows 当前用户加密保存在本机。</p>
-            <button id="connect-douyin" type="button">打开抖音验证窗口</button>
+            <button class="primary-action" data-open-single-video type="button"><span aria-hidden="true">＋</span> 处理单个视频</button>
+          </header>
+
+          <div class="source-workspace">
+            <section class="source-row source-emphasis">
+              <div><p class="source-index">本地</p><h2>处理一个视频</h2><p>选择这台电脑上的视频，使用当前默认成品进入完整处理流程。</p></div>
+              <button class="inline-action" data-open-single-video type="button">选择视频</button>
+            </section>
+
+            <section class="source-row">
+              <div><p class="source-index">链接</p><h2>添加公开链接</h2><p>公开视频会先准备材料，再进入同一条产出流程。</p></div>
+              <form id="url-form" class="source-inline-form">
+                <label for="public-url">公开网址</label>
+                <div><input id="public-url" name="source" required autocomplete="url" placeholder="https://example.com/video" /><button type="submit">添加并处理</button></div>
+              </form>
+            </section>
+
+            <section class="source-row source-douyin">
+              <div>
+                <p class="source-index">抖音收藏</p>
+                <div class="source-title-line"><h2>默认视频收藏</h2><span id="douyin-connection-state" class="status-pill">未连接</span></div>
+                <p id="favorites-status" aria-live="polite">连接抖音后，收藏会出现在这里。</p>
+                <p>请在同一个抖音官方窗口完成手机号验证码和抖音 App 扫码确认；登录状态使用 Windows 当前用户加密保存在本机，两步完成后才会连接。</p>
+              </div>
+              <div class="source-actions"><button id="connect-douyin" type="button">打开抖音验证窗口</button><button id="sync-favorites" class="text-button" type="button">手动同步</button></div>
+            </section>
+
             <div id="douyin-login-panel" class="login-panel" hidden>
               <img id="douyin-qr" class="qr-image" alt="抖音登录二维码" hidden />
-              <div class="login-copy">
-                <p id="douyin-login-message" class="login-message" aria-live="polite">正在打开官方短信与扫码验证窗口。</p>
-                <p id="douyin-countdown" class="countdown" aria-live="polite" hidden></p>
-                <div class="login-actions">
-                  <button id="refresh-douyin" class="secondary-button" type="button" hidden>刷新二维码</button>
-                  <button id="cancel-douyin" class="text-button" type="button">取消</button>
-                </div>
-              </div>
+              <div><p id="douyin-login-message" aria-live="polite">正在打开官方短信与扫码验证窗口。</p><p id="douyin-countdown" class="countdown" aria-live="polite" hidden></p><div class="form-actions"><button id="refresh-douyin" type="button" hidden>刷新二维码</button><button id="cancel-douyin" class="text-button" type="button">取消</button></div></div>
             </div>
-          </div>
-          <div class="connection-card provider-settings-card">
-            <div class="connection-heading">
-              <div>
-                <p class="chapter-label">学习连接</p>
-                <h3>Provider 设置</h3>
-              </div>
-              <span id="provider-settings-state" class="status-pill">未配置</span>
-            </div>
-            <p class="section-note">只添加完成所选结果需要的笔记、播客和语音连接。密钥只由 Windows 当前用户加密保存，页面不会再次显示。</p>
-            <form id="provider-connection-form" class="provider-form">
-              <label>连接名称<input name="name" required autocomplete="off" placeholder="例如 mimo-note" /><span class="field-hint">本地连接会自动填写名称；可按需修改。</span></label>
-              <label>Provider<select name="preset"><option value="windows-tts">Windows 系统语音（本地）</option><option value="mimo">MiMo（LLM）</option><option value="deepseek">DeepSeek（LLM）</option><option value="mimo-tts">MiMo TTS</option></select></label>
-              <label id="windows-voice-field">Windows 语音<select name="voice" id="windows-voice"></select></label>
-              <label>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="本地 Windows 语音无需填写" /></label>
-              <div class="form-actions"><button type="submit">保存连接</button><button type="reset" class="text-button">取消更改</button></div>
-            </form>
-            <p id="provider-feedback" class="section-note" aria-live="polite">保存、检查、绑定或删除后会在这里显示结果。</p>
-            <div id="provider-connection-list" class="provider-list"></div>
-          </div>
-          <div class="connection-card automation-settings-card">
-            <div class="connection-heading">
-              <div>
-                <p class="chapter-label">自动整理</p>
-                <h3>让收件箱继续前进</h3>
-              </div>
-              <span id="automation-state" class="status-pill">等待设置</span>
-            </div>
-            <p id="automation-summary" class="section-note">先完成学习连接和职责绑定，再保存默认结果。</p>
-            <form id="automation-form" class="provider-form">
-              <label>默认结果<select name="default_output"><option value="complete_note">完整笔记</option><option value="complete_note_with_audio" selected>完整笔记 + 播客音频</option></select></label>
-              <label>检查间隔（秒）<input name="check_interval_seconds" type="number" min="30" max="3600" value="300" /></label>
-              <label class="checkbox-label automation-favorite-option">
-                <input name="auto_organize_new_favorites" type="checkbox" />
-                <span class="automation-favorite-copy"><strong>自动整理新收藏</strong><small>只处理首次同步之后出现的新收藏；历史收藏仍由你手动加入收件箱。</small></span>
-              </label>
-              <label>每次处理项数<input name="max_items_per_tick" type="number" min="1" max="20" value="1" /></label>
-              <div class="form-actions"><button type="submit">保存自动整理设置</button><button type="reset" class="text-button">取消更改</button></div>
-            </form>
-            <section id="setup-readiness" class="setup-readiness" aria-live="polite" aria-label="所选结果的准备情况"></section>
-            <p class="section-note">开启前请确认：会向所选连接发送完成整理所需的内容，可能产生费用。</p>
-            <div class="automation-actions"><label class="checkbox-label"><input id="confirm-paid" type="checkbox" /> 我确认上述可能付费的自动整理</label><button id="authorize-automation" type="button">确认并开启</button><button id="disable-automation" class="secondary-button" type="button">关闭自动处理</button></div>
+
+            <div class="favorite-toolbar"><button id="add-selected-favorites" type="button" disabled>加入任务</button><span id="favorite-selection">可多选历史收藏；首次同步不会自动处理。</span></div>
+            <div id="douyin-favorites-list" class="favorite-grid"></div>
+            <section id="source-jobs" class="source-jobs" hidden></section>
           </div>
         </section>
-      </section>
-    </main>
+
+        <section class="view" id="settings" data-view-panel="settings" hidden>
+          <header class="page-header compact-header">
+            <div>
+              <p class="eyebrow">产出能力与本地边界</p>
+              <h1>设置</h1>
+              <p class="page-summary">设置默认成品、模型连接、调用安全和本地存储。更改不会改写正在运行的任务。</p>
+            </div>
+          </header>
+
+          <div class="settings-workspace">
+            <aside class="settings-nav" aria-label="设置分类">
+              <p class="rail-label">设置分类</p>
+              <button class="is-active" data-settings-tab="output" type="button"><span>产出与自动处理</span><small>默认成品与来源范围</small></button>
+              <button data-settings-tab="connections" type="button"><span>模型与连接</span><small>服务、连接与职责</small></button>
+              <button data-settings-tab="safety" type="button"><span>调用安全</span><small>重试与每日上限</small></button>
+              <button data-settings-tab="storage" type="button"><span>本地存储</span><small>输出位置与空间</small></button>
+              <div class="settings-readiness"><i></i><span><strong id="settings-readiness-title">正在检查设置</strong><small id="settings-readiness-copy">根据默认成品检查所需职责</small></span></div>
+            </aside>
+
+            <div class="settings-content">
+              <section class="settings-panel is-visible" data-settings-panel="output">
+                <div class="settings-panel-header"><div><p class="panel-kicker">默认行为</p><h2>产出与自动处理</h2><p id="automation-summary">先完成模型连接和职责绑定，再保存默认成品。</p></div><span id="automation-state" class="status-pill">等待设置</span></div>
+                <form id="automation-form" class="settings-form">
+                  <label>默认成品<select name="default_output"><option value="complete_note">完整笔记</option><option value="complete_note_with_audio" selected>完整笔记 + 播客音频</option></select><small>新任务会冻结提交时的默认成品。</small></label>
+                  <label>检查间隔（秒）<input name="check_interval_seconds" type="number" min="30" max="3600" value="300" /></label>
+                  <label>每次处理项数<input name="max_items_per_tick" type="number" min="1" max="20" value="1" /></label>
+                  <label class="checkbox-label automation-favorite-option"><input name="auto_organize_new_favorites" type="checkbox" /><span><strong>自动整理新收藏</strong><small>只处理首次同步后出现的新收藏；历史收藏仍由你手动加入。</small></span></label>
+                  <div class="form-actions"><button type="submit">保存自动处理设置</button><button type="reset" class="text-button">取消更改</button></div>
+                </form>
+                <div class="authorization-row"><label class="checkbox-label"><input id="confirm-paid" type="checkbox" /><span>我确认自动处理可能调用已配置的付费服务</span></label><div><button id="authorize-automation" type="button">确认并开启</button><button id="disable-automation" class="secondary-button" type="button">关闭自动处理</button></div></div>
+              </section>
+
+              <section class="settings-panel" data-settings-panel="connections" hidden>
+                <div class="settings-panel-header"><div><p class="panel-kicker">已注册服务</p><h2>模型与连接</h2><p>查看当前职责、保存的连接，以及这个版本可以添加的模型与语音服务。</p></div><button class="primary-action compact-action" id="open-connection-dialog" type="button"><span aria-hidden="true">＋</span> 添加连接</button></div>
+                <section class="settings-block"><div class="block-heading"><div><h3>产出职责</h3><p>默认成品需要的职责会显示在这里。</p></div><span id="provider-settings-state" class="status-pill">未配置</span></div><section id="setup-readiness" class="setup-readiness" aria-live="polite" aria-label="所选结果的准备情况"></section></section>
+                <section class="settings-block"><div class="block-heading"><div><h3>连接库</h3><p>密钥使用 Windows 当前用户加密保存，页面不会再次显示。</p></div></div><p id="provider-feedback" class="inline-feedback" aria-live="polite">保存、检查、绑定或删除后会在这里显示结果。</p><div id="provider-connection-list" class="provider-list"></div></section>
+                <section class="settings-block"><div class="block-heading"><div><h3>可添加的服务</h3><p>这里只显示当前版本真正支持的连接能力。</p></div></div><div id="provider-adapter-list" class="adapter-grid"><p class="empty">正在读取可用服务。</p></div></section>
+              </section>
+
+              <section class="settings-panel" data-settings-panel="safety" hidden>
+                <div class="settings-panel-header"><div><p class="panel-kicker">有限且可观察</p><h2>调用安全</h2><p>限制自动重试和每日服务调用次数。保存后需要重新确认自动处理。</p></div></div>
+                <form id="provider-limits-form" class="settings-form limits-form">
+                  <label>每个职责自动重试次数<input name="retries_per_role" type="number" min="0" max="3" value="1" /></label>
+                  <label>每日调用总上限<input name="global_calls_per_day" type="number" min="0" max="800" value="80" /></label>
+                  <fieldset><legend>各类每日上限</legend><label>笔记<input name="limit_note" type="number" min="0" max="800" /></label><label>播客<input name="limit_podcast" type="number" min="0" max="800" /></label><label>语音<input name="limit_tts" type="number" min="0" max="800" /></label><label>语音识别<input name="limit_asr" type="number" min="0" max="800" /></label><label>画面文字<input name="limit_ocr" type="number" min="0" max="800" /></label></fieldset>
+                  <div class="form-actions"><button type="submit">保存调用限制</button><button type="reset" class="text-button">取消更改</button></div>
+                </form>
+                <p id="provider-limits-feedback" class="inline-feedback" aria-live="polite">达到上限后会停止调用，不会自动跨服务切换。</p>
+              </section>
+
+              <section class="settings-panel" data-settings-panel="storage" hidden>
+                <div class="settings-panel-header"><div><p class="panel-kicker">只在这台设备</p><h2>本地存储</h2><p>任务事实、笔记、音频和加密设置均位于启动时选择的输出位置。</p></div></div>
+                <div class="storage-facts"><div><strong>输出位置</strong><span>启动语栖时选择；页面不显示完整本机路径。</span></div><div><strong>成品</strong><span>笔记和音频保存在本机，可以从已完成任务打开。</span></div><div><strong>连接密钥</strong><span>仅由当前 Windows 用户加密读取。</span></div></div>
+              </section>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <p id="notice" class="notice" aria-live="polite" hidden></p>
+
+    <nav class="mobile-nav" aria-label="移动端主导航">
+      <a class="bookmark active" href="#tasks" data-view="tasks"><span aria-hidden="true">⌁</span>任务</a>
+      <a class="bookmark" href="#sources" data-view="sources"><span aria-hidden="true">＋</span>来源</a>
+      <a class="bookmark" href="#settings" data-view="settings"><span aria-hidden="true">◌</span>设置</a>
+    </nav>
+
+    <button class="mobile-primary-action" data-open-single-video type="button"><span aria-hidden="true">＋</span> 处理单个视频</button>
+
+    <dialog id="single-video-dialog" class="app-dialog">
+      <form method="dialog" class="dialog-shell" id="upload-form">
+        <div class="dialog-heading"><div><p class="eyebrow">一次明确的处理</p><h2>处理单个视频</h2><p>选择本地视频后，它会使用当前设置进入完整流程。</p></div><button class="dialog-close" data-close-single-video type="button" aria-label="关闭">×</button></div>
+        <label class="file-drop" for="local-video"><span aria-hidden="true">＋</span><strong>选择本地视频</strong><small id="selected-video-name">MP4、MOV、MKV、AVI、MPEG 或 WebM</small><input id="local-video" name="video" type="file" accept=".avi,.mkv,.mov,.mp4,.mpeg,.webm" required /></label>
+        <div class="single-video-summary"><span>本次默认成品</span><strong id="single-video-output">读取中</strong><button type="button" data-go-settings>更改设置</button></div>
+        <p class="dialog-note" id="single-video-readiness">正在检查所需的模型与语音服务。</p>
+        <div class="dialog-actions"><button class="secondary-button" data-close-single-video type="button">取消</button><button id="submit-single-video" type="submit">处理这个视频</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="delete-task-dialog" class="app-dialog danger-dialog">
+      <form id="delete-task-form" class="dialog-shell compact-dialog">
+        <div class="dialog-heading"><div><p class="eyebrow">移入语栖回收区</p><h2>删除这个任务？</h2><p><strong id="delete-task-title">当前任务</strong>的任务记录和已生成文件会移入回收区，不会删除你原来的视频。</p></div><button class="dialog-close" data-close-delete-task type="button" aria-label="关闭">×</button></div>
+        <p class="dialog-note">正在运行的任务不能删除。移入回收区后，它会从任务列表和来源处理记录中消失。</p>
+        <div class="dialog-actions"><button class="secondary-button" data-close-delete-task type="button">取消</button><button id="confirm-delete-task" class="danger-button" type="submit">移入回收区</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="connection-dialog" class="app-dialog">
+      <form id="provider-connection-form" class="dialog-shell provider-form">
+        <div class="dialog-heading"><div><p class="eyebrow">模型与连接</p><h2>添加连接</h2><p>选择当前版本支持的服务，保存后再绑定到产出职责。</p></div><button class="dialog-close" data-close-connection type="button" aria-label="关闭">×</button></div>
+        <label>连接名称<input name="name" required autocomplete="off" placeholder="例如 mimo-note" /><small>本地服务会自动填写名称；可以按需修改。</small></label>
+        <label>服务<select name="preset"><option value="windows-tts">Windows 系统语音（本地）</option><option value="mimo">MiMo（文本）</option><option value="deepseek">DeepSeek（文本）</option><option value="mimo-tts">MiMo TTS</option></select></label>
+        <label id="windows-voice-field">Windows 语音<select name="voice" id="windows-voice"></select></label>
+        <label>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="本地 Windows 语音无需填写" /></label>
+        <div class="dialog-actions"><button class="secondary-button" data-close-connection type="button">取消</button><button type="submit">保存连接</button></div>
+      </form>
+    </dialog>
   </body>
 </html>

@@ -17,14 +17,21 @@ from learnnest.automation_runner import (
 )
 from learnnest.automation_store import (
     create_intake,
+    find_intake,
     list_intakes,
     load_status,
+    load_task_state,
     save_intake,
     task_has_execution_facts,
+    task_is_zero_attempt_budget_blocked,
 )
-from learnnest.learning_state import automation_readiness, required_automation_roles
+from learnnest.learning_state import (
+    automation_readiness,
+    required_automation_roles,
+    task_has_paid_automation_trace,
+)
 from learnnest.locks import LockUnavailable, task_lock
-from learnnest.models import StageStatus, TaskRecord
+from learnnest.models import TaskRecord
 from learnnest.provider_profiles import (
     freeze_role_bindings,
     load_settings,
@@ -100,7 +107,13 @@ class AutomationCoordinator:
     async def _run_forever(self) -> None:
         seen_wake_generation = 0
         while not self._stop.is_set():
-            await asyncio.to_thread(self.tick_once)
+            result = await asyncio.to_thread(self.tick_once)
+            if (
+                result is not None
+                and result.task_ids
+                and await asyncio.to_thread(self._has_pending_intake)
+            ):
+                continue
             try:
                 seen_wake_generation = await asyncio.wait_for(
                     self._wait_for_wake_or_stop(seen_wake_generation),
@@ -108,6 +121,15 @@ class AutomationCoordinator:
                 )
             except TimeoutError:
                 continue
+
+    def _has_pending_intake(self) -> bool:
+        """Drain an existing backlog without waiting for another wake signal."""
+        try:
+            return any(
+                intake.status == "pending" for intake in list_intakes(self.output_root)
+            )
+        except ValueError:
+            return False
 
     async def _wait_for_wake_or_stop(self, seen_generation: int) -> int:
         with self._wake_lock:
@@ -151,6 +173,16 @@ class AutomationCoordinator:
             prepared: list[AutomationIntake] = []
             for intake in selected:
                 try:
+                    execution = load_task_state(
+                        self.output_root, intake.task_id, status.policy_sha256
+                    )
+                    if (
+                        execution is not None
+                        and execution.blocked_reason == "retry_wait"
+                    ):
+                        # Only the explicit Web retry admission clears this
+                        # persisted gate; an intake status alone cannot do so.
+                        continue
                     _freeze_intake_task_binding(self.output_root, intake)
                 except _ImmutableTaskIdentity:
                     save_intake(
@@ -229,6 +261,11 @@ def create_intake_for_task(
     now: datetime | None = None,
 ) -> AutomationIntake:
     """Persist a user request before a foreground tick can ever claim it."""
+    existing = find_intake(output_root, task_id)
+    if existing is not None:
+        if existing.source_kind != source_kind:
+            raise ValueError("automation intake conflicts with its frozen identity")
+        return existing
     return create_intake(
         output_root,
         AutomationIntake(
@@ -272,9 +309,15 @@ def _freeze_intake_task_binding(output_root: Path, intake: AutomationIntake) -> 
         task_dir, task = found
         if _task_bindings_match(task, current, required):
             return
-        if task_has_execution_facts(
-            output_root, intake.task_id
-        ) or _has_paid_task_trace(task):
+        has_execution_facts = task_has_execution_facts(output_root, intake.task_id)
+        safe_budget_restart = (
+            has_execution_facts
+            and task_is_zero_attempt_budget_blocked(output_root, intake.task_id)
+            and _task_bindings_match_except_settings_sha(task, current, required)
+        )
+        if (has_execution_facts and not safe_budget_restart) or _has_paid_task_trace(
+            task
+        ):
             raise _ImmutableTaskIdentity("automation task binding is immutable")
         updated = TaskRecord.model_validate(
             {
@@ -302,11 +345,25 @@ def _task_bindings_match(
     return True
 
 
+def _task_bindings_match_except_settings_sha(
+    task: TaskRecord, current: dict[str, object], required: tuple[str, ...]
+) -> bool:
+    for role in required:
+        frozen = task.provider_bindings.get(role)
+        configured = current.get(role)
+        if frozen is None or configured is None:
+            return False
+        if frozen.model_dump(mode="json", exclude={"settings_sha256"}) != (
+            configured.model_dump(  # type: ignore[union-attr]
+                mode="json", exclude={"settings_sha256"}
+            )
+        ):
+            return False
+    return True
+
+
 def _has_paid_task_trace(task: TaskRecord) -> bool:
-    return any(
-        task.stages.get(stage) not in {None, StageStatus.PENDING}
-        for stage in ("note", "publish", "podcast_script", "tts")
-    )
+    return task_has_paid_automation_trace(task)
 
 
 def automation_providers_for_task(root: Path, task_id: str) -> AutomationProviders:

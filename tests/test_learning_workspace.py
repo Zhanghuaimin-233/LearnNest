@@ -119,7 +119,13 @@ def _configured_root(root: Path, *, authorized: bool) -> None:
             "打开笔记",
             "open_note",
         ),
-        ("attention", "needs_action", "需要你处理；已保留完成的内容。", None, None),
+        (
+            "attention",
+            "needs_action",
+            "上次整理没有真正开始。当前设置已就绪，可以重新开始整理。",
+            "重新开始整理",
+            "start_automation",
+        ),
         ("ready", "ready", "可阅读。", "打开笔记", "open_note"),
     ],
 )
@@ -205,6 +211,41 @@ def test_snapshot_projects_the_eight_public_learning_states(
         expected_action,
         expected_action_kind,
     )
+
+
+def test_snapshot_gives_an_explicit_reprocess_step_for_an_unrecoverable_old_task(
+    tmp_path: Path,
+) -> None:
+    _task_dir, task = _task(
+        tmp_path,
+        "old-output",
+        stages={
+            "content_pack": StageStatus.COMPLETED,
+            "note": StageStatus.COMPLETED,
+            "publish": StageStatus.COMPLETED,
+        },
+        artifacts={"content_pack": ["content_pack.json"]},
+    )
+    create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=task.task_id,
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime.now(UTC),
+            status="needs_attention",
+        ),
+    )
+    _configured_root(tmp_path, authorized=True)
+
+    item = learning_workspace.LearningWorkspace(tmp_path).snapshot().processing[0]
+
+    assert item.state == "needs_action"
+    assert item.message == (
+        "这项旧任务缺少可打开的标准笔记，不能在原任务上安全继续。请重新选择原视频处理。"
+    )
+    assert item.action == "重新选择原视频"
+    assert item.action_kind == "open_single_video"
 
 
 def test_snapshot_revision_observes_intake_changes_and_safely_projects_corruption(

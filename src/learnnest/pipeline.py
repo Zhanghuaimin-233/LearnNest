@@ -13,7 +13,7 @@ from typing import Any, Literal
 from PIL import Image, ImageChops, ImageStat
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from learnnest import providers
+from learnnest import providers  # noqa: F401 - retained as the worker test seam
 from learnnest.downloader import YtDlpDownloader
 from learnnest.execution import (
     begin_attempt,
@@ -27,6 +27,12 @@ from learnnest.execution import (
 from learnnest.execution_models import AttemptReason, SourceIdentities
 from learnnest.identities import source_identities, stream_sha256
 from learnnest.locks import identity_lock, task_lock
+from learnnest.material_adapters import (
+    AsrAdapter,
+    MaterialAdapters,
+    OcrAdapter,
+    material_adapters_from_bindings,
+)
 from learnnest.models import (
     ContentPack,
     Evidence,
@@ -69,7 +75,6 @@ _STAGES = STAGES
 _OPERATION_KEYWORDS = ("打开", "点击", "选择", "设置", "输入", "保存", "拖动")
 _MAX_DURATION_MS = 30 * 60 * 1_000
 _MAX_SELECTED_FRAMES = 15
-_PRODUCTION_ASR_MODEL = "large-v3"
 
 
 class PipelineError(RuntimeError):
@@ -104,6 +109,7 @@ class _OcrPayload(BaseModel):
 
     schema_version: str = Field(min_length=1)
     provider: str = Field(min_length=1)
+    model: str | None = Field(default=None, min_length=1)
     items: list[_OcrItem]
 
 
@@ -118,6 +124,7 @@ def process_video(
     task_lock_timeout: float = 0.0,
     batch_id: str | None = None,
     on_attempt_started: Callable[[TaskRecord], None] | None = None,
+    material_adapters: MaterialAdapters | None = None,
 ) -> TaskRecord:
     """Compatibility wrapper for one local video source."""
     source = Path(video_path).expanduser().resolve(strict=True)
@@ -133,6 +140,7 @@ def process_video(
         task_lock_timeout=task_lock_timeout,
         batch_id=batch_id,
         on_attempt_started=on_attempt_started,
+        material_adapters=material_adapters,
     )
 
 
@@ -182,6 +190,7 @@ def process_source(
     batch_id: str | None = None,
     on_attempt_started: Callable[[TaskRecord], None] | None = None,
     initial_attempt_reason: InitialAttemptReason = "initial",
+    material_adapters: MaterialAdapters | None = None,
     _task_lock_held: bool = False,
     _admission_fingerprint: str | None = None,
     _admission_identities: SourceIdentities | None = None,
@@ -234,6 +243,7 @@ def process_source(
                     batch_id=batch_id,
                     on_attempt_started=on_attempt_started,
                     initial_attempt_reason=initial_attempt_reason,
+                    material_adapters=material_adapters,
                     _task_lock_held=True,
                     _admission_fingerprint=pre_fingerprint,
                     _admission_identities=pre_identities,
@@ -376,6 +386,7 @@ def process_source(
                 profile,
                 _STAGES.index("transcript"),
                 selected_scheduler,
+                material_adapters,
             )
         else:
             result = _run_from_stage(
@@ -386,6 +397,7 @@ def process_source(
                 profile,
                 0,
                 selected_scheduler,
+                material_adapters,
             )
         return _finish_active_attempt(task_dir, result)
     except Exception as error:
@@ -670,7 +682,11 @@ def _run_from_stage(
     profile: Profile,
     start_index: int,
     scheduler: Any,
+    material_adapters: MaterialAdapters | None = None,
 ) -> TaskRecord:
+    selected_material_adapters = material_adapters or material_adapters_from_bindings(
+        task.provider_bindings
+    )
     if start_index <= _STAGES.index("source"):
         probe = _run_stage(
             task_dir,
@@ -692,7 +708,9 @@ def _run_from_stage(
             task_dir,
             task,
             "transcript",
-            lambda: _transcribe_source(source, task_dir, scheduler),
+            lambda: _transcribe_source(
+                source, task_dir, scheduler, selected_material_adapters.asr
+            ),
         )
     else:
         transcript_payload = _load_transcript_payload(task_dir)
@@ -727,7 +745,9 @@ def _run_from_stage(
             lambda: _resource_call(
                 scheduler,
                 "ocr",
-                lambda: _recognize_frames(task_dir, frame_records),
+                lambda: _recognize_frames(
+                    task_dir, frame_records, selected_material_adapters.ocr
+                ),
             ),
         )
     else:
@@ -961,14 +981,14 @@ def _resolve_task_media_path(task_dir: Path, task: TaskRecord) -> Path:
     return resolved
 
 
-def _transcribe(source: Path, task_dir: Path, scheduler: Any) -> dict[str, Any]:
+def _transcribe(
+    source: Path, task_dir: Path, scheduler: Any, adapter: AsrAdapter
+) -> dict[str, Any]:
     output = task_dir / "transcript.json"
     _resource_call(
         scheduler,
         "asr",
-        lambda: providers.run_worker(
-            ["asr", str(source), str(output), "--model", _PRODUCTION_ASR_MODEL]
-        ),
+        lambda: adapter.transcribe(source, output),
     )
     payload = _read_json(output)
     _validate_asr_payload(payload)
@@ -976,7 +996,9 @@ def _transcribe(source: Path, task_dir: Path, scheduler: Any) -> dict[str, Any]:
     return payload
 
 
-def _transcribe_source(source: Path, task_dir: Path, scheduler: Any) -> dict[str, Any]:
+def _transcribe_source(
+    source: Path, task_dir: Path, scheduler: Any, adapter: AsrAdapter
+) -> dict[str, Any]:
     source_payload = _read_json(task_dir / "source.json")
     subtitle_path = source_payload.get("subtitle_path")
     if isinstance(subtitle_path, str) and subtitle_path:
@@ -993,7 +1015,7 @@ def _transcribe_source(source: Path, task_dir: Path, scheduler: Any) -> dict[str
                 _write_json(task_dir / "transcript.json", payload)
                 _write_transcript_markdown(task_dir / "transcript.md", payload)
                 return payload
-    return _transcribe(source, task_dir, scheduler)
+    return _transcribe(source, task_dir, scheduler, adapter)
 
 
 def _extract_frames(
@@ -1034,18 +1056,31 @@ def _extract_frames(
 
 
 def _recognize_frames(
-    task_dir: Path, frame_records: list[dict[str, Any]]
+    task_dir: Path,
+    frame_records: list[dict[str, Any]],
+    adapter: OcrAdapter,
 ) -> dict[str, Any]:
     frames: list[dict[str, Any]] = []
+    provider_names: set[str] = set()
+    model_names: set[str] = set()
     for frame in frame_records:
         output = task_dir / "ocr" / f"{frame['id']}.json"
-        providers.run_worker(
-            ["ocr", str(task_dir / str(frame["artifact_path"])), str(output)]
-        )
+        adapter.recognize(task_dir / str(frame["artifact_path"]), output)
         worker_payload = _read_json(output)
         _validate_ocr_payload(worker_payload)
+        provider_names.add(str(worker_payload["provider"]))
+        if worker_payload.get("model"):
+            model_names.add(str(worker_payload["model"]))
         frames.append({"frame_id": frame["id"], "items": worker_payload["items"]})
-    payload = {"schema_version": "1.0", "provider": "paddleocr", "frames": frames}
+    if len(provider_names) != 1 or len(model_names) > 1:
+        raise PipelineError("OCR frames were produced by inconsistent adapters")
+    payload = {
+        "schema_version": "1.0",
+        "provider": next(iter(provider_names)),
+        "frames": frames,
+    }
+    if model_names:
+        payload["model"] = next(iter(model_names))
     _write_json(task_dir / "ocr.json", payload)
     _write_ocr_markdown(task_dir / "ocr.md", payload)
     return payload
@@ -1309,11 +1344,11 @@ def _record_provider(
 ) -> TaskRecord:
     provider = payload.get("provider")
     model = payload.get("model")
-    providers = {**task.providers}
+    provider_names = {**task.providers}
     models = {**task.models}
-    updates: dict[str, object] = {"providers": providers, "models": models}
+    updates: dict[str, object] = {"providers": provider_names, "models": models}
     if isinstance(provider, str) and provider:
-        providers[stage] = provider
+        provider_names[stage] = provider
         if stage == "asr":
             updates["provider"] = provider
     if isinstance(model, str) and model:

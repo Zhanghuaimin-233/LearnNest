@@ -29,6 +29,7 @@ from learnnest.automation_coordinator import (
 from learnnest.automation_store import (
     authorize as authorize_automation,
     disable as disable_automation,
+    find_intake,
     load_status as load_automation_status,
     save_intake,
     save_policy as save_automation_policy,
@@ -55,6 +56,7 @@ from learnnest.provider_profiles import (
     ProviderRole,
     ProviderRoleNotBoundError,
     clear_role_binding,
+    connection_presets,
     connect as connect_provider,
     delete_connection,
     get_connection,
@@ -72,8 +74,11 @@ from learnnest.tts_providers import (
 from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
 from learnnest.sources import SourceParseError, collect_sources
 from learnnest.task_store import find_task_by_id, load_task
+from learnnest.task_trash import TaskTrashError, trash_task
 from learnnest.web_jobs import WebJob, WebJobStore
 from learnnest.learning_state import (
+    automation_budget_restart_is_due,
+    automation_restart_is_safe,
     automation_retry_admission,
     public_connection_readability,
     public_provider_label,
@@ -322,14 +327,32 @@ class WebService:
             _task_dir, task = found
             if task.stages.get("content_pack") is not StageStatus.COMPLETED:
                 raise ValueError("材料尚未准备完成。")
-            create_intake_for_task(
-                self.output_root,
-                task_id=task.task_id,
-                source_kind=(
-                    "public_url" if task.source_type == "url" else "local_video"
-                ),
-                default_output=self.default_automation_output(),
-            )
+            try:
+                intake = find_intake(self.output_root, task_id)
+            except ValueError as error:
+                raise ValueError(
+                    "任务状态无法安全读取，请重新选择原视频处理。"
+                ) from error
+            if intake is None:
+                create_intake_for_task(
+                    self.output_root,
+                    task_id=task.task_id,
+                    source_kind=(
+                        "public_url" if task.source_type == "url" else "local_video"
+                    ),
+                    default_output=self.default_automation_output(),
+                )
+            elif intake.status == "needs_attention":
+                if not (
+                    automation_budget_restart_is_due(self.output_root, task_id)
+                    or automation_restart_is_safe(self.output_root, task_id)
+                ):
+                    raise ValueError("当前任务不能在原任务上安全继续。")
+                save_intake(
+                    self.output_root, intake.model_copy(update={"status": "pending"})
+                )
+            elif intake.status == "completed":
+                raise ValueError("任务已经完成，不需要重新开始整理。")
         self.wake_automation()
 
     def retry_automation(self, task_id: str) -> None:
@@ -427,13 +450,16 @@ class WebService:
     ) -> dict[str, Any]:
         try:
             settings = load_settings(self.output_root)
+            current_settings_sha256 = settings_sha256(settings)
             writer_binding = settings.role_bindings["note_writer"]
             reviewer_binding = settings.role_bindings["note_reviewer"]
             writer = _automation_connection_snapshot(
-                get_connection(self.output_root, writer_binding.connection_id)
+                get_connection(self.output_root, writer_binding.connection_id),
+                settings_sha256=current_settings_sha256,
             )
             reviewer = _automation_connection_snapshot(
-                get_connection(self.output_root, reviewer_binding.connection_id)
+                get_connection(self.output_root, reviewer_binding.connection_id),
+                settings_sha256=current_settings_sha256,
             )
             save_automation_policy(
                 self.output_root,
@@ -483,6 +509,7 @@ class WebService:
         """Return the intentionally public projection, never settings JSON itself."""
         settings = public_provider_settings(self.output_root)
         current = load_settings(self.output_root)
+        adapters = connection_presets()
         return {
             "connections": [
                 {
@@ -496,6 +523,23 @@ class WebService:
                 for item in settings["connections"]
                 if item["capability"] in {"llm", "tts"}
             ],
+            "adapters": [
+                {
+                    "preset": preset,
+                    "name": public_provider_label(adapter.provider),
+                    "capability": "文本模型"
+                    if adapter.capability == "llm"
+                    else "语音服务",
+                    "local": not adapter.requires_secret,
+                }
+                for preset, adapter in adapters.items()
+                if adapter.capability in {"llm", "tts"}
+            ],
+            "limits": {
+                "retries_per_role": settings["retries_per_role"],
+                "global_calls_per_day": settings["global_calls_per_day"],
+                "budget_group_calls_per_day": settings["budget_group_calls_per_day"],
+            },
             "readiness": public_setup_readiness(self.output_root, default_output),
         }
 
@@ -931,8 +975,18 @@ syncInitialHashBookmark();
         except KeyError as error:
             raise HTTPException(status_code=404, detail="内容不存在。") from error
         except ValueError as error:
-            raise HTTPException(status_code=409, detail="材料尚未准备完成。") from error
+            raise HTTPException(status_code=409, detail=str(error)) from error
         return Response(status_code=202)
+
+    @app.delete("/api/learning/items/{item_ref}")
+    def trash_learning_item(item_ref: str) -> dict[str, str]:
+        try:
+            result = trash_task(service.output_root, item_ref)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="任务不存在。") from error
+        except TaskTrashError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"status": "trashed", "task_id": result.task_id}
 
     @app.post("/api/learning/items/{item_ref}/retry-automation", status_code=202)
     def retry_learning_automation(item_ref: str) -> Response:
@@ -1275,6 +1329,14 @@ def _learning_item_payload(
     }
     if workspace is not None:
         try:
+            workspace.note(item.item_ref)
+        except (KeyError, LearningWorkspaceError):
+            payload["note_href"] = None
+        else:
+            payload["note_href"] = (
+                f"/api/learning/items/{quote(item.item_ref, safe='')}/note"
+            )
+        try:
             workspace.audio(item.item_ref)
         except (KeyError, LearningWorkspaceError):
             payload["audio_href"] = None
@@ -1372,7 +1434,9 @@ def _resolve_note_image(note_path: Path, task_dir: Path, source: str) -> Path:
     return candidate
 
 
-def _automation_connection_snapshot(connection: object) -> AssistedConnectionSnapshot:
+def _automation_connection_snapshot(
+    connection: object, *, settings_sha256: str
+) -> AssistedConnectionSnapshot:
     if getattr(connection, "api_family", None) != "openai_chat":
         raise ValueError("connection cannot generate learning notes")
     return AssistedConnectionSnapshot(
@@ -1386,6 +1450,7 @@ def _automation_connection_snapshot(connection: object) -> AssistedConnectionSna
         .lower(),
         model=str(getattr(connection, "model")),
         adapter_revision=str(getattr(connection, "adapter_revision")),
+        settings_sha256=settings_sha256,
     )
 
 

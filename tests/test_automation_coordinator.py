@@ -291,6 +291,44 @@ def test_coordinator_coalesces_threadsafe_wakes_without_concurrent_runner(
     assert calls == [("20260807-wake",)]
 
 
+def test_coordinator_drains_pending_backlog_after_wakes_are_coalesced(
+    tmp_path: Path,
+) -> None:
+    root = _authorized_root(tmp_path)
+    task_ids = tuple(f"20260807-backlog-{index}" for index in range(3))
+    for task_id in task_ids:
+        _material_task(root, task_id)
+        create_intake(
+            root,
+            AutomationIntake(
+                task_id=task_id,
+                source_kind="local_video",
+                default_output="complete_note",
+                created_at=datetime(2026, 8, 7, tzinfo=UTC),
+            ),
+        )
+    calls: list[tuple[str, ...]] = []
+
+    def run_tasks(
+        _root: Path, selected: tuple[str, ...], **_kwargs: object
+    ) -> AutomationRunResult:
+        calls.append(selected)
+        return AutomationRunResult(selected, selected, ())
+
+    async def exercise() -> None:
+        coordinator = AutomationCoordinator(root, run_tasks=run_tasks)
+        await coordinator.start()
+        for _ in range(100):
+            if len(calls) == len(task_ids):
+                break
+            await asyncio.sleep(0.01)
+        await coordinator.shutdown()
+
+    asyncio.run(exercise())
+    assert calls == [(task_id,) for task_id in task_ids]
+    assert all(load_intake(root, task_id).status == "completed" for task_id in task_ids)
+
+
 def test_coordinator_keeps_the_intake_output_after_policy_changes(
     tmp_path: Path,
 ) -> None:

@@ -14,10 +14,7 @@ const api = async (path, options = {}) => {
 };
 
 const notice = document.querySelector("#notice");
-const sourceJobs = document.createElement("section");
-sourceJobs.className = "source-jobs";
-sourceJobs.hidden = true;
-notice?.insertAdjacentElement("afterend", sourceJobs);
+const sourceJobs = document.querySelector("#source-jobs");
 const uploadForm = document.querySelector("#upload-form");
 const urlForm = document.querySelector("#url-form");
 const lists = {
@@ -51,7 +48,31 @@ const authorizeAutomationButton = document.querySelector("#authorize-automation"
 const disableAutomationButton = document.querySelector("#disable-automation");
 const addSelectedFavoritesButton = document.querySelector("#add-selected-favorites");
 const favoriteSelection = document.querySelector("#favorite-selection");
+const taskList = document.querySelector("#task-list");
+const taskDetail = document.querySelector("#task-detail");
+const taskSummary = document.querySelector("#task-summary");
+const taskCount = document.querySelector("#task-count");
+const taskListTitle = document.querySelector("#task-list-title");
+const defaultOutputLabel = document.querySelector("#default-output-label");
+const singleVideoOutput = document.querySelector("#single-video-output");
+const singleVideoReadiness = document.querySelector("#single-video-readiness");
+const singleVideoDialog = document.querySelector("#single-video-dialog");
+const deleteTaskDialog = document.querySelector("#delete-task-dialog");
+const deleteTaskForm = document.querySelector("#delete-task-form");
+const deleteTaskTitle = document.querySelector("#delete-task-title");
+const selectedVideoName = document.querySelector("#selected-video-name");
+const connectionDialog = document.querySelector("#connection-dialog");
+const providerAdapterList = document.querySelector("#provider-adapter-list");
+const providerLimitsForm = document.querySelector("#provider-limits-form");
+const providerLimitsFeedback = document.querySelector("#provider-limits-feedback");
+const runtimeState = document.querySelector(".runtime-state");
+const runtimeTitle = document.querySelector("#runtime-title");
+const runtimeCopy = document.querySelector("#runtime-copy");
+const settingsReadiness = document.querySelector(".settings-readiness");
+const settingsReadinessTitle = document.querySelector("#settings-readiness-title");
+const settingsReadinessCopy = document.querySelector("#settings-readiness-copy");
 let windowsVoicesLoaded = false;
+let pendingDeleteItemRef = null;
 const stateLabel = {
   materials_ready: "材料已准备",
   waiting_setup: "等待设置",
@@ -59,10 +80,10 @@ const stateLabel = {
   queued: "等待整理",
   organizing: "正在整理",
   partial_ready: "笔记已就绪，音频待完成",
-  needs_action: "需要处理",
+  needs_action: "需要你处理",
   ready: "可阅读",
 };
-const learningActionKinds = new Set(["open_note", "open_settings", "open_automation", "continue", "start_automation", "retry_automation"]);
+const learningActionKinds = new Set(["open_note", "open_settings", "open_automation", "open_single_video", "continue", "start_automation", "retry_automation"]);
 const loginLabel = {
   disconnected: "未连接",
   starting: "准备中",
@@ -87,13 +108,22 @@ let loginRefreshInFlight = false;
 let selectedFavoriteIdsState = new Set();
 let suggestedProviderConnectionName = "";
 const dirtySettingsForms = new Set();
+let currentSnapshot = { inbox: [], processing: [], library: [] };
+let selectedItemRef = null;
+let activeTaskFilter = "all";
+let noticeTimer = null;
 const providerConnectionNameDefaults = {
   "windows-tts": "windows-tts",
   "local-asr": "local-asr",
   "local-ocr": "local-ocr",
 };
 
-function say(message) { notice.textContent = message; }
+function say(message) {
+  window.clearTimeout(noticeTimer);
+  notice.textContent = message;
+  notice.hidden = false;
+  noticeTimer = window.setTimeout(() => { notice.hidden = true; }, 4200);
+}
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value ?? ""; return node.innerHTML; }
 
 function renderProviderSettings(settings) {
@@ -102,9 +132,9 @@ function renderProviderSettings(settings) {
   providerState.className = `status-pill ${configured ? "connected" : ""}`;
   providerList.innerHTML = settings.connections.length
     ? settings.connections.map((item) => {
-      return `<div class="provider-row"><span>${escapeHtml(item.name)}</span><span>${escapeHtml(item.provider)}</span><span>${escapeHtml(item.state)}</span><div class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查连接</button><button type="button" data-delete-connection="${escapeHtml(item.name)}">删除</button></div></div>`;
+      return `<div class="provider-row"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.provider)} · ${escapeHtml(item.state)}</span><div class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查连接</button><button type="button" data-delete-connection="${escapeHtml(item.name)}">删除</button></div></div>`;
     }).join("")
-    : '<p class="empty">还没有学习连接。</p>';
+    : '<p class="empty">还没有学习连接。点击“添加连接”选择一个当前支持的服务。</p>';
   providerList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", async () => {
     const label = button.textContent;
     button.disabled = true;
@@ -116,7 +146,26 @@ function renderProviderSettings(settings) {
     } catch (error) { providerFeedback.textContent = error.message; say(error.message); } finally { button.disabled = false; button.textContent = label; }
   }));
   providerList.querySelectorAll("button[data-delete-connection]").forEach((button) => button.addEventListener("click", () => deleteProviderConnection(button)));
+  renderProviderAdapters(settings.adapters || []);
+  renderProviderLimits(settings.limits);
   renderSetupReadiness(settings.readiness);
+}
+
+function renderProviderAdapters(adapters) {
+  providerAdapterList.innerHTML = adapters.length
+    ? adapters.map((adapter) => `<article class="adapter-card"><span>${escapeHtml(adapter.capability)}${adapter.local ? " · 本地" : ""}</span><strong>${escapeHtml(adapter.name)}</strong><button type="button" data-add-adapter="${escapeHtml(adapter.preset)}">添加连接</button></article>`).join("")
+    : '<p class="empty">当前没有可添加的模型或语音服务。</p>';
+  providerAdapterList.querySelectorAll("button[data-add-adapter]").forEach((button) => button.addEventListener("click", () => openConnectionDialog(button.dataset.addAdapter)));
+}
+
+function renderProviderLimits(limits) {
+  if (!limits || settingsFormNeedsProtection(providerLimitsForm)) return;
+  providerLimitsForm.elements.retries_per_role.value = limits.retries_per_role;
+  providerLimitsForm.elements.global_calls_per_day.value = limits.global_calls_per_day;
+  const groups = limits.budget_group_calls_per_day || {};
+  for (const name of ["note", "podcast", "tts", "asr", "ocr"]) {
+    providerLimitsForm.elements[`limit_${name}`].value = groups[name] ?? 0;
+  }
 }
 
 function suggestProviderConnectionName() {
@@ -147,8 +196,13 @@ function showProviderUpdateFailure(error) {
 
 function renderSetupReadiness(readiness) {
   if (!readiness) return;
-  setupReadiness.innerHTML = `<p class="chapter-label">所选结果：${escapeHtml(readiness.default_output)}</p>`
-    + `<p class="section-note">${escapeHtml(readiness.message)}</p>`
+  const ready = readiness.state === "可以自动整理";
+  settingsReadiness.classList.toggle("is-ready", ready);
+  settingsReadinessTitle.textContent = ready ? "当前可以完整产出" : readiness.state;
+  settingsReadinessCopy.textContent = readiness.message;
+  singleVideoReadiness.textContent = readiness.message;
+  setupReadiness.innerHTML = `<p class="panel-kicker">所选结果：${escapeHtml(readiness.default_output)}</p>`
+    + `<p>${escapeHtml(readiness.message)}</p>`
     + `<div class="provider-role-list">${readiness.required_roles.map((role) => {
       const options = role.options.map((item) => `<option value="${escapeHtml(item.name)}"${item.name === role.connection ? " selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.provider)}</option>`).join("");
       const control = role.connection
@@ -157,7 +211,7 @@ function renderSetupReadiness(readiness) {
           ? `<select aria-label="为${escapeHtml(role.name)}选择连接" data-setup-role-select="${escapeHtml(role.name)}"><option value="">选择连接</option>${options}</select><button type="button" data-bind-setup-role="${escapeHtml(role.name)}">绑定</button>`
           : `<span class="field-hint">${escapeHtml(role.hint || "请先添加兼容连接。")}</span>`;
       return `<div class="provider-role-summary"><span>${escapeHtml(role.name)}</span><span>${escapeHtml(role.connection || role.state)}</span><div class="provider-role-actions"><strong>${escapeHtml(role.state)}</strong>${control}</div></div>`;
-    }).join("")}</div><p class="section-note">自动整理：${escapeHtml(readiness.authorization.state)}。${escapeHtml(readiness.authorization.message)}</p>`;
+    }).join("")}</div><p>自动处理：${escapeHtml(readiness.authorization.state)}。${escapeHtml(readiness.authorization.message)}</p>`;
   setupReadiness.querySelectorAll("button[data-bind-setup-role]").forEach((button) => button.addEventListener("click", () => bindSetupRole(button)));
   setupReadiness.querySelectorAll("button[data-unbind-setup-role]").forEach((button) => button.addEventListener("click", () => clearSetupRole(button)));
   setupReadiness.querySelectorAll("select[data-setup-role-select]").forEach((select) => select.addEventListener("change", () => dirtySettingsForms.add(setupReadiness)));
@@ -237,6 +291,7 @@ async function loadProviderSettings(defaultOutput = null, protectDirty = false) 
   try {
     const settings = await api(`/api/providers/settings${defaultOutput ? `?default_output=${encodeURIComponent(defaultOutput)}` : ""}`);
     if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(setupReadiness))) return;
+    if (protectDirty && settingsFormNeedsProtection(providerLimitsForm)) return;
     renderProviderSettings(settings);
     await refreshWindowsVoices();
   } catch (error) { providerState.textContent = "无法读取"; }
@@ -248,31 +303,134 @@ function settingsFormNeedsProtection(form) {
 }
 
 async function refreshProviderSettingsWhenIdle() {
-  if (!settingsFormNeedsProtection(providerForm) && !settingsFormNeedsProtection(setupReadiness)) await loadProviderSettings(automationForm.elements.default_output.value, true);
+  if (!settingsFormNeedsProtection(providerForm) && !settingsFormNeedsProtection(setupReadiness) && !settingsFormNeedsProtection(providerLimitsForm)) await loadProviderSettings(automationForm.elements.default_output.value, true);
 }
 
 function renderList(target, items, empty) {
   if (!items.length) {
-    target.innerHTML = `<p class="empty">${escapeHtml(empty)}</p>`;
+    target.innerHTML = empty ? `<p class="empty">${escapeHtml(empty)}</p>` : "";
     return;
   }
   target.innerHTML = items.map((item) => `
-    <article class="learning-row">
-      <span class="status-bookmark ${escapeHtml(item.state)}" aria-label="${escapeHtml(stateLabel[item.state])}"></span>
+    <article class="learning-row${item.item_ref === selectedItemRef ? " is-selected" : ""}" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}" tabindex="0">
       <div class="learning-copy">
         <h3>${escapeHtml(item.title)}</h3>
         <p>${escapeHtml(item.source)} · ${escapeHtml(item.message)}</p>
       </div>
+      <span class="learning-state">${escapeHtml(stateLabel[item.state] || "需要检查")}</span>
+      <span class="task-progress" aria-hidden="true" style="--task-progress:${taskProgress(item)}%"><i></i></span>
       ${item.action && learningActionKinds.has(item.action_kind) ? `<button type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}
       ${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}
     </article>`).join("");
+  target.querySelectorAll("article[data-item-ref]").forEach((row) => {
+    row.addEventListener("click", (event) => {
+      if (event.target.closest("button, audio")) return;
+      selectTask(row.dataset.itemRef);
+    });
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectTask(row.dataset.itemRef); }
+    });
+  });
   target.querySelectorAll("button[data-item-ref]").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
 }
 
 function render(snapshot) {
-  renderList(lists.library, snapshot.library, "还没有可以打开的笔记。");
-  renderList(lists.processing, snapshot.processing, "现在没有正在整理的内容。");
-  renderList(lists.inbox, snapshot.inbox, "添加内容后，它会在这里等待你。 ");
+  currentSnapshot = snapshot;
+  renderList(lists.library, snapshot.library, "");
+  renderList(lists.processing, snapshot.processing, "");
+  renderList(lists.inbox, snapshot.inbox, "");
+  const items = allLearningItems();
+  if (!items.length) lists.processing.innerHTML = '<p class="empty">还没有任务。处理单个视频或从来源页添加内容。</p>';
+  if (!selectedItemRef || !items.some((item) => item.item_ref === selectedItemRef)) selectedItemRef = items[0]?.item_ref || null;
+  const counts = {
+    all: items.length,
+    attention: items.filter((item) => taskFilterFor(item) === "attention").length,
+    processing: items.filter((item) => taskFilterFor(item) === "processing").length,
+    queued: items.filter((item) => taskFilterFor(item) === "queued").length,
+    completed: items.filter((item) => taskFilterFor(item) === "completed").length,
+  };
+  for (const [name, count] of Object.entries(counts)) document.querySelector(`[data-filter-count="${name}"]`).textContent = count;
+  taskCount.textContent = counts.all;
+  taskSummary.innerHTML = `<strong>${counts.processing} 项正在处理</strong>，${counts.attention} 项需要你处理，${counts.completed} 项已完成。`;
+  applyTaskFilter();
+  renderTaskDetail(items.find((item) => item.item_ref === selectedItemRef));
+}
+
+function allLearningItems() {
+  return [...currentSnapshot.processing, ...currentSnapshot.inbox, ...currentSnapshot.library];
+}
+
+function taskFilterFor(item) {
+  if (["needs_action", "waiting_setup", "waiting_authorization"].includes(item.state)) return "attention";
+  if (["organizing", "partial_ready"].includes(item.state)) return "processing";
+  if (item.state === "ready") return "completed";
+  return "queued";
+}
+
+function taskProgress(item) {
+  if (item.state === "ready") return item.audio_href ? 100 : 76;
+  if (item.state === "partial_ready") return 78;
+  if (item.state === "organizing") return 58;
+  if (item.state === "needs_action") return item.message.includes("音频") ? 78 : 52;
+  return 34;
+}
+
+function applyTaskFilter() {
+  taskList.querySelectorAll("article[data-filter]").forEach((row) => {
+    row.hidden = activeTaskFilter !== "all" && row.dataset.filter !== activeTaskFilter;
+  });
+  const label = document.querySelector(`[data-filter="${activeTaskFilter}"] span`)?.textContent?.trim() || "全部任务";
+  taskListTitle.textContent = label;
+}
+
+function selectTask(itemRef) {
+  selectedItemRef = itemRef;
+  taskList.querySelectorAll("article[data-item-ref]").forEach((row) => row.classList.toggle("is-selected", row.dataset.itemRef === itemRef));
+  renderTaskDetail(allLearningItems().find((item) => item.item_ref === itemRef));
+  if (window.matchMedia("(max-width: 760px)").matches) taskDetail.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function trackSteps(item) {
+  let completed = 1;
+  if (["materials_ready", "waiting_setup", "waiting_authorization", "queued", "organizing", "partial_ready", "needs_action", "ready"].includes(item.state)) completed = 2;
+  if (["partial_ready", "ready"].includes(item.state) || (item.state === "needs_action" && item.message.includes("音频"))) completed = 3;
+  if (item.state === "ready" && item.audio_href) completed = 4;
+  return ["获取内容", "准备材料", "生成笔记", "生成音频"].map((label, index) => ({ label, done: index < completed, current: index === completed && completed < 4 }));
+}
+
+function renderTaskDetail(item) {
+  if (!item) {
+    taskDetail.classList.remove("has-selection");
+    taskDetail.innerHTML = '<div class="empty-detail"><span aria-hidden="true">⌁</span><h2>还没有任务</h2><p>从“处理单个视频”或来源页添加第一项内容。</p></div>';
+    return;
+  }
+  taskDetail.classList.add("has-selection");
+  const steps = trackSteps(item);
+  const percent = taskProgress(item);
+  const needsUserAction = ["needs_action", "waiting_setup", "waiting_authorization"].includes(item.state);
+  const actionHeading = item.action ? "下一步" : needsUserAction ? "当前需要你处理" : "当前不需要操作";
+  const actionCopy = item.action || needsUserAction
+    ? item.message
+    : "语栖会根据当前事实更新这里；遇到需要确认的问题时会给出明确操作。";
+  taskDetail.innerHTML = `
+    <div class="detail-heading"><div><p class="panel-kicker">当前任务</p><h2>${escapeHtml(item.title)}</h2><p class="detail-source">${escapeHtml(item.source)}</p></div><span class="detail-status ${escapeHtml(item.state)}">${escapeHtml(stateLabel[item.state] || "需要检查")}</span></div>
+    <p class="detail-message">${escapeHtml(item.message)}</p>
+    <section class="production-section"><div class="production-heading"><h3>产出轨道</h3><span>${percent}%</span></div><div class="production-track">${steps.map((step) => `<span class="track-step${step.done ? " is-done" : ""}${step.current ? " is-current" : ""}"><i>${step.done ? "✓" : ""}</i><strong>${step.label}</strong></span>`).join("")}</div></section>
+    <div class="detail-action"><strong>${actionHeading}</strong><p>${escapeHtml(actionCopy)}</p><div class="detail-action-controls">${item.action && learningActionKinds.has(item.action_kind) ? `<button type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}<button class="danger-link" type="button" data-delete-item-ref="${escapeHtml(item.item_ref)}"${item.state === "organizing" ? ' disabled title="正在处理，暂时不能删除"' : ""}>删除任务</button></div>${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}</div>`;
+  taskDetail.querySelectorAll("button[data-item-ref]").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
+  taskDetail.querySelector("button[data-delete-item-ref]:not(:disabled)")?.addEventListener("click", () => openDeleteTask(item));
+}
+
+function openDeleteTask(item) {
+  pendingDeleteItemRef = item.item_ref;
+  deleteTaskTitle.textContent = item.title;
+  deleteTaskDialog.showModal();
+  window.requestAnimationFrame(() => document.querySelector("#confirm-delete-task")?.focus({ preventScroll: true }));
+}
+
+function closeDeleteTask() {
+  pendingDeleteItemRef = null;
+  if (deleteTaskDialog.open) deleteTaskDialog.close();
 }
 
 function thumbnailHref(relativePath) {
@@ -362,6 +520,13 @@ function renderAutomationStatus(status) {
   const enabled = status.enabled;
   automationState.textContent = enabled ? "自动整理已开启" : status.needs_authorization ? "需要重新确认" : status.configured ? "等待确认" : "等待设置";
   automationState.className = `status-pill ${enabled ? "connected" : ""}`;
+  const output = status.default_output || "complete_note_with_audio";
+  const outputLabel = output === "complete_note" ? "完整笔记" : "笔记 + 音频";
+  defaultOutputLabel.textContent = outputLabel;
+  singleVideoOutput.textContent = outputLabel;
+  runtimeState.classList.toggle("is-on", enabled);
+  runtimeTitle.textContent = enabled ? "自动处理已开启" : "自动处理已关闭";
+  runtimeCopy.textContent = enabled ? "仅在语栖运行时工作" : "单个任务仍可加入并等待设置";
   automationSummary.textContent = enabled
     ? `会按 ${status.check_interval_seconds} 秒检查收件箱；默认生成${status.default_output === "complete_note" ? "完整笔记" : "完整笔记和播客音频"}。`
     : "保存设置后，需要勾选付费确认才会开始自动整理。";
@@ -371,6 +536,37 @@ function renderAutomationStatus(status) {
     automationForm.elements.auto_organize_new_favorites.checked = status.auto_organize_new_favorites;
     automationForm.elements.max_items_per_tick.value = status.max_items_per_tick;
   }
+}
+
+function showView(view, updateHash = true) {
+  const target = document.querySelector(`[data-view-panel="${view}"]`);
+  if (!target) return;
+  document.querySelectorAll("[data-view-panel]").forEach((panel) => {
+    const visible = panel === target;
+    panel.hidden = !visible;
+    panel.classList.toggle("is-visible", visible);
+  });
+  document.querySelectorAll(".bookmark[data-view]").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
+  document.querySelector(".mobile-primary-action").hidden = view === "settings";
+  if (updateHash && window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
+  window.scrollTo({ top: 0, behavior: "auto" });
+}
+
+function showSettingsPanel(panelName) {
+  document.querySelectorAll("[data-settings-panel]").forEach((panel) => {
+    const visible = panel.dataset.settingsPanel === panelName;
+    panel.hidden = !visible;
+    panel.classList.toggle("is-visible", visible);
+  });
+  document.querySelectorAll("[data-settings-tab]").forEach((button) => button.classList.toggle("is-active", button.dataset.settingsTab === panelName));
+}
+
+function openConnectionDialog(preset = null) {
+  if (preset) providerForm.elements.preset.value = preset;
+  suggestProviderConnectionName();
+  refreshWindowsVoices().catch((error) => say(error.message));
+  connectionDialog.showModal();
+  window.requestAnimationFrame(() => providerForm.elements.name.focus());
 }
 
 async function loadAutomationStatus() { try { renderAutomationStatus(await api("/api/automation/status")); } catch (error) { automationState.textContent = "无法读取"; } }
@@ -572,12 +768,21 @@ async function actOnItem(itemRef, action) {
       return;
     }
     if (action === "open_settings") {
+      showView("settings");
+      showSettingsPanel("connections");
       document.querySelector("#settings")?.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }
     if (action === "open_automation") {
+      showView("settings");
+      showSettingsPanel("output");
       document.querySelector("#settings")?.scrollIntoView({ behavior: "smooth", block: "start" });
       window.requestAnimationFrame(() => confirmPaid?.focus({ preventScroll: true }));
+      return;
+    }
+    if (action === "open_single_video") {
+      singleVideoDialog.showModal();
+      window.requestAnimationFrame(() => document.querySelector("#local-video")?.focus({ preventScroll: true }));
       return;
     }
     if (action === "start_automation") {
@@ -615,9 +820,33 @@ uploadForm.addEventListener("submit", async (event) => {
     });
     say("已加入收件箱，正在整理材料。");
     submittedForm.reset();
+    selectedVideoName.textContent = "MP4、MOV、MKV、AVI、MPEG 或 WebM";
+    singleVideoDialog.close();
+    showView("tasks");
     await refresh(true);
   } catch (error) {
     say(error.message);
+  }
+});
+
+deleteTaskForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!pendingDeleteItemRef) return;
+  const taskId = pendingDeleteItemRef;
+  const button = document.querySelector("#confirm-delete-task");
+  button.disabled = true;
+  button.textContent = "正在移入回收区…";
+  try {
+    await api(`/api/learning/items/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+    closeDeleteTask();
+    selectedItemRef = null;
+    say("任务已移入回收区。");
+    await Promise.all([refresh(true), loadSourceJobs()]);
+  } catch (error) {
+    say(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "移入回收区";
   }
 });
 
@@ -629,6 +858,7 @@ urlForm.addEventListener("submit", async (event) => {
     await api("/api/learning/submit", { method: "POST", body: JSON.stringify({ source: form.get("source") }) });
     say("已加入收件箱，正在整理材料。");
     submittedForm.reset();
+    showView("tasks");
     await refresh(true);
   } catch (error) { say(error.message); }
 });
@@ -640,6 +870,7 @@ addSelectedFavoritesButton.addEventListener("click", async () => {
     await api("/api/douyin/favorites/select", { method: "POST", body: JSON.stringify({ aweme_ids: awemeIds }) });
     say("已加入收件箱，正在整理材料。");
     selectedFavoriteIdsState.clear();
+    showView("tasks");
     await refresh(true);
   } catch (error) { say(error.message); }
 });
@@ -687,6 +918,7 @@ providerForm.addEventListener("submit", async (event) => {
     renderProviderSettings(settings);
     providerFeedback.textContent = "连接已保存；密钥不会显示在页面中。";
     say(providerFeedback.textContent);
+    connectionDialog.close();
   } catch (error) { showProviderUpdateFailure(error); } finally { finishSaving(); }
 });
 
@@ -696,28 +928,81 @@ providerForm.elements.preset.addEventListener("change", () => {
   refreshWindowsVoices().catch((error) => say(error.message));
 });
 
-for (const form of [providerForm, automationForm]) {
+providerLimitsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const button = event.submitter;
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "保存中…";
+  try {
+    const settings = await api("/api/providers/limits", {
+      method: "PUT",
+      body: JSON.stringify({
+        retries_per_role: Number(form.get("retries_per_role")),
+        global_calls_per_day: Number(form.get("global_calls_per_day")),
+        budget_group_calls_per_day: Object.fromEntries(["note", "podcast", "tts", "asr", "ocr"].map((name) => [name, Number(form.get(`limit_${name}`))])),
+      }),
+    });
+    dirtySettingsForms.delete(providerLimitsForm);
+    renderProviderSettings(settings);
+    await loadAutomationStatus();
+    providerLimitsFeedback.textContent = "调用限制已保存；自动处理需要重新确认。";
+    say(providerLimitsFeedback.textContent);
+  } catch (error) {
+    providerLimitsFeedback.textContent = error.message;
+    say(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+});
+
+for (const form of [providerForm, automationForm, providerLimitsForm]) {
   form.addEventListener("input", () => dirtySettingsForms.add(form));
   form.addEventListener("change", () => dirtySettingsForms.add(form));
   form.addEventListener("reset", () => {
     dirtySettingsForms.delete(form);
     window.setTimeout(() => {
       if (form === providerForm) loadProviderSettings(automationForm.elements.default_output.value);
-      else loadAutomationStatus();
+      else if (form === automationForm) loadAutomationStatus();
+      else loadProviderSettings(automationForm.elements.default_output.value);
     });
   });
 }
 
-document.querySelectorAll(".bookmark").forEach((link) => link.addEventListener("click", () => {
-  document.querySelectorAll(".bookmark").forEach((item) => item.classList.remove("active"));
-  link.classList.add("active");
+document.querySelectorAll(".bookmark[data-view]").forEach((link) => link.addEventListener("click", (event) => {
+  event.preventDefault();
+  showView(link.dataset.view);
 }));
 
 window.addEventListener("hashchange", () => {
   const current = document.querySelector(`.bookmark[href="${CSS.escape(window.location.hash)}"]`);
   if (!current) return;
-  document.querySelectorAll(".bookmark").forEach((item) => item.classList.toggle("active", item === current));
+  showView(current.dataset.view, false);
 });
+
+document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => {
+  activeTaskFilter = button.dataset.filter;
+  document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("is-active", item === button));
+  applyTaskFilter();
+}));
+document.querySelectorAll("[data-settings-tab]").forEach((button) => button.addEventListener("click", () => showSettingsPanel(button.dataset.settingsTab)));
+document.querySelectorAll("[data-open-single-video]").forEach((button) => button.addEventListener("click", () => singleVideoDialog.showModal()));
+document.querySelectorAll("[data-close-single-video]").forEach((button) => button.addEventListener("click", () => singleVideoDialog.close()));
+document.querySelectorAll("[data-close-delete-task]").forEach((button) => button.addEventListener("click", closeDeleteTask));
+deleteTaskDialog.addEventListener("close", () => { pendingDeleteItemRef = null; });
+document.querySelectorAll("[data-go-settings]").forEach((button) => button.addEventListener("click", () => {
+  if (singleVideoDialog.open) singleVideoDialog.close();
+  showView("settings");
+  showSettingsPanel("output");
+}));
+document.querySelector("#open-connection-dialog").addEventListener("click", () => openConnectionDialog());
+document.querySelectorAll("[data-close-connection]").forEach((button) => button.addEventListener("click", () => connectionDialog.close()));
+document.querySelector("#local-video").addEventListener("change", (event) => {
+  selectedVideoName.textContent = event.currentTarget.files[0]?.name || "MP4、MOV、MKV、AVI、MPEG 或 WebM";
+});
+document.querySelector("#refresh-tasks").addEventListener("click", () => refresh(true));
 
 connectDouyinButton.addEventListener("click", connectDouyin);
 refreshDouyinButton.addEventListener("click", refreshDouyinQr);
@@ -727,4 +1012,5 @@ document.addEventListener("visibilitychange", () => refresh(true));
 restoreDouyinLogin();
 suggestProviderConnectionName();
 loadProviderSettings();
+showView(["tasks", "sources", "settings"].includes(window.location.hash.slice(1)) ? window.location.hash.slice(1) : "tasks", false);
 refresh(true);

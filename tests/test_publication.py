@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from hashlib import sha256
+import json
 from pathlib import Path
 
 import pytest
@@ -105,6 +107,30 @@ def test_activate_note_bundle_accepts_legacy_task_markers(tmp_path: Path) -> Non
 
     assert activated.stages["publish"] is StageStatus.COMPLETED
     assert "# new note" in published.read_text(encoding="utf-8")
+
+
+def test_note_ownership_accepts_verified_standard_bundle_metadata(
+    tmp_path: Path,
+) -> None:
+    from learnnest.publication import note_belongs_to_task
+
+    note = tmp_path / "note.md"
+    body = "# 标准笔记\n"
+    note.write_text(body, encoding="utf-8")
+    (tmp_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "task_id": "20260711-a1b2c3d4",
+                "body_path": "note.md",
+                "body_sha256": sha256(note.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert note_belongs_to_task(note, "20260711-a1b2c3d4") is True
+    note.write_text("# 已被修改\n", encoding="utf-8")
+    assert note_belongs_to_task(note, "20260711-a1b2c3d4") is False
 
 
 def test_note_pointer_failure_keeps_old_task_and_published_note(

@@ -90,10 +90,50 @@ def authorize(
 
     settings = load_settings(output_root)
     current_settings_sha = settings_sha256(settings)
+    note_snapshots = (
+        ("note_writer", status.policy.writer),
+        ("note_reviewer", status.policy.reviewer),
+    )
+    refreshed_note_snapshots = {
+        "note_writer": status.policy.writer,
+        "note_reviewer": status.policy.reviewer,
+    }
+    configured_note_roles = [
+        settings.role_bindings.get(role) for role, _ in note_snapshots
+    ]
+    snapshot_hashes = [snapshot.settings_sha256 for _role, snapshot in note_snapshots]
+    if any(value is not None for value in snapshot_hashes) and not all(
+        value is not None for value in snapshot_hashes
+    ):
+        raise ValueError("automation note role identity is incomplete")
+    if all(value is not None for value in snapshot_hashes) and any(
+        binding is not None for binding in configured_note_roles
+    ):
+        if any(binding is None for binding in configured_note_roles):
+            raise ValueError("automation note roles are incomplete")
+        for role, snapshot in note_snapshots:
+            binding = settings.role_bindings[role]
+            connection = settings.connections[binding.connection_id]
+            if (
+                snapshot.connection_id != connection.connection_id
+                or snapshot.connection_name != connection.name
+                or snapshot.secret_id != connection.secret_id
+                or snapshot.provider != connection.provider
+                or snapshot.endpoint_identity
+                != connection.endpoint.strip().rstrip("/").lower()
+                or snapshot.model != connection.model
+                or snapshot.adapter_revision != connection.adapter_revision
+            ):
+                raise ValueError("automation note roles changed after configuration")
+            refreshed_note_snapshots[role] = snapshot.model_copy(
+                update={"settings_sha256": current_settings_sha}
+            )
     from learnnest.automation_models import AutomationBudget
 
     policy = status.policy.model_copy(
         update={
+            "writer": refreshed_note_snapshots["note_writer"],
+            "reviewer": refreshed_note_snapshots["note_reviewer"],
             "enabled": True,
             "authorized_at": (now or datetime.now(UTC)).astimezone(UTC),
             "provider_settings_sha256": current_settings_sha,
@@ -153,9 +193,17 @@ def save_task_state(output_root: str | Path, state: AutomationTaskState) -> None
 
 def task_has_execution_facts(output_root: str | Path, task_id: str) -> bool:
     """Return whether any durable automation state already fixes task identity."""
+    return bool(list_task_policy_states(output_root, task_id))
+
+
+def list_task_policy_states(
+    output_root: str | Path, task_id: str
+) -> tuple[AutomationTaskState, ...]:
+    """Load every policy-scoped state for one task without choosing a policy."""
     directory = automation_directory(output_root) / "tasks" / task_id
     if not directory.is_dir():
-        return False
+        return ()
+    states: list[AutomationTaskState] = []
     for path in sorted(directory.glob("*.json")):
         try:
             state = AutomationTaskState.model_validate_json(path.read_bytes())
@@ -163,8 +211,19 @@ def task_has_execution_facts(output_root: str | Path, task_id: str) -> bool:
             raise ValueError("automation task state is missing or invalid") from error
         if state.task_id != task_id or path.stem != state.policy_sha256:
             raise ValueError("automation task state does not match its identity")
-        return True
-    return False
+        states.append(state)
+    return tuple(states)
+
+
+def task_is_zero_attempt_budget_blocked(output_root: str | Path, task_id: str) -> bool:
+    """Whether all durable execution facts are a pre-call budget stop."""
+    states = list_task_policy_states(output_root, task_id)
+    return bool(states) and all(
+        state.status == "pending"
+        and state.blocked_reason == "provider_budget_exhausted"
+        and not state.attempts
+        for state in states
+    )
 
 
 def create_intake(

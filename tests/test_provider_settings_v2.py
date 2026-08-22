@@ -77,6 +77,48 @@ def test_dpapi_secret_is_ciphertext_and_never_enters_settings_or_web_api(
     assert connection.secret_id is not None
 
 
+def test_provider_settings_projects_the_real_webui_catalog_and_editable_limits(
+    tmp_path: Path,
+) -> None:
+    response = TestClient(create_web_app(tmp_path)).get("/api/providers/settings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["adapters"] == [
+        {"preset": "mimo", "name": "MiMo", "capability": "文本模型", "local": False},
+        {
+            "preset": "deepseek",
+            "name": "DeepSeek",
+            "capability": "文本模型",
+            "local": False,
+        },
+        {
+            "preset": "mimo-tts",
+            "name": "MiMo TTS",
+            "capability": "语音服务",
+            "local": False,
+        },
+        {
+            "preset": "windows-tts",
+            "name": "Windows 系统语音",
+            "capability": "语音服务",
+            "local": True,
+        },
+    ]
+    assert payload["limits"] == {
+        "retries_per_role": 1,
+        "global_calls_per_day": 80,
+        "budget_group_calls_per_day": {
+            "note": 20,
+            "podcast": 20,
+            "tts": 20,
+            "asr": 20,
+            "ocr": 20,
+        },
+    }
+    assert "endpoint" not in response.text
+
+
 @pytest.mark.parametrize(
     ("name", "preset", "secret_value", "expected_provider"),
     [

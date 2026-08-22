@@ -218,6 +218,68 @@ def test_process_video_compacts_intermediate_sources_into_content_pack_and_trace
     assert task.attempts[0].status == "completed"
 
 
+def test_process_video_executes_the_selected_material_adapters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import learnnest.pipeline as pipeline
+    from learnnest.material_adapters import MaterialAdapters
+
+    calls: list[str] = []
+
+    class SelectedAsr:
+        def transcribe(self, _source: Path, output: Path) -> None:
+            calls.append("asr")
+            output.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "provider": "selected-asr",
+                        "model": "selected-model",
+                        "segments": [
+                            {
+                                "id": "tr_0001",
+                                "start_ms": 0,
+                                "end_ms": 1_000,
+                                "text": "真实选择",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+    class SelectedOcr:
+        def recognize(self, _image: Path, output: Path) -> None:
+            calls.append("ocr")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "provider": "selected-ocr",
+                        "items": [{"text": "画面", "confidence": 0.98}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr(pipeline, "probe_video", lambda path: _probe())
+    monkeypatch.setattr(pipeline, "extract_frame", _fake_ffmpeg)
+
+    task = process_video(
+        _video(tmp_path / "selected.mp4"),
+        tmp_path / "output",
+        material_adapters=MaterialAdapters(asr=SelectedAsr(), ocr=SelectedOcr()),
+    )
+
+    assert calls[0] == "asr"
+    assert set(calls[1:]) == {"ocr"}
+    assert task.providers == {"asr": "selected-asr", "ocr": "selected-ocr"}
+    assert task.models == {"asr": "selected-model"}
+
+
 def test_process_source_can_mark_a_new_attempt_as_scheduled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

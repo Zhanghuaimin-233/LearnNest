@@ -222,6 +222,9 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .detail-heading h2 { margin: 8px 0 6px; overflow-wrap: anywhere; font-size: clamp(24px, 3vw, 34px); line-height: 1.2; }
 .detail-source { margin: 0; overflow-wrap: anywhere; color: var(--slate); font-size: 12px; }
 .detail-message { margin: 30px 0 34px; max-width: 760px; color: #40505d; font-size: 14px; line-height: 1.8; }
+.failure-explanation { max-width: 760px; margin: -8px 0 34px; padding: 18px 20px; border-left: 3px solid var(--ember); background: var(--ember-soft); }
+.failure-explanation p { margin: 0 0 7px; color: var(--ember); font-size: 11px; font-weight: 750; letter-spacing: 0.08em; }
+.failure-explanation strong { display: block; color: var(--ink); font-size: 13px; line-height: 1.75; }
 .detail-status { display: inline-flex; align-items: center; gap: 8px; color: var(--blue-deep); font-size: 12px; font-weight: 650; white-space: nowrap; }
 .detail-status::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 7px rgba(52, 127, 196, 0.1); }
 .detail-status.needs_action { color: var(--ember); }

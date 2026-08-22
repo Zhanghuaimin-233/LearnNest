@@ -15,6 +15,7 @@ from learnnest.automation_store import find_intake
 from learnnest.learning_state import (
     automation_budget_blocked,
     automation_budget_restart_is_due,
+    automation_failure_reason,
     automation_restart_is_safe,
     automation_readiness,
     automation_retry_is_due,
@@ -76,6 +77,7 @@ class LearningItem:
     message: str
     action: str | None
     action_kind: LearningActionKind | None
+    failure_reason: str | None = None
 
     def __post_init__(self) -> None:
         if (self.action is None) != (self.action_kind is None):
@@ -414,6 +416,7 @@ class LearningWorkspace:
         execution_state = automation_task_state(self.output_root, task.task_id)
         if execution_state in {"invalid", "needs_attention", "completed"}:
             retryable = automation_retry_is_due(self.output_root, task.task_id)
+            failure_reason = automation_failure_reason(self.output_root, task.task_id)
             if retryable:
                 return LearningItem(
                     task.task_id,
@@ -423,6 +426,20 @@ class LearningWorkspace:
                     "上次整理遇到临时问题，现在可以安全重试。",
                     "重试整理",
                     "retry_automation",
+                    failure_reason,
+                )
+            if execution_state == "needs_attention" and automation_restart_is_safe(
+                self.output_root, task.task_id
+            ):
+                return LearningItem(
+                    task.task_id,
+                    task.title,
+                    _safe_source_label(task),
+                    "needs_action",
+                    "模型调用尚未开始，已完成的材料仍然保留。可以直接重新开始整理。",
+                    "重新开始整理",
+                    "start_automation",
+                    failure_reason,
                 )
             return LearningItem(
                 task.task_id,
@@ -438,6 +455,7 @@ class LearningWorkspace:
                 ),
                 "重新选择原视频",
                 "open_single_video",
+                failure_reason,
             )
         if intake is not None and intake.status == "needs_attention":
             if automation_retry_is_due(self.output_root, task.task_id):
@@ -449,6 +467,7 @@ class LearningWorkspace:
                     "上次整理遇到临时问题，现在可以安全重试。",
                     "重试整理",
                     "retry_automation",
+                    automation_failure_reason(self.output_root, task.task_id),
                 )
             if automation_restart_is_safe(self.output_root, task.task_id):
                 return LearningItem(

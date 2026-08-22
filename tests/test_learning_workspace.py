@@ -11,16 +11,30 @@ import learnnest.learning_workspace as learning_workspace
 import learnnest.web_app as web_app
 from learnnest.execution import RecoveryPlan
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
-from learnnest.automation_models import AutomationIntake, AutomationPolicy
+from learnnest.automation_models import (
+    AutomationIntake,
+    AutomationPolicy,
+    AutomationTaskState,
+)
 from learnnest.automation_store import (
     authorize,
     create_intake,
+    load_intake,
+    load_status,
+    load_task_state,
     save_intake,
     save_policy,
+    save_task_state,
 )
 from learnnest.locks import LockUnavailable
 from learnnest.models import StageStatus, TaskRecord
-from learnnest.provider_profiles import connect, set_role_binding
+from learnnest.provider_profiles import (
+    connect,
+    freeze_role_bindings,
+    load_settings,
+    set_role_binding,
+    settings_sha256,
+)
 from learnnest.task_store import create_task, write_task_atomic
 
 
@@ -246,6 +260,74 @@ def test_snapshot_gives_an_explicit_reprocess_step_for_an_unrecoverable_old_task
     )
     assert item.action == "重新选择原视频"
     assert item.action_kind == "open_single_video"
+
+
+def test_snapshot_explains_and_can_restart_a_legacy_pre_provider_stop(
+    tmp_path: Path,
+) -> None:
+    task_dir, task = _task(
+        tmp_path,
+        "legacy-authorization",
+        stages={"content_pack": StageStatus.COMPLETED},
+        artifacts={"content_pack": ["content_pack.json"]},
+    )
+    _configured_root(tmp_path, authorized=True)
+    current_sha = settings_sha256(load_settings(tmp_path))
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "provider_bindings": freeze_role_bindings(tmp_path),
+                "provider_settings_sha256": current_sha,
+            }
+        ),
+    )
+    create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=task.task_id,
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime.now(UTC),
+            status="needs_attention",
+        ),
+    )
+    status = load_status(tmp_path)
+    assert status is not None
+    assert status.policy.writer.settings_sha256 is None
+    save_task_state(
+        tmp_path,
+        AutomationTaskState(
+            task_id=task.task_id,
+            policy_sha256=status.policy_sha256,
+            default_output="complete_note",
+            status="needs_attention",
+            blocked_reason="non_retryable_failure",
+        ),
+    )
+
+    item = learning_workspace.LearningWorkspace(tmp_path).snapshot().processing[0]
+    payload = web_app._learning_item_payload(item)
+
+    assert (
+        item.message == "模型调用尚未开始，已完成的材料仍然保留。可以直接重新开始整理。"
+    )
+    assert item.failure_reason == (
+        "生成笔记前的连接校验失败：任务使用的是旧授权记录，缺少当前版本要求的"
+        "校验标记。系统没有发起模型调用。"
+    )
+    assert item.action == "重新开始整理"
+    assert item.action_kind == "start_automation"
+    assert payload["failure_reason"] == item.failure_reason
+
+    web_app.WebService(tmp_path).start_automation(task.task_id)
+
+    restarted = load_task_state(tmp_path, task.task_id, status.policy_sha256)
+    assert load_intake(tmp_path, task.task_id).status == "pending"
+    assert restarted is not None
+    assert restarted.status == "pending"
+    assert restarted.blocked_reason is None
+    assert restarted.failure_summary is None
 
 
 def test_snapshot_revision_observes_intake_changes_and_safely_projects_corruption(

@@ -955,6 +955,12 @@ def test_goal4_unknown_and_permanent_automation_failures_hide_retry_and_stop_fac
             "\u9700\u8981\u4f60\u5904\u7406"
         )
         _open_first_task(page, "processing-list")
+        reason = page.locator("#task-detail .failure-explanation")
+        expect(reason).to_be_visible()
+        expect(reason).to_contain_text("停止原因")
+        expect(reason).to_contain_text(
+            "返回结果无法确认" if failure == "timeout" else "模型服务返回 HTTP 400"
+        )
         assert (
             page.locator("#task-detail button[data-action='retry_automation']").count()
             == 0

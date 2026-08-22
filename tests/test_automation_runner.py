@@ -222,11 +222,69 @@ def _assert_pre_provider_attention(
     assert state.status == "needs_attention"
     assert state.blocked_reason == "non_retryable_failure"
     assert state.default_output == policy.default_output
+    assert state.failure_summary is not None
     summaries = " ".join(attempt.safe_summary or "" for attempt in state.attempts)
     assert "C:/videos" not in summaries
     assert "fake-secret" not in summaries
     assert "connection-a" not in summaries
     assert "connection-b" not in summaries
+
+
+def test_runner_accepts_a_legacy_authorization_without_per_role_settings_sha(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    current_sha = settings_sha256(load_settings(root))
+    legacy_snapshot = AssistedConnectionSnapshot(
+        connection_name="connection-a",
+        connection_id="connection-a",
+        provider="xiaomi-mimo",
+        endpoint_identity="https://api.xiaomimimo.com/v1",
+        model="mimo-v2.5",
+        adapter_revision="1",
+    )
+    save_policy(
+        root,
+        AutomationPolicy(
+            writer=legacy_snapshot,
+            reviewer=legacy_snapshot,
+            default_output="complete_note",
+        ),
+    )
+    authorized = authorize(root, now=datetime(2026, 8, 22, tzinfo=UTC))
+    assert authorized.policy.provider_settings_sha256 == current_sha
+    assert authorized.policy.writer.settings_sha256 is None
+    binding = ProviderBindingSnapshot(
+        capability="llm",
+        connection_id="connection-a",
+        provider="xiaomi-mimo",
+        endpoint="https://api.xiaomimimo.com/v1",
+        model="mimo-v2.5",
+        adapter_revision="1",
+        settings_sha256=current_sha,
+    )
+    _write_frozen_task(root, {"note_writer": binding, "note_reviewer": binding})
+
+    class LegacyAuthorizedProvider(FakeAssistedProvider):
+        name = "xiaomi-mimo"
+        model = "mimo-v2.5"
+        endpoint_identity = "https://api.xiaomimimo.com/v1"
+
+    provider = LegacyAuthorizedProvider()
+
+    result = run_automation_tasks(
+        root,
+        ["20260728-automation"],
+        provider_factory=lambda _task_id: AutomationProviders(
+            provider, provider, UnusedProvider(), UnusedProvider()
+        ),
+        now=datetime(2026, 8, 22, tzinfo=UTC),
+    )
+
+    state = load_task_state(root, "20260728-automation", authorized.policy_sha256)
+    assert result.completed_task_ids == ("20260728-automation",)
+    assert provider.writer_calls == provider.reviewer_calls == 1
+    assert state is not None and state.status == "completed"
 
 
 def test_authorized_runner_retries_writer_on_the_next_due_tick_and_preserves_attempt_facts(

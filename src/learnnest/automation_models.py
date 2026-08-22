@@ -164,6 +164,7 @@ class AutomationTaskState(_Model):
         "complete_note_with_audio"
     )
     attempts: list[AutomationAttempt] = Field(default_factory=list)
+    failure_summary: str | None = Field(default=None, min_length=1, max_length=500)
     status: Literal[
         "pending",
         "writer_failed",

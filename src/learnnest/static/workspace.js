@@ -444,11 +444,15 @@ function renderTaskDetail(item) {
   const actionCopy = item.action || needsUserAction
     ? item.message
     : "语栖会根据当前事实更新这里；遇到需要确认的问题时会给出明确操作。";
+  const failureExplanation = item.failure_reason
+    ? `<section class="failure-explanation" aria-label="停止原因"><p>停止原因</p><strong>${escapeHtml(item.failure_reason)}</strong></section>`
+    : "";
   taskDetail.innerHTML = `
     <div class="detail-layout">
       <div class="detail-main">
         <div class="detail-heading"><div><p class="panel-kicker">当前任务</p><h2>${escapeHtml(item.title)}</h2><p class="detail-source">${escapeHtml(item.source)}</p></div><span class="detail-status ${escapeHtml(item.state)}">${escapeHtml(stateLabel[item.state] || "需要检查")}</span></div>
         <p class="detail-message">${escapeHtml(item.message)}</p>
+        ${failureExplanation}
         <section class="production-section"><div class="production-heading"><h3>产出轨道</h3><span>${percent}%</span></div><div class="production-track">${steps.map((step) => `<span class="track-step${step.done ? " is-done" : ""}${step.current ? " is-current" : ""}"><i>${step.done ? "✓" : ""}</i><strong>${step.label}</strong></span>`).join("")}</div></section>
       </div>
       <aside class="detail-action"><p class="panel-kicker">${actionHeading}</p><strong>${escapeHtml(stateLabel[item.state] || "需要检查")}</strong><p>${escapeHtml(actionCopy)}</p><div class="detail-action-controls">${item.action && learningActionKinds.has(item.action_kind) ? `<button class="detail-primary-action" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}<button class="danger-link" type="button" data-delete-item-ref="${escapeHtml(item.item_ref)}"${item.state === "organizing" ? ' disabled title="正在处理，暂时不能删除"' : ""}>删除任务</button></div>${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}</aside>

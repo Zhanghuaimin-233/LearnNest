@@ -1052,6 +1052,17 @@ def _attention(
         update={
             "status": "needs_attention",
             "blocked_reason": reason,
+            "failure_summary": summary
+            or state.failure_summary
+            or next(
+                (
+                    item.safe_summary
+                    for item in reversed(state.attempts)
+                    if item.status in {"failed", "unknown"}
+                    and item.safe_summary is not None
+                ),
+                None,
+            ),
             "attempts": [
                 item.model_copy(update={"safe_summary": summary})
                 if summary is not None
@@ -1145,8 +1156,12 @@ def _frozen_task_assisted_snapshots(
         or task.provider_settings_sha256 != authorized_sha
         or writer.settings_sha256 != authorized_sha
         or reviewer.settings_sha256 != authorized_sha
-        or writer != getattr(policy, "writer", None)
-        or reviewer != getattr(policy, "reviewer", None)
+        or not _assisted_snapshot_matches_authorization(
+            writer, getattr(policy, "writer", None), authorized_sha
+        )
+        or not _assisted_snapshot_matches_authorization(
+            reviewer, getattr(policy, "reviewer", None), authorized_sha
+        )
     ):
         raise ValueError(
             "automation task frozen note bindings do not match authorization"
@@ -1165,6 +1180,20 @@ def _frozen_task_assisted_snapshots(
         ):
             raise ValueError("automation audio bindings do not match authorization")
     return writer, reviewer
+
+
+def _assisted_snapshot_matches_authorization(
+    frozen: object, authorized: object | None, settings_sha: str
+) -> bool:
+    """Accept an old per-role SHA omission without weakening frozen identity."""
+    if authorized is None or getattr(authorized, "settings_sha256", None) not in {
+        None,
+        settings_sha,
+    }:
+        return False
+    return frozen.model_dump(mode="json", exclude={"settings_sha256"}) == (
+        authorized.model_dump(mode="json", exclude={"settings_sha256"})
+    )
 
 
 def _assert_provider_matches_snapshot(

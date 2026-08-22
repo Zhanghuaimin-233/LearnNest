@@ -5,17 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+import re
 from typing import Literal
 
 from learnnest.automation_models import AutomationIntake, AutomationTaskState
 
 from learnnest.automation_store import (
     find_intake,
+    list_task_policy_states,
     load_status,
     load_task_state,
     provider_budget_group_call_usage,
     provider_call_usage,
-    task_has_execution_facts,
     task_is_zero_attempt_budget_blocked,
 )
 from learnnest.models import StageStatus, TaskRecord
@@ -102,14 +103,131 @@ def automation_restart_is_safe(output_root: str | Path, task_id: str) -> bool:
         if intake is None or intake.status != "needs_attention" or found is None:
             return False
         _task_dir, task = found
+        states = list_task_policy_states(root, task_id)
+        if states:
+            if any(
+                state.status != "needs_attention"
+                or state.blocked_reason != "non_retryable_failure"
+                or state.plan_path is not None
+                or state.attempts
+                for state in states
+            ):
+                return False
+            current = freeze_role_bindings(root)
+            required = required_automation_roles(intake.default_output)
+            if any(
+                task.provider_bindings.get(role) is None
+                or current.get(role) is None
+                or task.provider_bindings[role].model_dump(mode="json")
+                != current[role].model_dump(mode="json")  # type: ignore[union-attr]
+                for role in required
+            ):
+                return False
         return (
             task.stages.get("content_pack") is StageStatus.COMPLETED
-            and not task_has_execution_facts(root, task_id)
             and not task_has_paid_automation_trace(task)
             and automation_readiness(root, intake) == "ready"
         )
     except (OSError, ValueError):
         return False
+
+
+def automation_failure_reason(output_root: str | Path, task_id: str) -> str | None:
+    """Project a concrete failure without exposing paths, secrets, or identity hashes."""
+    root = Path(output_root).resolve()
+    try:
+        status = load_status(root)
+        if status is None:
+            return None
+        state = load_task_state(root, task_id, status.policy_sha256)
+        if state is None or state.blocked_reason is None:
+            return None
+        if state.blocked_reason == "unknown_result":
+            return (
+                "模型调用已经发出，但返回结果无法确认。为避免重复调用和重复计费，"
+                "系统已停止自动重试。"
+            )
+        latest = state.attempts[-1] if state.attempts else None
+        stage = _PUBLIC_AUTOMATION_STAGE.get(
+            latest.stage if latest is not None else None, "自动整理"
+        )
+        if state.blocked_reason == "stage_attempt_limit":
+            return f"{stage}连续遇到临时错误，已经达到当前设置允许的尝试上限。"
+        summary = state.failure_summary or (
+            latest.safe_summary if latest is not None else None
+        )
+        if summary == "automation task frozen note bindings do not match authorization":
+            return _LEGACY_AUTHORIZATION_FAILURE
+        found = find_task_by_id(root, task_id)
+        if (
+            not state.attempts
+            and found is not None
+            and _uses_legacy_note_authorization(found[1], status.policy)
+        ):
+            return _LEGACY_AUTHORIZATION_FAILURE
+        if summary is not None:
+            http_status = re.search(r"(?i)HTTP\s*(\d{3})\b", summary)
+            if http_status is not None:
+                code = http_status.group(1)
+                explanation = (
+                    "，表示身份或权限校验失败"
+                    if code in {"401", "403"}
+                    else "，表示请求内容不被接受"
+                    if code.startswith("4") and code != "429"
+                    else "，表示服务暂时不可用"
+                    if code.startswith("5") or code == "429"
+                    else ""
+                )
+                return f"{stage}，模型服务返回 HTTP {code}{explanation}。"
+            lowered = summary.lower()
+            if "api key" in lowered or "api_key" in lowered:
+                return f"{stage}开始前发现模型连接的密钥不可用。"
+            if "permission" in lowered:
+                return f"{stage}时，本地文件或模型连接权限不足。"
+            if "schema" in lowered or "evidence" in lowered:
+                return f"{stage}时，模型返回的内容没有通过材料引用校验。"
+        if state.blocked_reason == "non_retryable_failure":
+            return f"{stage}遇到无法自动恢复的错误，系统已停止后续调用。"
+        return None
+    except (OSError, ValueError):
+        return "任务失败记录无法安全读取。"
+
+
+_PUBLIC_AUTOMATION_STAGE = {
+    "writer": "生成笔记初稿时",
+    "reviewer": "复核笔记时",
+    "podcast": "生成播客稿时",
+    "tts": "生成音频时",
+}
+_LEGACY_AUTHORIZATION_FAILURE = (
+    "生成笔记前的连接校验失败：任务使用的是旧授权记录，缺少当前版本要求的"
+    "校验标记。系统没有发起模型调用。"
+)
+
+
+def _uses_legacy_note_authorization(task: TaskRecord, policy: object) -> bool:
+    authorized_sha = getattr(policy, "provider_settings_sha256", None)
+    if not isinstance(authorized_sha, str):
+        return False
+    for role, policy_role in (
+        ("note_writer", "writer"),
+        ("note_reviewer", "reviewer"),
+    ):
+        binding = task.provider_bindings.get(role)
+        snapshot = getattr(policy, policy_role, None)
+        if (
+            binding is None
+            or snapshot is None
+            or snapshot.settings_sha256 is not None
+            or binding.settings_sha256 != authorized_sha
+            or binding.connection_id != snapshot.connection_id
+            or binding.provider != snapshot.provider
+            or binding.endpoint != snapshot.endpoint_identity
+            or binding.model != snapshot.model
+            or binding.adapter_revision != snapshot.adapter_revision
+        ):
+            return False
+    return True
 
 
 def automation_budget_blocked(output_root: str | Path, task_id: str) -> bool:

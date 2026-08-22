@@ -30,6 +30,7 @@ from learnnest.automation_store import (
     authorize as authorize_automation,
     disable as disable_automation,
     find_intake,
+    load_task_state,
     load_status as load_automation_status,
     save_intake,
     save_policy as save_automation_policy,
@@ -343,14 +344,39 @@ class WebService:
                     default_output=self.default_automation_output(),
                 )
             elif intake.status == "needs_attention":
-                if not (
-                    automation_budget_restart_is_due(self.output_root, task_id)
-                    or automation_restart_is_safe(self.output_root, task_id)
-                ):
-                    raise ValueError("当前任务不能在原任务上安全继续。")
-                save_intake(
-                    self.output_root, intake.model_copy(update={"status": "pending"})
+                budget_restart = automation_budget_restart_is_due(
+                    self.output_root, task_id
                 )
+                safe_restart = automation_restart_is_safe(self.output_root, task_id)
+                if not (budget_restart or safe_restart):
+                    raise ValueError("当前任务不能在原任务上安全继续。")
+                previous_state = None
+                if safe_restart:
+                    status = load_automation_status(self.output_root)
+                    if status is not None:
+                        previous_state = load_task_state(
+                            self.output_root, task_id, status.policy_sha256
+                        )
+                        if previous_state is not None:
+                            save_task_state(
+                                self.output_root,
+                                previous_state.model_copy(
+                                    update={
+                                        "status": "pending",
+                                        "blocked_reason": None,
+                                        "failure_summary": None,
+                                    }
+                                ),
+                            )
+                try:
+                    save_intake(
+                        self.output_root,
+                        intake.model_copy(update={"status": "pending"}),
+                    )
+                except (OSError, ValueError):
+                    if previous_state is not None:
+                        save_task_state(self.output_root, previous_state)
+                    raise
             elif intake.status == "completed":
                 raise ValueError("任务已经完成，不需要重新开始整理。")
         self.wake_automation()
@@ -1326,6 +1352,7 @@ def _learning_item_payload(
         "message": item.message,
         "action": item.action,
         "action_kind": item.action_kind,
+        "failure_reason": item.failure_reason,
     }
     if workspace is not None:
         try:

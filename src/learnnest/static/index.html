@@ -10,14 +10,14 @@
     <script src="/static/workspace.js" defer></script>
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="sidebar" aria-label="主导航">
+    <header class="app-header">
+      <div class="app-header-inner">
         <a class="brand" href="#tasks" aria-label="语栖本地产出控制台">
           <span class="brand-mark" aria-hidden="true">语</span>
           <span><strong>语栖</strong><small>LEARNNEST</small></span>
         </a>
 
-        <nav class="primary-nav">
+        <nav class="primary-nav" aria-label="主导航">
           <a class="bookmark active" href="#tasks" data-view="tasks"><span aria-hidden="true">⌁</span><strong>任务</strong><small id="task-count">0</small></a>
           <a class="bookmark" href="#sources" data-view="sources"><span aria-hidden="true">＋</span><strong>来源</strong></a>
           <a class="bookmark" href="#settings" data-view="settings"><span aria-hidden="true">◌</span><strong>设置</strong></a>
@@ -27,32 +27,38 @@
           <i aria-hidden="true"></i>
           <span><strong id="runtime-title">正在读取状态</strong><small id="runtime-copy">仅在语栖运行时工作</small></span>
         </div>
-      </aside>
+      </div>
+    </header>
 
+    <div class="app-shell">
       <main class="main-surface">
         <section class="view is-visible" id="tasks" data-view-panel="tasks">
-          <header class="page-header">
-            <div>
-              <p class="eyebrow">本地产出控制台</p>
-              <h1>任务</h1>
-              <p class="page-summary" id="task-summary">正在读取真实任务。</p>
-            </div>
-            <button class="primary-action" data-open-single-video type="button"><span aria-hidden="true">＋</span> 处理单个视频</button>
-          </header>
+          <div id="task-workbench">
+            <header class="page-header task-page-header">
+              <div>
+                <p class="eyebrow">今天从这里开始</p>
+                <h1>任务工作台</h1>
+                <p class="page-summary" id="task-summary">正在读取真实任务。</p>
+              </div>
+              <button class="primary-action" data-open-single-video type="button"><span aria-hidden="true">＋</span> 处理单个视频</button>
+            </header>
 
-          <nav class="task-tabs" aria-label="任务筛选">
-            <button class="is-active" data-filter="all" type="button"><span>全部任务</span><strong data-filter-count="all">0</strong></button>
-            <button data-filter="attention" type="button"><span><i class="state-dot attention"></i>需要处理</span><strong data-filter-count="attention">0</strong></button>
-            <button data-filter="processing" type="button"><span><i class="state-dot processing"></i>处理中</span><strong data-filter-count="processing">0</strong></button>
-            <button data-filter="queued" type="button"><span><i class="state-dot queued"></i>等待中</span><strong data-filter-count="queued">0</strong></button>
-            <button data-filter="completed" type="button"><span><i class="state-dot completed"></i>已完成</span><strong data-filter-count="completed">0</strong></button>
-            <span class="task-default">默认成品：<strong id="default-output-label">读取中</strong><button type="button" data-go-settings>更改</button></span>
-          </nav>
+            <section class="task-focus" id="task-focus" aria-live="polite">
+              <div class="focus-copy"><p class="panel-kicker">现在最值得关注</p><h2>正在整理任务</h2><p>语栖会把需要你处理的内容放在最前面。</p></div>
+            </section>
 
-          <div class="control-room">
+            <nav class="task-tabs" aria-label="任务筛选">
+              <button class="is-active" data-filter="all" type="button"><span>全部任务</span><strong data-filter-count="all">0</strong></button>
+              <button data-filter="attention" type="button"><span><i class="state-dot attention"></i>需要处理</span><strong data-filter-count="attention">0</strong></button>
+              <button data-filter="processing" type="button"><span><i class="state-dot processing"></i>处理中</span><strong data-filter-count="processing">0</strong></button>
+              <button data-filter="queued" type="button"><span><i class="state-dot queued"></i>等待中</span><strong data-filter-count="queued">0</strong></button>
+              <button data-filter="completed" type="button"><span><i class="state-dot completed"></i>已完成</span><strong data-filter-count="completed">0</strong></button>
+              <span class="task-default">默认成品：<strong id="default-output-label">读取中</strong><button type="button" data-go-settings>更改</button></span>
+            </nav>
+
             <section class="task-list-panel" aria-labelledby="task-list-title">
               <div class="panel-heading">
-                <div><p class="panel-kicker">最近更新</p><h2 id="task-list-title">全部任务</h2></div>
+                <div><p class="panel-kicker">按最近变化排列</p><h2 id="task-list-title">全部任务</h2></div>
                 <button class="icon-button" id="refresh-tasks" type="button" aria-label="刷新任务">↻</button>
               </div>
               <div class="task-list" id="task-list">
@@ -61,10 +67,14 @@
                 <div id="library-list" class="task-group"></div>
               </div>
             </section>
-            <section class="task-detail-panel" id="task-detail" aria-live="polite">
-              <div class="empty-detail"><span aria-hidden="true">⌁</span><h2>选择一个任务</h2><p>这里会显示真实处理状态、产出轨道和当前可用操作。</p></div>
-            </section>
           </div>
+
+          <section class="task-detail-view" id="task-detail-view" hidden>
+            <button class="back-to-tasks" id="back-to-tasks" type="button"><span aria-hidden="true">←</span> 返回任务工作台</button>
+            <section class="task-detail-panel" id="task-detail" aria-live="polite">
+              <div class="empty-detail"><span aria-hidden="true">⌁</span><h2>任务暂时不可用</h2><p>返回任务工作台重新选择。</p></div>
+            </section>
+          </section>
         </section>
 
         <section class="view" id="sources" data-view-panel="sources" hidden>

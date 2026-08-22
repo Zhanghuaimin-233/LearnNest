@@ -50,6 +50,9 @@ const addSelectedFavoritesButton = document.querySelector("#add-selected-favorit
 const favoriteSelection = document.querySelector("#favorite-selection");
 const taskList = document.querySelector("#task-list");
 const taskDetail = document.querySelector("#task-detail");
+const taskWorkbench = document.querySelector("#task-workbench");
+const taskDetailView = document.querySelector("#task-detail-view");
+const taskFocus = document.querySelector("#task-focus");
 const taskSummary = document.querySelector("#task-summary");
 const taskCount = document.querySelector("#task-count");
 const taskListTitle = document.querySelector("#task-list-title");
@@ -66,6 +69,7 @@ const providerAdapterList = document.querySelector("#provider-adapter-list");
 const providerLimitsForm = document.querySelector("#provider-limits-form");
 const providerLimitsFeedback = document.querySelector("#provider-limits-feedback");
 const runtimeState = document.querySelector(".runtime-state");
+const mobilePrimaryAction = document.querySelector(".mobile-primary-action");
 const runtimeTitle = document.querySelector("#runtime-title");
 const runtimeCopy = document.querySelector("#runtime-copy");
 const settingsReadiness = document.querySelector(".settings-readiness");
@@ -312,26 +316,26 @@ function renderList(target, items, empty) {
     return;
   }
   target.innerHTML = items.map((item) => `
-    <article class="learning-row${item.item_ref === selectedItemRef ? " is-selected" : ""}" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}" tabindex="0">
+    <article class="learning-row" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}" tabindex="0">
       <div class="learning-copy">
         <h3>${escapeHtml(item.title)}</h3>
         <p>${escapeHtml(item.source)} · ${escapeHtml(item.message)}</p>
       </div>
       <span class="learning-state">${escapeHtml(stateLabel[item.state] || "需要检查")}</span>
       <span class="task-progress" aria-hidden="true" style="--task-progress:${taskProgress(item)}%"><i></i></span>
-      ${item.action && learningActionKinds.has(item.action_kind) ? `<button type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}
-      ${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}
+      <span class="row-next">${escapeHtml(item.message)}</span>
+      <button class="open-task-detail" type="button" data-open-item-ref="${escapeHtml(item.item_ref)}">查看任务 <span aria-hidden="true">→</span></button>
     </article>`).join("");
   target.querySelectorAll("article[data-item-ref]").forEach((row) => {
     row.addEventListener("click", (event) => {
-      if (event.target.closest("button, audio")) return;
+      if (event.target.closest("button")) return;
       selectTask(row.dataset.itemRef);
     });
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectTask(row.dataset.itemRef); }
     });
   });
-  target.querySelectorAll("button[data-item-ref]").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
+  target.querySelectorAll("button[data-open-item-ref]").forEach((button) => button.addEventListener("click", () => selectTask(button.dataset.openItemRef)));
 }
 
 function render(snapshot) {
@@ -341,7 +345,7 @@ function render(snapshot) {
   renderList(lists.inbox, snapshot.inbox, "");
   const items = allLearningItems();
   if (!items.length) lists.processing.innerHTML = '<p class="empty">还没有任务。处理单个视频或从来源页添加内容。</p>';
-  if (!selectedItemRef || !items.some((item) => item.item_ref === selectedItemRef)) selectedItemRef = items[0]?.item_ref || null;
+  if (selectedItemRef && !items.some((item) => item.item_ref === selectedItemRef)) showTaskWorkbench();
   const counts = {
     all: items.length,
     attention: items.filter((item) => taskFilterFor(item) === "attention").length,
@@ -352,8 +356,25 @@ function render(snapshot) {
   for (const [name, count] of Object.entries(counts)) document.querySelector(`[data-filter-count="${name}"]`).textContent = count;
   taskCount.textContent = counts.all;
   taskSummary.innerHTML = `<strong>${counts.processing} 项正在处理</strong>，${counts.attention} 项需要你处理，${counts.completed} 项已完成。`;
+  renderTaskFocus(items);
   applyTaskFilter();
-  renderTaskDetail(items.find((item) => item.item_ref === selectedItemRef));
+  if (selectedItemRef) renderTaskDetail(items.find((item) => item.item_ref === selectedItemRef));
+}
+
+function renderTaskFocus(items) {
+  const priority = { attention: 0, processing: 1, queued: 2, completed: 3 };
+  const item = [...items].sort((left, right) => priority[taskFilterFor(left)] - priority[taskFilterFor(right)])[0];
+  if (!item) {
+    taskFocus.className = "task-focus is-empty";
+    taskFocus.innerHTML = `<div class="focus-copy"><p class="panel-kicker">工作台已准备好</p><h2>从一个视频开始</h2><p>添加本地视频后，材料、笔记和音频进度会持续保留在这里。</p></div><button class="primary-action" type="button">处理单个视频</button>`;
+    taskFocus.querySelector("button").addEventListener("click", () => singleVideoDialog.showModal());
+    return;
+  }
+  const filter = taskFilterFor(item);
+  const heading = filter === "attention" ? "这项任务需要你处理" : filter === "processing" ? "这项任务正在向前推进" : filter === "queued" ? "下一项等待整理的内容" : "最近完成的内容";
+  taskFocus.className = `task-focus ${filter}`;
+  taskFocus.innerHTML = `<div class="focus-signal" aria-hidden="true"><span>${taskProgress(item)}</span><small>%</small></div><div class="focus-copy"><p class="panel-kicker">${heading}</p><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.message)}</p></div><button class="focus-open" type="button">查看任务 <span aria-hidden="true">→</span></button>`;
+  taskFocus.querySelector("button").addEventListener("click", () => selectTask(item.item_ref));
 }
 
 function allLearningItems() {
@@ -385,9 +406,20 @@ function applyTaskFilter() {
 
 function selectTask(itemRef) {
   selectedItemRef = itemRef;
-  taskList.querySelectorAll("article[data-item-ref]").forEach((row) => row.classList.toggle("is-selected", row.dataset.itemRef === itemRef));
   renderTaskDetail(allLearningItems().find((item) => item.item_ref === itemRef));
-  if (window.matchMedia("(max-width: 760px)").matches) taskDetail.scrollIntoView({ behavior: "smooth", block: "start" });
+  taskWorkbench.hidden = true;
+  taskDetailView.hidden = false;
+  mobilePrimaryAction.hidden = true;
+  window.scrollTo({ top: 0, behavior: "auto" });
+  document.querySelector("#back-to-tasks")?.focus({ preventScroll: true });
+}
+
+function showTaskWorkbench() {
+  selectedItemRef = null;
+  taskDetailView.hidden = true;
+  taskWorkbench.hidden = false;
+  mobilePrimaryAction.hidden = false;
+  window.scrollTo({ top: 0, behavior: "auto" });
 }
 
 function trackSteps(item) {
@@ -413,10 +445,14 @@ function renderTaskDetail(item) {
     ? item.message
     : "语栖会根据当前事实更新这里；遇到需要确认的问题时会给出明确操作。";
   taskDetail.innerHTML = `
-    <div class="detail-heading"><div><p class="panel-kicker">当前任务</p><h2>${escapeHtml(item.title)}</h2><p class="detail-source">${escapeHtml(item.source)}</p></div><span class="detail-status ${escapeHtml(item.state)}">${escapeHtml(stateLabel[item.state] || "需要检查")}</span></div>
-    <p class="detail-message">${escapeHtml(item.message)}</p>
-    <section class="production-section"><div class="production-heading"><h3>产出轨道</h3><span>${percent}%</span></div><div class="production-track">${steps.map((step) => `<span class="track-step${step.done ? " is-done" : ""}${step.current ? " is-current" : ""}"><i>${step.done ? "✓" : ""}</i><strong>${step.label}</strong></span>`).join("")}</div></section>
-    <div class="detail-action"><strong>${actionHeading}</strong><p>${escapeHtml(actionCopy)}</p><div class="detail-action-controls">${item.action && learningActionKinds.has(item.action_kind) ? `<button type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}<button class="danger-link" type="button" data-delete-item-ref="${escapeHtml(item.item_ref)}"${item.state === "organizing" ? ' disabled title="正在处理，暂时不能删除"' : ""}>删除任务</button></div>${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}</div>`;
+    <div class="detail-layout">
+      <div class="detail-main">
+        <div class="detail-heading"><div><p class="panel-kicker">当前任务</p><h2>${escapeHtml(item.title)}</h2><p class="detail-source">${escapeHtml(item.source)}</p></div><span class="detail-status ${escapeHtml(item.state)}">${escapeHtml(stateLabel[item.state] || "需要检查")}</span></div>
+        <p class="detail-message">${escapeHtml(item.message)}</p>
+        <section class="production-section"><div class="production-heading"><h3>产出轨道</h3><span>${percent}%</span></div><div class="production-track">${steps.map((step) => `<span class="track-step${step.done ? " is-done" : ""}${step.current ? " is-current" : ""}"><i>${step.done ? "✓" : ""}</i><strong>${step.label}</strong></span>`).join("")}</div></section>
+      </div>
+      <aside class="detail-action"><p class="panel-kicker">${actionHeading}</p><strong>${escapeHtml(stateLabel[item.state] || "需要检查")}</strong><p>${escapeHtml(actionCopy)}</p><div class="detail-action-controls">${item.action && learningActionKinds.has(item.action_kind) ? `<button class="detail-primary-action" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}<button class="danger-link" type="button" data-delete-item-ref="${escapeHtml(item.item_ref)}"${item.state === "organizing" ? ' disabled title="正在处理，暂时不能删除"' : ""}>删除任务</button></div>${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}</aside>
+    </div>`;
   taskDetail.querySelectorAll("button[data-item-ref]").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
   taskDetail.querySelector("button[data-delete-item-ref]:not(:disabled)")?.addEventListener("click", () => openDeleteTask(item));
 }
@@ -547,7 +583,8 @@ function showView(view, updateHash = true) {
     panel.classList.toggle("is-visible", visible);
   });
   document.querySelectorAll(".bookmark[data-view]").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
-  document.querySelector(".mobile-primary-action").hidden = view === "settings";
+  if (view === "tasks") showTaskWorkbench();
+  mobilePrimaryAction.hidden = view === "settings";
   if (updateHash && window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
   window.scrollTo({ top: 0, behavior: "auto" });
 }
@@ -1003,6 +1040,7 @@ document.querySelector("#local-video").addEventListener("change", (event) => {
   selectedVideoName.textContent = event.currentTarget.files[0]?.name || "MP4、MOV、MKV、AVI、MPEG 或 WebM";
 });
 document.querySelector("#refresh-tasks").addEventListener("click", () => refresh(true));
+document.querySelector("#back-to-tasks").addEventListener("click", showTaskWorkbench);
 
 connectDouyinButton.addEventListener("click", connectDouyin);
 refreshDouyinButton.addEventListener("click", refreshDouyinQr);

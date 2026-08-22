@@ -1433,8 +1433,12 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
         assert f'data-view="{view}"' in page
         assert f'data-view-panel="{view}"' in page
     for element_id in (
+        "task-workbench",
+        "task-focus",
         "task-list",
+        "task-detail-view",
         "task-detail",
+        "back-to-tasks",
         "single-video-dialog",
         "single-video-output",
     ):
@@ -1443,7 +1447,13 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
     assert "function showView" in script
     assert "api(`/api/learning/uploads?name=${encodeURIComponent(file.name)}`" in script
     assert 'api("/api/learning/submit"' in script
-    assert ".control-room {" in stylesheet
+    assert 'class="app-header"' in page
+    assert "function renderTaskFocus(items)" in script
+    assert "function showTaskWorkbench()" in script
+    assert "taskWorkbench.hidden = true;" in script
+    assert "taskDetailView.hidden = false;" in script
+    assert ".task-focus {" in stylesheet
+    assert ".task-detail-view {" in stylesheet
     assert ".production-track {" in stylesheet
 
 
@@ -1519,7 +1529,10 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
     assert "/api/automation/authorize" not in action_block
     assert action_block.index('action !== "continue"') < action_block.index("/continue")
     assert "@media (max-width: 760px)" in stylesheet
-    assert ".learning-row { grid-template-columns: 9px minmax(0, 1fr); }" in stylesheet
+    assert (
+        ".learning-row { padding: 17px 10px; grid-template-columns: minmax(0, 1fr) auto;"
+        in stylesheet
+    )
     assert "function renderSourceJobs" in script
     assert '"材料已加入收件箱"' in script
     assert "source_input" not in script

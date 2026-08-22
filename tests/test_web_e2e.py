@@ -270,6 +270,11 @@ def _open_view(page: Page, view: str) -> None:
     expect(page.locator(f'[data-view-panel="{view}"]')).to_be_visible()
 
 
+def _open_first_task(page: Page, list_id: str) -> None:
+    page.locator(f"#{list_id} button[data-open-item-ref]").first.click()
+    expect(page.locator("#task-detail-view")).to_be_visible()
+
+
 def _open_settings_panel(page: Page, panel: str) -> None:
     _open_view(page, "settings")
     page.locator(f'[data-settings-tab="{panel}"]').click()
@@ -506,8 +511,9 @@ def test_goal4_three_sources_reach_a_safe_note_in_real_edge(
         assert page.locator("#library-list article").count() == 3, json.dumps(
             snapshot, ensure_ascii=False
         )
+        _open_first_task(page, "library-list")
         with page.expect_popup() as note:
-            page.locator("#library-list button").first.click()
+            page.locator("#task-detail button[data-action='open_note']").click()
         expect(note.value.locator("article.note-content")).to_contain_text(
             "离线浏览器笔记"
         )
@@ -545,7 +551,7 @@ def test_goal4_waiting_setup_survives_refresh_without_constructing_a_provider(
             page.locator("#url-form button").click()
         assert submitted.value.status == 202
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
-        expect(page.locator("#processing-list")).to_contain_text("完成设置")
+        expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
         page.reload()
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
         expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
@@ -666,7 +672,7 @@ def test_goal4_restarting_webui_keeps_source_job_and_intake_visible(
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
-        expect(page.locator("#processing-list")).to_contain_text("完成设置")
+        expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
         browser.close()
         _stop_loopback_server(loopback_app.server, loopback_app.thread)
         (
@@ -711,7 +717,7 @@ def test_goal4_corrupting_an_intake_fact_turns_the_browser_gate_red_then_green(
             page.locator("#url-form button").click()
         assert submitted.value.status == 202
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
-        expect(page.locator("#processing-list")).to_contain_text("完成设置")
+        expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
         intake = next(
             (loopback_app.root / ".learnnest" / "automation" / "intake").glob("*.json")
         )
@@ -824,11 +830,12 @@ def test_goal4_audio_success_is_playable_from_the_real_note_page(
         snapshot = page.evaluate(
             "async () => await (await fetch('/api/learning/snapshot')).json()"
         )
-        assert page.locator("#library-list audio").count() == 1, json.dumps(
+        _open_first_task(page, "library-list")
+        assert page.locator("#task-detail audio").count() == 1, json.dumps(
             {"snapshot": snapshot, "audio_errors": audio_errors}, ensure_ascii=False
         )
         with page.expect_popup() as note:
-            page.locator("#library-list button").click()
+            page.locator("#task-detail button[data-action='open_note']").click()
         expect(
             note.value.locator("audio[aria-label='播放本篇笔记的音频']")
         ).to_have_count(1)
@@ -851,9 +858,10 @@ def test_goal4_audio_failure_keeps_the_note_readable_and_distinct(
         page.locator("#url-form button").click()
         expect(page.locator("#library-list article")).to_have_count(1)
         expect(page.locator("#library-list")).to_contain_text("音频仍在处理中")
-        assert page.locator("#library-list audio").count() == 0
+        _open_first_task(page, "library-list")
+        assert page.locator("#task-detail audio").count() == 0
         with page.expect_popup() as note:
-            page.locator("#library-list button").click()
+            page.locator("#task-detail button[data-action='open_note']").click()
         expect(note.value.locator("article.note-content")).to_contain_text(
             "离线浏览器笔记"
         )
@@ -876,14 +884,15 @@ def test_goal4_retryable_writer_failure_retries_the_same_task_record(
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
         expect(page.locator("#processing-list")).to_contain_text("需要你处理")
+        _open_first_task(page, "processing-list")
         expect(
-            page.locator("#processing-list button[data-action='retry_automation']")
+            page.locator("#task-detail button[data-action='retry_automation']")
         ).to_have_count(1)
         task_id = next(
             (loopback_app.root / ".learnnest" / "automation" / "intake").glob("*.json")
         ).stem
         loopback_app.clock[0] = datetime.now(UTC)
-        page.locator("#processing-list button[data-action='retry_automation']").click()
+        page.locator("#task-detail button[data-action='retry_automation']").click()
         expect(page.locator("#library-list article")).to_have_count(1)
         status = load_status(loopback_app.root)
         assert status is not None
@@ -945,10 +954,9 @@ def test_goal4_unknown_and_permanent_automation_failures_hide_retry_and_stop_fac
         expect(page.locator("#processing-list")).to_contain_text(
             "\u9700\u8981\u4f60\u5904\u7406"
         )
+        _open_first_task(page, "processing-list")
         assert (
-            page.locator(
-                "#processing-list button[data-action='retry_automation']"
-            ).count()
+            page.locator("#task-detail button[data-action='retry_automation']").count()
             == 0
         )
         assert len(loopback_app.provider_runs) == 1

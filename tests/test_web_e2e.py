@@ -308,11 +308,16 @@ def _enable_note_automation(page: Page, *, key: str) -> None:
     )
     page.locator("#automation-form button[type=submit]").click()
     expect(page.locator("#automation-state")).to_have_text("\u7b49\u5f85\u786e\u8ba4")
-    page.locator("#confirm-paid").check()
     page.locator("#authorize-automation").click()
+    expect(page.locator("#automation-authorization-dialog")).to_be_visible()
+    page.locator("#confirm-automation-authorization").click()
     expect(page.locator("#automation-state")).to_have_text(
         "\u81ea\u52a8\u6574\u7406\u5df2\u5f00\u542f"
     )
+    expect(page.locator("#automation-access-title")).to_have_text(
+        "\u5df2\u6388\u6743\u5e76\u8fd0\u884c"
+    )
+    expect(page.locator("#authorize-automation")).to_be_hidden()
 
 
 def _enable_audio_automation(page: Page) -> None:
@@ -340,11 +345,12 @@ def _enable_audio_automation(page: Page) -> None:
         expect(page.locator("#provider-feedback")).to_contain_text("\u5df2\u7ed1\u5b9a")
     expect(page.locator("button[data-unbind-setup-role]")).to_have_count(4)
     _open_settings_panel(page, "output")
-    page.locator("#confirm-paid").check()
+    page.locator("#authorize-automation").click()
+    expect(page.locator("#automation-authorization-dialog")).to_be_visible()
     with page.expect_response(
         lambda response: response.url.endswith("/api/automation/authorize")
     ) as authorized:
-        page.locator("#authorize-automation").click()
+        page.locator("#confirm-automation-authorization").click()
     assert authorized.value.status == 200
     expect(page.locator("#automation-state")).to_have_text(
         "\u81ea\u52a8\u6574\u7406\u5df2\u5f00\u542f"
@@ -469,9 +475,16 @@ def test_goal4_three_sources_reach_a_safe_note_in_real_edge(
         )
         page.goto(loopback_app.url)
         _enable_note_automation(page, key="not-a-real-provider-key")
+        _open_view(page, "sources")
+        _open_settings_panel(page, "output")
+        expect(page.locator("#automation-access-title")).to_have_text(
+            "\u5df2\u6388\u6743\u5e76\u8fd0\u884c"
+        )
+        expect(page.locator("#authorize-automation")).to_be_hidden()
+        expect(page.locator("#automation-access input[type=checkbox]")).to_have_count(0)
         video = tmp_path / "lesson.mp4"
         video.write_bytes(b"offline video")
-        _open_view(page, "tasks")
+        _open_view(page, "sources")
         page.locator("[data-open-single-video]").first.click()
         page.locator("#local-video").set_input_files(str(video))
         with page.expect_response(
@@ -512,6 +525,8 @@ def test_goal4_three_sources_reach_a_safe_note_in_real_edge(
             snapshot, ensure_ascii=False
         )
         _open_first_task(page, "library-list")
+        expect(page.locator(".production-heading span")).to_have_text("100%")
+        expect(page.locator(".production-track .track-step")).to_have_count(3)
         with page.expect_popup() as note:
             page.locator("#task-detail button[data-action='open_note']").click()
         expect(note.value.locator("article.note-content")).to_contain_text(
@@ -540,8 +555,10 @@ def test_goal4_waiting_setup_survives_refresh_without_constructing_a_provider(
         page = browser.new_page(viewport={"width": 390, "height": 844})
         page.goto(loopback_app.url)
         _open_settings_panel(page, "output")
-        page.locator("#authorize-automation").click()
-        expect(page.locator("#notice")).to_contain_text("请先勾选付费确认")
+        expect(page.locator("#authorize-automation")).to_be_disabled()
+        expect(page.locator("#automation-access-title")).to_have_text(
+            "\u5148\u5b8c\u6210\u8bbe\u7f6e"
+        )
         assert loopback_app.provider_runs == []
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")

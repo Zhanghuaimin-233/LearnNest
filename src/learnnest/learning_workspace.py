@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
 import json
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
+from learnnest.automation_models import AutomationIntake
 from learnnest.execution import plan_recovery
 from learnnest.automation_store import find_intake
 from learnnest.learning_state import (
@@ -30,6 +31,7 @@ from learnnest.task_store import find_task_by_id, parse_task_bytes
 from learnnest.tts_generation import probe_audio
 
 DesiredOutput = Literal["readable_note", "materials_only"]
+OutputGoal = Literal["complete_note", "complete_note_with_audio"]
 LearningActionKind = Literal[
     "open_note",
     "open_settings",
@@ -78,6 +80,7 @@ class LearningItem:
     action: str | None
     action_kind: LearningActionKind | None
     failure_reason: str | None = None
+    output_goal: OutputGoal = "complete_note"
 
     def __post_init__(self) -> None:
         if (self.action is None) != (self.action_kind is None):
@@ -315,12 +318,37 @@ class LearningWorkspace:
         return entries, digest.hexdigest()
 
     def _item(self, task_dir: Path, task: TaskRecord) -> LearningItem:
+        try:
+            intake = find_intake(self.output_root, task.task_id)
+            intake_invalid = False
+        except ValueError:
+            intake = None
+            intake_invalid = True
+        item = self._item_state(
+            task_dir,
+            task,
+            intake=intake,
+            intake_invalid=intake_invalid,
+        )
+        output_goal: OutputGoal = (
+            intake.default_output
+            if intake is not None
+            else "complete_note_with_audio"
+            if "tts" in task.stages
+            else "complete_note"
+        )
+        return replace(item, output_goal=output_goal)
+
+    def _item_state(
+        self,
+        task_dir: Path,
+        task: TaskRecord,
+        *,
+        intake: AutomationIntake | None,
+        intake_invalid: bool,
+    ) -> LearningItem:
         note_path = _readable_note_path(task_dir, task)
         if note_path is not None:
-            try:
-                intake = find_intake(self.output_root, task.task_id)
-            except ValueError:
-                intake = None
             if (
                 intake is not None
                 and intake.default_output == "complete_note_with_audio"
@@ -349,9 +377,7 @@ class LearningWorkspace:
                 "打开笔记",
                 "open_note",
             )
-        try:
-            intake = find_intake(self.output_root, task.task_id)
-        except ValueError:
+        if intake_invalid:
             return LearningItem(
                 task.task_id,
                 task.title,
@@ -665,6 +691,8 @@ def _item_with_action(
         message,
         action,
         action_kind,
+        None,
+        item.output_goal,
     )
 
 

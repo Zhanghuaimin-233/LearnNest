@@ -33,48 +33,57 @@
     <div class="app-shell">
       <main class="main-surface">
         <section class="view is-visible" id="tasks" data-view-panel="tasks">
-          <div id="task-workbench">
-            <header class="page-header task-page-header">
-              <div>
-                <p class="eyebrow">今天从这里开始</p>
-                <h1>任务工作台</h1>
-                <p class="page-summary" id="task-summary">正在读取真实任务。</p>
-              </div>
-              <button class="primary-action" data-open-single-video type="button"><span aria-hidden="true">＋</span> 处理单个视频</button>
-            </header>
+          <header class="page-header task-page-header">
+            <div>
+              <p class="eyebrow">今天从这里开始</p>
+              <h1>任务工作台</h1>
+              <p class="page-summary" id="task-summary">正在读取真实任务。</p>
+            </div>
+          </header>
 
-            <section class="task-focus" id="task-focus" aria-live="polite">
-              <div class="focus-copy"><p class="panel-kicker">现在最值得关注</p><h2>正在整理任务</h2><p>语栖会把需要你处理的内容放在最前面。</p></div>
-            </section>
-
-            <nav class="task-tabs" aria-label="任务筛选">
-              <button class="is-active" data-filter="all" type="button"><span>全部任务</span><strong data-filter-count="all">0</strong></button>
-              <button data-filter="attention" type="button"><span><i class="state-dot attention"></i>需要处理</span><strong data-filter-count="attention">0</strong></button>
-              <button data-filter="processing" type="button"><span><i class="state-dot processing"></i>处理中</span><strong data-filter-count="processing">0</strong></button>
-              <button data-filter="queued" type="button"><span><i class="state-dot queued"></i>等待中</span><strong data-filter-count="queued">0</strong></button>
-              <button data-filter="completed" type="button"><span><i class="state-dot completed"></i>已完成</span><strong data-filter-count="completed">0</strong></button>
-              <span class="task-default">默认成品：<strong id="default-output-label">读取中</strong><button type="button" data-go-settings>更改</button></span>
-            </nav>
-
-            <section class="task-list-panel" aria-labelledby="task-list-title">
-              <div class="panel-heading">
-                <div><p class="panel-kicker">按最近变化排列</p><h2 id="task-list-title">全部任务</h2></div>
+          <div class="task-console" id="task-console">
+            <aside class="task-spine" id="task-spine" aria-label="所有任务">
+              <div class="spine-heading">
+                <div><p class="panel-kicker">任务书脊</p><h2>所有任务</h2></div>
                 <button class="icon-button" id="refresh-tasks" type="button" aria-label="刷新任务">↻</button>
               </div>
-              <div class="task-list" id="task-list">
-                <div id="processing-list" class="task-group"></div>
-                <div id="inbox-list" class="task-group"></div>
-                <div id="library-list" class="task-group"></div>
-              </div>
-            </section>
-          </div>
+              <nav class="task-tabs" aria-label="任务筛选">
+                <button class="is-active" data-filter="all" type="button"><span>全部任务</span><strong data-filter-count="all">0</strong></button>
+                <button data-filter="attention" type="button"><span><i class="state-dot attention"></i>需要处理</span><strong data-filter-count="attention">0</strong></button>
+                <button data-filter="processing" type="button"><span><i class="state-dot processing"></i>处理中</span><strong data-filter-count="processing">0</strong></button>
+                <button data-filter="queued" type="button"><span><i class="state-dot queued"></i>等待中</span><strong data-filter-count="queued">0</strong></button>
+                <button data-filter="completed" type="button"><span><i class="state-dot completed"></i>已完成</span><strong data-filter-count="completed">0</strong></button>
+              </nav>
+              <section class="task-list-panel" aria-labelledby="task-list-title">
+                <div class="panel-heading"><h3 id="task-list-title">全部任务</h3><span>按最近变化</span></div>
+                <div class="task-list" id="task-list">
+                  <div id="processing-list" class="task-group"></div>
+                  <div id="inbox-list" class="task-group"></div>
+                  <div id="library-list" class="task-group"></div>
+                </div>
+              </section>
+              <p class="task-default">默认成品：<strong id="default-output-label">读取中</strong><button type="button" data-go-settings>更改</button></p>
+            </aside>
 
-          <section class="task-detail-view" id="task-detail-view" hidden>
-            <button class="back-to-tasks" id="back-to-tasks" type="button"><span aria-hidden="true">←</span> 返回任务工作台</button>
-            <section class="task-detail-panel" id="task-detail" aria-live="polite">
-              <div class="empty-detail"><span aria-hidden="true">⌁</span><h2>任务暂时不可用</h2><p>返回任务工作台重新选择。</p></div>
-            </section>
-          </section>
+            <div class="task-canvas">
+              <div id="task-workbench">
+                <section class="task-focus" id="task-focus" aria-live="polite">
+                  <div class="focus-copy"><p class="panel-kicker">现在最值得关注</p><h2>正在整理任务</h2><p>语栖会把需要你处理的内容放在最前面。</p></div>
+                </section>
+                <section class="workbench-note" id="workbench-note">
+                  <div><p class="panel-kicker">添加新内容</p><h2>视频与链接统一从“来源”进入</h2><p>任务页只负责查看进度和处理问题，避免同一操作散落在不同页面。</p></div>
+                  <button class="text-button" data-go-sources type="button">打开来源 <span aria-hidden="true">→</span></button>
+                </section>
+              </div>
+
+              <section class="task-detail-view" id="task-detail-view" hidden>
+                <button class="back-to-tasks" id="back-to-tasks" type="button"><span aria-hidden="true">←</span> 返回工作台概览</button>
+                <section class="task-detail-panel" id="task-detail" aria-live="polite">
+                  <div class="empty-detail"><span aria-hidden="true">⌁</span><h2>任务暂时不可用</h2><p>从左侧重新选择任务，或返回工作台概览。</p></div>
+                </section>
+              </section>
+            </div>
+          </div>
         </section>
 
         <section class="view" id="sources" data-view-panel="sources" hidden>
@@ -84,7 +93,6 @@
               <h1>来源</h1>
               <p class="page-summary">添加本地视频、公开链接或抖音收藏；处理状态统一回到任务页。</p>
             </div>
-            <button class="primary-action" data-open-single-video type="button"><span aria-hidden="true">＋</span> 处理单个视频</button>
           </header>
 
           <div class="source-workspace">
@@ -151,7 +159,11 @@
                   <label class="checkbox-label automation-favorite-option"><input name="auto_organize_new_favorites" type="checkbox" /><span><strong>自动整理新收藏</strong><small>只处理首次同步后出现的新收藏；历史收藏仍由你手动加入。</small></span></label>
                   <div class="form-actions"><button type="submit">保存自动处理设置</button><button type="reset" class="text-button">取消更改</button></div>
                 </form>
-                <div class="authorization-row"><label class="checkbox-label"><input id="confirm-paid" type="checkbox" /><span>我确认自动处理可能调用已配置的付费服务</span></label><div><button id="authorize-automation" type="button">确认并开启</button><button id="disable-automation" class="secondary-button" type="button">关闭自动处理</button></div></div>
+                <section class="automation-access" id="automation-access" aria-live="polite">
+                  <span class="access-mark" aria-hidden="true">◌</span>
+                  <div><p class="panel-kicker">自动执行权限</p><h3 id="automation-access-title">先完成设置</h3><p id="automation-access-copy">保存设置后，可以明确开启自动整理。</p></div>
+                  <div class="automation-access-actions"><button id="authorize-automation" type="button" disabled>开启自动整理</button><button id="disable-automation" class="secondary-button" type="button" hidden>关闭自动整理</button></div>
+                </section>
               </section>
 
               <section class="settings-panel" data-settings-panel="connections" hidden>
@@ -173,8 +185,14 @@
               </section>
 
               <section class="settings-panel" data-settings-panel="storage" hidden>
-                <div class="settings-panel-header"><div><p class="panel-kicker">只在这台设备</p><h2>本地存储</h2><p>任务事实、笔记、音频和加密设置均位于启动时选择的输出位置。</p></div></div>
-                <div class="storage-facts"><div><strong>输出位置</strong><span>启动语栖时选择；页面不显示完整本机路径。</span></div><div><strong>成品</strong><span>笔记和音频保存在本机，可以从已完成任务打开。</span></div><div><strong>连接密钥</strong><span>仅由当前 Windows 用户加密读取。</span></div></div>
+                <div class="settings-panel-header"><div><p class="panel-kicker">只在这台设备</p><h2>本地存储</h2><p>查看当前真实路径，并设置下次正常启动时使用的学习内容位置。</p></div></div>
+                <form id="storage-form" class="storage-form">
+                  <label for="output-root">学习内容保存位置<input id="output-root" name="output_root" required autocomplete="off" spellcheck="false" /><small id="current-output-root">正在读取当前路径。</small></label>
+                  <aside class="storage-change-note"><strong>切换位置不会搬迁旧任务</strong><p>保存后请关闭并重新启动语栖。当前进程继续使用原位置；旧任务仍保留在原文件夹。</p></aside>
+                  <div class="form-actions"><button type="submit">保存为下次启动位置</button><button type="reset" class="text-button">取消更改</button></div>
+                </form>
+                <p id="storage-feedback" class="inline-feedback" aria-live="polite">路径只用于本机启动，不会发送到 Provider。</p>
+                <div class="storage-facts"><div><strong>成品与任务</strong><span>笔记、音频、任务事实和来源状态保存在所选文件夹。</span></div><div><strong>连接密钥</strong><span>仍只由当前 Windows 用户加密读取；切换位置不会复制密钥。</span></div></div>
               </section>
             </div>
           </div>
@@ -190,8 +208,6 @@
       <a class="bookmark" href="#settings" data-view="settings"><span aria-hidden="true">◌</span>设置</a>
     </nav>
 
-    <button class="mobile-primary-action" data-open-single-video type="button"><span aria-hidden="true">＋</span> 处理单个视频</button>
-
     <dialog id="single-video-dialog" class="app-dialog">
       <form method="dialog" class="dialog-shell" id="upload-form">
         <div class="dialog-heading"><div><p class="eyebrow">一次明确的处理</p><h2>处理单个视频</h2><p>选择本地视频后，它会使用当前设置进入完整流程。</p></div><button class="dialog-close" data-close-single-video type="button" aria-label="关闭">×</button></div>
@@ -200,6 +216,15 @@
         <p class="dialog-note" id="single-video-readiness">正在检查所需的模型与语音服务。</p>
         <div class="dialog-actions"><button class="secondary-button" data-close-single-video type="button">取消</button><button id="submit-single-video" type="submit">处理这个视频</button></div>
       </form>
+    </dialog>
+
+    <dialog id="automation-authorization-dialog" class="app-dialog authorization-dialog" aria-labelledby="automation-authorization-title" aria-describedby="automation-authorization-copy">
+      <div class="dialog-shell">
+        <div class="dialog-heading"><div><p class="eyebrow">自动执行权限</p><h2 id="automation-authorization-title">开启自动整理？</h2><p id="automation-authorization-copy">开启后，新加入的任务可按当前设置自动调用已配置的模型与语音服务。</p></div><button class="dialog-close" data-close-automation-authorization type="button" aria-label="关闭">×</button></div>
+        <dl class="authorization-summary"><div><dt>默认成品</dt><dd id="authorization-output">读取中</dd></div><div><dt>检查频率</dt><dd id="authorization-interval">读取中</dd></div><div><dt>费用边界</dt><dd>受调用安全页中的每日上限和重试次数约束</dd></div></dl>
+        <p class="authorization-warning"><strong>可能产生服务费用。</strong>只有已配置的 Provider 会被调用；达到上限、身份不匹配或结果不明时会停止，不会跨服务自动切换。</p>
+        <div class="dialog-actions"><button id="cancel-automation-authorization" class="secondary-button" data-close-automation-authorization type="button">暂不开启</button><button id="confirm-automation-authorization" type="button">确认并开启自动整理</button></div>
+      </div>
     </dialog>
 
     <dialog id="delete-task-dialog" class="app-dialog danger-dialog">

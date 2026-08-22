@@ -14,6 +14,7 @@ import learnnest.cli as cli
 import learnnest.learning_workspace as learning_workspace
 import learnnest.web_app as web_app
 from learnnest.execution import RecoveryPlan
+from learnnest.launcher import load_launcher_config
 from learnnest.automation_models import (
     AutomationAttempt,
     AutomationIntake,
@@ -1136,6 +1137,55 @@ def test_web_app_configures_authorizes_and_disables_automation_without_calls(
     assert "fake-key" not in configured.text + authorized.text + disabled.text
 
 
+def test_web_storage_exposes_current_root_and_saves_the_next_launcher_root(
+    tmp_path: Path,
+) -> None:
+    current_root = (tmp_path / "current-library").resolve()
+    current_root.mkdir()
+    next_root = (tmp_path / "next-library").resolve()
+    config_path = tmp_path / "local-app-data" / "LearnNest" / "launcher.json"
+    client = TestClient(
+        web_app.create_web_app(current_root, launcher_config_path=config_path)
+    )
+
+    initial = client.get("/api/storage")
+    changed = client.put(
+        "/api/storage/output-root", json={"output_root": str(next_root)}
+    )
+
+    assert initial.status_code == 200
+    assert initial.json() == {
+        "current_output_root": str(current_root),
+        "next_output_root": str(current_root),
+        "restart_required": False,
+    }
+    assert changed.status_code == 200
+    assert changed.json() == {
+        "current_output_root": str(current_root),
+        "next_output_root": str(next_root),
+        "restart_required": True,
+    }
+    assert load_launcher_config(config_path).output_root == str(next_root)
+    assert next_root.is_dir()
+
+
+def test_web_storage_rejects_a_relative_or_unwritable_launcher_root(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "local-app-data" / "LearnNest" / "launcher.json"
+    client = TestClient(
+        web_app.create_web_app(tmp_path, launcher_config_path=config_path)
+    )
+
+    response = client.put(
+        "/api/storage/output-root", json={"output_root": "relative-output"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "保存位置必须填写绝对路径。"
+    assert not config_path.exists()
+
+
 def test_web_automation_authorization_requires_explicit_paid_confirmation(
     tmp_path: Path,
 ) -> None:
@@ -1433,6 +1483,8 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
         assert f'data-view="{view}"' in page
         assert f'data-view-panel="{view}"' in page
     for element_id in (
+        "task-console",
+        "task-spine",
         "task-workbench",
         "task-focus",
         "task-list",
@@ -1441,8 +1493,15 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
         "back-to-tasks",
         "single-video-dialog",
         "single-video-output",
+        "storage-form",
+        "output-root",
+        "automation-access",
+        "automation-authorization-dialog",
     ):
         assert f'id="{element_id}"' in page
+    assert page.count("data-open-single-video") == 1
+    assert 'id="confirm-paid"' not in page
+    assert "mobile-primary-action" not in page
     assert "学习库" not in page
     assert "function showView" in script
     assert "api(`/api/learning/uploads?name=${encodeURIComponent(file.name)}`" in script
@@ -1525,12 +1584,12 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
         "uploadForm.addEventListener", maxsplit=1
     )[0]
     assert 'document.querySelector("#settings")?.scrollIntoView' in action_block
-    assert "confirmPaid?.focus" in action_block
+    assert "authorizeAutomationButton?.focus" in action_block
     assert "/api/automation/authorize" not in action_block
     assert action_block.index('action !== "continue"') < action_block.index("/continue")
     assert "@media (max-width: 760px)" in stylesheet
     assert (
-        ".learning-row { padding: 17px 10px; grid-template-columns: minmax(0, 1fr) auto;"
+        ".learning-row { padding: 15px 10px; grid-template-columns: minmax(0, 1fr) auto;"
         in stylesheet
     )
     assert "function renderSourceJobs" in script

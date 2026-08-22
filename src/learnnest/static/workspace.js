@@ -43,16 +43,24 @@ const windowsVoice = document.querySelector("#windows-voice");
 const automationForm = document.querySelector("#automation-form");
 const automationState = document.querySelector("#automation-state");
 const automationSummary = document.querySelector("#automation-summary");
-const confirmPaid = document.querySelector("#confirm-paid");
+const automationAccess = document.querySelector("#automation-access");
+const automationAccessTitle = document.querySelector("#automation-access-title");
+const automationAccessCopy = document.querySelector("#automation-access-copy");
 const authorizeAutomationButton = document.querySelector("#authorize-automation");
 const disableAutomationButton = document.querySelector("#disable-automation");
+const automationAuthorizationDialog = document.querySelector("#automation-authorization-dialog");
+const confirmAutomationAuthorization = document.querySelector("#confirm-automation-authorization");
+const authorizationOutput = document.querySelector("#authorization-output");
+const authorizationInterval = document.querySelector("#authorization-interval");
 const addSelectedFavoritesButton = document.querySelector("#add-selected-favorites");
 const favoriteSelection = document.querySelector("#favorite-selection");
 const taskList = document.querySelector("#task-list");
 const taskDetail = document.querySelector("#task-detail");
 const taskWorkbench = document.querySelector("#task-workbench");
 const taskDetailView = document.querySelector("#task-detail-view");
+const taskConsole = document.querySelector("#task-console");
 const taskFocus = document.querySelector("#task-focus");
+const workbenchNote = document.querySelector("#workbench-note");
 const taskSummary = document.querySelector("#task-summary");
 const taskCount = document.querySelector("#task-count");
 const taskListTitle = document.querySelector("#task-list-title");
@@ -68,8 +76,11 @@ const connectionDialog = document.querySelector("#connection-dialog");
 const providerAdapterList = document.querySelector("#provider-adapter-list");
 const providerLimitsForm = document.querySelector("#provider-limits-form");
 const providerLimitsFeedback = document.querySelector("#provider-limits-feedback");
+const storageForm = document.querySelector("#storage-form");
+const outputRoot = document.querySelector("#output-root");
+const currentOutputRoot = document.querySelector("#current-output-root");
+const storageFeedback = document.querySelector("#storage-feedback");
 const runtimeState = document.querySelector(".runtime-state");
-const mobilePrimaryAction = document.querySelector(".mobile-primary-action");
 const runtimeTitle = document.querySelector("#runtime-title");
 const runtimeCopy = document.querySelector("#runtime-copy");
 const settingsReadiness = document.querySelector(".settings-readiness");
@@ -116,6 +127,7 @@ let currentSnapshot = { inbox: [], processing: [], library: [] };
 let selectedItemRef = null;
 let activeTaskFilter = "all";
 let noticeTimer = null;
+let lastAutomationStatus = { configured: false, enabled: false };
 const providerConnectionNameDefaults = {
   "windows-tts": "windows-tts",
   "local-asr": "local-asr",
@@ -319,7 +331,7 @@ function renderList(target, items, empty) {
     <article class="learning-row" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}" tabindex="0">
       <div class="learning-copy">
         <h3>${escapeHtml(item.title)}</h3>
-        <p>${escapeHtml(item.source)} · ${escapeHtml(item.message)}</p>
+        <p>${escapeHtml(item.source)}</p>
       </div>
       <span class="learning-state">${escapeHtml(stateLabel[item.state] || "需要检查")}</span>
       <span class="task-progress" aria-hidden="true" style="--task-progress:${taskProgress(item)}%"><i></i></span>
@@ -336,6 +348,7 @@ function renderList(target, items, empty) {
     });
   });
   target.querySelectorAll("button[data-open-item-ref]").forEach((button) => button.addEventListener("click", () => selectTask(button.dataset.openItemRef)));
+  updateSelectedTaskRows();
 }
 
 function render(snapshot) {
@@ -344,7 +357,7 @@ function render(snapshot) {
   renderList(lists.processing, snapshot.processing, "");
   renderList(lists.inbox, snapshot.inbox, "");
   const items = allLearningItems();
-  if (!items.length) lists.processing.innerHTML = '<p class="empty">还没有任务。处理单个视频或从来源页添加内容。</p>';
+  if (!items.length) lists.processing.innerHTML = '<p class="empty">还没有任务。请从来源页添加内容。</p>';
   if (selectedItemRef && !items.some((item) => item.item_ref === selectedItemRef)) showTaskWorkbench();
   const counts = {
     all: items.length,
@@ -356,6 +369,7 @@ function render(snapshot) {
   for (const [name, count] of Object.entries(counts)) document.querySelector(`[data-filter-count="${name}"]`).textContent = count;
   taskCount.textContent = counts.all;
   taskSummary.innerHTML = `<strong>${counts.processing} 项正在处理</strong>，${counts.attention} 项需要你处理，${counts.completed} 项已完成。`;
+  workbenchNote.hidden = !items.length;
   renderTaskFocus(items);
   applyTaskFilter();
   if (selectedItemRef) renderTaskDetail(items.find((item) => item.item_ref === selectedItemRef));
@@ -366,8 +380,8 @@ function renderTaskFocus(items) {
   const item = [...items].sort((left, right) => priority[taskFilterFor(left)] - priority[taskFilterFor(right)])[0];
   if (!item) {
     taskFocus.className = "task-focus is-empty";
-    taskFocus.innerHTML = `<div class="focus-copy"><p class="panel-kicker">工作台已准备好</p><h2>从一个视频开始</h2><p>添加本地视频后，材料、笔记和音频进度会持续保留在这里。</p></div><button class="primary-action" type="button">处理单个视频</button>`;
-    taskFocus.querySelector("button").addEventListener("click", () => singleVideoDialog.showModal());
+    taskFocus.innerHTML = `<div class="focus-copy"><p class="panel-kicker">工作台已准备好</p><h2>从“来源”添加第一项内容</h2><p>本地视频、公开链接和收藏进入任务后，进度与问题会持续保留在这里。</p></div><button class="focus-open" type="button">打开来源 <span aria-hidden="true">→</span></button>`;
+    taskFocus.querySelector("button").addEventListener("click", () => showView("sources"));
     return;
   }
   const filter = taskFilterFor(item);
@@ -389,11 +403,15 @@ function taskFilterFor(item) {
 }
 
 function taskProgress(item) {
-  if (item.state === "ready") return item.audio_href ? 100 : 76;
+  if (item.state === "ready") return 100;
   if (item.state === "partial_ready") return 78;
   if (item.state === "organizing") return 58;
-  if (item.state === "needs_action") return item.message.includes("音频") ? 78 : 52;
+  if (item.state === "needs_action") return item.output_goal === "complete_note_with_audio" && item.note_href ? 78 : 52;
   return 34;
+}
+
+function updateSelectedTaskRows() {
+  taskList.querySelectorAll("article[data-item-ref]").forEach((row) => row.classList.toggle("is-selected", row.dataset.itemRef === selectedItemRef));
 }
 
 function applyTaskFilter() {
@@ -409,7 +427,8 @@ function selectTask(itemRef) {
   renderTaskDetail(allLearningItems().find((item) => item.item_ref === itemRef));
   taskWorkbench.hidden = true;
   taskDetailView.hidden = false;
-  mobilePrimaryAction.hidden = true;
+  taskConsole.classList.add("has-detail");
+  updateSelectedTaskRows();
   window.scrollTo({ top: 0, behavior: "auto" });
   document.querySelector("#back-to-tasks")?.focus({ preventScroll: true });
 }
@@ -418,22 +437,26 @@ function showTaskWorkbench() {
   selectedItemRef = null;
   taskDetailView.hidden = true;
   taskWorkbench.hidden = false;
-  mobilePrimaryAction.hidden = false;
+  taskConsole.classList.remove("has-detail");
+  updateSelectedTaskRows();
   window.scrollTo({ top: 0, behavior: "auto" });
 }
 
 function trackSteps(item) {
+  const labels = item.output_goal === "complete_note_with_audio"
+    ? ["获取内容", "准备材料", "生成笔记", "生成音频"]
+    : ["获取内容", "准备材料", "生成笔记"];
   let completed = 1;
   if (["materials_ready", "waiting_setup", "waiting_authorization", "queued", "organizing", "partial_ready", "needs_action", "ready"].includes(item.state)) completed = 2;
-  if (["partial_ready", "ready"].includes(item.state) || (item.state === "needs_action" && item.message.includes("音频"))) completed = 3;
-  if (item.state === "ready" && item.audio_href) completed = 4;
-  return ["获取内容", "准备材料", "生成笔记", "生成音频"].map((label, index) => ({ label, done: index < completed, current: index === completed && completed < 4 }));
+  if (["partial_ready", "ready"].includes(item.state) || item.note_href) completed = 3;
+  if (item.state === "ready") completed = labels.length;
+  return labels.map((label, index) => ({ label, done: index < completed, current: index === completed && completed < labels.length }));
 }
 
 function renderTaskDetail(item) {
   if (!item) {
     taskDetail.classList.remove("has-selection");
-    taskDetail.innerHTML = '<div class="empty-detail"><span aria-hidden="true">⌁</span><h2>还没有任务</h2><p>从“处理单个视频”或来源页添加第一项内容。</p></div>';
+    taskDetail.innerHTML = '<div class="empty-detail"><span aria-hidden="true">⌁</span><h2>还没有任务</h2><p>请从来源页添加第一项内容。</p></div>';
     return;
   }
   taskDetail.classList.add("has-selection");
@@ -453,7 +476,7 @@ function renderTaskDetail(item) {
         <div class="detail-heading"><div><p class="panel-kicker">当前任务</p><h2>${escapeHtml(item.title)}</h2><p class="detail-source">${escapeHtml(item.source)}</p></div><span class="detail-status ${escapeHtml(item.state)}">${escapeHtml(stateLabel[item.state] || "需要检查")}</span></div>
         <p class="detail-message">${escapeHtml(item.message)}</p>
         ${failureExplanation}
-        <section class="production-section"><div class="production-heading"><h3>产出轨道</h3><span>${percent}%</span></div><div class="production-track">${steps.map((step) => `<span class="track-step${step.done ? " is-done" : ""}${step.current ? " is-current" : ""}"><i>${step.done ? "✓" : ""}</i><strong>${step.label}</strong></span>`).join("")}</div></section>
+        <section class="production-section"><div class="production-heading"><h3>产出轨道</h3><span>${percent}%</span></div><div class="production-track" style="--track-steps:${steps.length}">${steps.map((step) => `<span class="track-step${step.done ? " is-done" : ""}${step.current ? " is-current" : ""}"><i>${step.done ? "✓" : ""}</i><strong>${step.label}</strong></span>`).join("")}</div></section>
       </div>
       <aside class="detail-action"><p class="panel-kicker">${actionHeading}</p><strong>${escapeHtml(stateLabel[item.state] || "需要检查")}</strong><p>${escapeHtml(actionCopy)}</p><div class="detail-action-controls">${item.action && learningActionKinds.has(item.action_kind) ? `<button class="detail-primary-action" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}<button class="danger-link" type="button" data-delete-item-ref="${escapeHtml(item.item_ref)}"${item.state === "organizing" ? ' disabled title="正在处理，暂时不能删除"' : ""}>删除任务</button></div>${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}</aside>
     </div>`;
@@ -557,6 +580,7 @@ async function loadFavorites() {
 }
 
 function renderAutomationStatus(status) {
+  lastAutomationStatus = status;
   const enabled = status.enabled;
   automationState.textContent = enabled ? "自动整理已开启" : status.needs_authorization ? "需要重新确认" : status.configured ? "等待确认" : "等待设置";
   automationState.className = `status-pill ${enabled ? "connected" : ""}`;
@@ -568,14 +592,45 @@ function renderAutomationStatus(status) {
   runtimeTitle.textContent = enabled ? "自动处理已开启" : "自动处理已关闭";
   runtimeCopy.textContent = enabled ? "仅在语栖运行时工作" : "单个任务仍可加入并等待设置";
   automationSummary.textContent = enabled
-    ? `会按 ${status.check_interval_seconds} 秒检查收件箱；默认生成${status.default_output === "complete_note" ? "完整笔记" : "完整笔记和播客音频"}。`
-    : "保存设置后，需要勾选付费确认才会开始自动整理。";
+    ? `会按 ${status.check_interval_seconds} 秒检查收件箱；默认生成${status.default_output === "complete_note" ? "完整笔记" : "完整笔记和播客音频"}。设置未变化时授权会持续有效。`
+    : status.needs_authorization
+      ? "模型、职责、额度或产出设置已经变化。检查后重新确认，自动整理才会继续。"
+      : status.configured
+        ? "设置已保存。自动整理当前关闭，手动开启时会显示本次调用与费用边界。"
+        : "先保存默认产出并完成所需连接，再决定是否开启自动整理。";
+  const accessState = enabled ? "enabled" : status.needs_authorization ? "attention" : status.configured ? "ready" : "setup";
+  automationAccess.dataset.state = accessState;
+  automationAccessTitle.textContent = enabled ? "已授权并运行" : status.needs_authorization ? "设置已变化，需要重新确认" : status.configured ? "设置已保存，自动整理未开启" : "先完成设置";
+  automationAccessCopy.textContent = enabled
+    ? "这项授权由语栖持久保存；再次进入页面无需重复确认。实质设置变化时会自动失效。"
+    : status.needs_authorization
+      ? "已有任务和材料不会丢失。确认当前设置后，可以重新开启自动整理。"
+      : status.configured
+        ? "只有点击开启并确认调用说明后，语栖才会自动推进需要 Provider 的阶段。"
+        : "保存默认产出并完成模型职责绑定后，这里会提供明确的开启操作。";
+  authorizeAutomationButton.hidden = enabled;
+  authorizeAutomationButton.disabled = !status.configured || enabled;
+  authorizeAutomationButton.textContent = status.needs_authorization ? "查看变化并重新确认" : "开启自动整理";
+  disableAutomationButton.hidden = !enabled;
   if (status.configured && !settingsFormNeedsProtection(automationForm)) {
     automationForm.elements.default_output.value = status.default_output;
     automationForm.elements.check_interval_seconds.value = status.check_interval_seconds;
     automationForm.elements.auto_organize_new_favorites.checked = status.auto_organize_new_favorites;
     automationForm.elements.max_items_per_tick.value = status.max_items_per_tick;
   }
+}
+
+function renderStorageStatus(status, protectDirty = false) {
+  currentOutputRoot.textContent = `当前正在使用：${status.current_output_root}`;
+  if (!protectDirty || !settingsFormNeedsProtection(storageForm)) outputRoot.value = status.next_output_root;
+  storageFeedback.textContent = status.restart_required
+    ? `已保存新的启动位置：${status.next_output_root}。关闭并重新启动语栖后生效；当前任务仍使用 ${status.current_output_root}。`
+    : `当前与下次启动都使用：${status.current_output_root}`;
+}
+
+async function loadStorageStatus(protectDirty = false) {
+  try { renderStorageStatus(await api("/api/storage"), protectDirty); }
+  catch (error) { storageFeedback.textContent = error.message; }
 }
 
 function showView(view, updateHash = true) {
@@ -588,7 +643,6 @@ function showView(view, updateHash = true) {
   });
   document.querySelectorAll(".bookmark[data-view]").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   if (view === "tasks") showTaskWorkbench();
-  mobilePrimaryAction.hidden = view === "settings";
   if (updateHash && window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
   window.scrollTo({ top: 0, behavior: "auto" });
 }
@@ -611,6 +665,19 @@ function openConnectionDialog(preset = null) {
 }
 
 async function loadAutomationStatus() { try { renderAutomationStatus(await api("/api/automation/status")); } catch (error) { automationState.textContent = "无法读取"; } }
+
+function openAutomationAuthorization() {
+  if (!lastAutomationStatus.configured || lastAutomationStatus.enabled) return;
+  const output = lastAutomationStatus.default_output === "complete_note" ? "完整笔记" : "完整笔记 + 播客音频";
+  authorizationOutput.textContent = output;
+  authorizationInterval.textContent = `每 ${lastAutomationStatus.check_interval_seconds} 秒检查一次，每次最多 ${lastAutomationStatus.max_items_per_tick} 项`;
+  automationAuthorizationDialog.showModal();
+  window.requestAnimationFrame(() => document.querySelector("#cancel-automation-authorization")?.focus({ preventScroll: true }));
+}
+
+function closeAutomationAuthorization() {
+  automationAuthorizationDialog.close();
+}
 
 function stopLoginPolling() {
   window.clearTimeout(loginPollTimer);
@@ -787,7 +854,7 @@ async function refresh(force = false) {
       revision = snapshot.revision;
       render(snapshot);
     }
-    await Promise.all([loadFavorites(), refreshProviderSettingsWhenIdle()]);
+    await Promise.all([loadFavorites(), refreshProviderSettingsWhenIdle(), loadStorageStatus(true)]);
     await loadSourceJobs();
     await loadAutomationStatus();
   } catch (error) {
@@ -818,7 +885,7 @@ async function actOnItem(itemRef, action) {
       showView("settings");
       showSettingsPanel("output");
       document.querySelector("#settings")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      window.requestAnimationFrame(() => confirmPaid?.focus({ preventScroll: true }));
+      window.requestAnimationFrame(() => authorizeAutomationButton?.focus({ preventScroll: true }));
       return;
     }
     if (action === "open_single_video") {
@@ -923,18 +990,49 @@ automationForm.addEventListener("submit", async (event) => {
     renderAutomationStatus(await api("/api/automation/configure", { method: "POST", body: JSON.stringify({ default_output: form.get("default_output"), auto_organize_new_favorites: form.has("auto_organize_new_favorites"), check_interval_seconds: Number(form.get("check_interval_seconds")), max_items_per_tick: Number(form.get("max_items_per_tick")) }) }));
     dirtySettingsForms.delete(automationForm);
     await loadProviderSettings(String(form.get("default_output")));
-    confirmPaid.checked = false;
-    say("自动整理设置已保存；请阅读提示并明确确认后开启。");
+    say("自动整理设置已保存。需要自动执行时，请从权限状态卡明确开启。");
   } catch (error) { say(error.message); }
 });
 
-authorizeAutomationButton.addEventListener("click", async () => {
-  if (!confirmPaid.checked) { say("请先勾选付费确认。 "); return; }
-  try { renderAutomationStatus(await api("/api/automation/authorize", { method: "POST", body: JSON.stringify({ confirm_paid: true }) })); say("自动整理已开启。"); } catch (error) { say(error.message); }
+authorizeAutomationButton.addEventListener("click", openAutomationAuthorization);
+
+confirmAutomationAuthorization.addEventListener("click", async () => {
+  const label = confirmAutomationAuthorization.textContent;
+  confirmAutomationAuthorization.disabled = true;
+  confirmAutomationAuthorization.textContent = "正在开启…";
+  try {
+    renderAutomationStatus(await api("/api/automation/authorize", { method: "POST", body: JSON.stringify({ confirm_paid: true }) }));
+    closeAutomationAuthorization();
+    say("自动整理已开启；设置未变化时无需重复确认。");
+  } catch (error) { say(error.message); }
+  finally {
+    confirmAutomationAuthorization.disabled = false;
+    confirmAutomationAuthorization.textContent = label;
+  }
 });
 
 disableAutomationButton.addEventListener("click", async () => {
   try { renderAutomationStatus(await api("/api/automation/disable", { method: "POST" })); say("自动整理已关闭。 "); } catch (error) { say(error.message); }
+});
+
+storageForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = storageForm.querySelector("button[type=submit]");
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "保存中…";
+  try {
+    const status = await api("/api/storage/output-root", { method: "PUT", body: JSON.stringify({ output_root: outputRoot.value.trim() }) });
+    dirtySettingsForms.delete(storageForm);
+    renderStorageStatus(status);
+    say(status.restart_required ? "新的保存位置已保存，重启语栖后生效。" : "保存位置未变化。");
+  } catch (error) {
+    storageFeedback.textContent = error.message;
+    say(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
 });
 
 providerForm.addEventListener("submit", async (event) => {
@@ -999,7 +1097,7 @@ providerLimitsForm.addEventListener("submit", async (event) => {
   }
 });
 
-for (const form of [providerForm, automationForm, providerLimitsForm]) {
+for (const form of [providerForm, automationForm, providerLimitsForm, storageForm]) {
   form.addEventListener("input", () => dirtySettingsForms.add(form));
   form.addEventListener("change", () => dirtySettingsForms.add(form));
   form.addEventListener("reset", () => {
@@ -1007,7 +1105,8 @@ for (const form of [providerForm, automationForm, providerLimitsForm]) {
     window.setTimeout(() => {
       if (form === providerForm) loadProviderSettings(automationForm.elements.default_output.value);
       else if (form === automationForm) loadAutomationStatus();
-      else loadProviderSettings(automationForm.elements.default_output.value);
+      else if (form === providerLimitsForm) loadProviderSettings(automationForm.elements.default_output.value);
+      else loadStorageStatus();
     });
   });
 }
@@ -1031,6 +1130,7 @@ document.querySelectorAll("[data-filter]").forEach((button) => button.addEventLi
 document.querySelectorAll("[data-settings-tab]").forEach((button) => button.addEventListener("click", () => showSettingsPanel(button.dataset.settingsTab)));
 document.querySelectorAll("[data-open-single-video]").forEach((button) => button.addEventListener("click", () => singleVideoDialog.showModal()));
 document.querySelectorAll("[data-close-single-video]").forEach((button) => button.addEventListener("click", () => singleVideoDialog.close()));
+document.querySelectorAll("[data-close-automation-authorization]").forEach((button) => button.addEventListener("click", closeAutomationAuthorization));
 document.querySelectorAll("[data-close-delete-task]").forEach((button) => button.addEventListener("click", closeDeleteTask));
 deleteTaskDialog.addEventListener("close", () => { pendingDeleteItemRef = null; });
 document.querySelectorAll("[data-go-settings]").forEach((button) => button.addEventListener("click", () => {
@@ -1038,6 +1138,7 @@ document.querySelectorAll("[data-go-settings]").forEach((button) => button.addEv
   showView("settings");
   showSettingsPanel("output");
 }));
+document.querySelectorAll("[data-go-sources]").forEach((button) => button.addEventListener("click", () => showView("sources")));
 document.querySelector("#open-connection-dialog").addEventListener("click", () => openConnectionDialog());
 document.querySelectorAll("[data-close-connection]").forEach((button) => button.addEventListener("click", () => connectionDialog.close()));
 document.querySelector("#local-video").addEventListener("change", (event) => {
@@ -1054,5 +1155,6 @@ document.addEventListener("visibilitychange", () => refresh(true));
 restoreDouyinLogin();
 suggestProviderConnectionName();
 loadProviderSettings();
+loadStorageStatus();
 showView(["tasks", "sources", "settings"].includes(window.location.hash.slice(1)) ? window.location.hash.slice(1) : "tasks", false);
 refresh(true);

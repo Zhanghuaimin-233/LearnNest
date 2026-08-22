@@ -213,6 +213,10 @@ def test_snapshot_projects_the_eight_public_learning_states(
         expected_action,
         expected_action_kind,
     )
+    expected_output_goal = (
+        "complete_note_with_audio" if case == "partial" else "complete_note"
+    )
+    assert item.output_goal == expected_output_goal
     payload = web_app._learning_item_payload(item)
     assert (
         payload["state"],
@@ -225,6 +229,7 @@ def test_snapshot_projects_the_eight_public_learning_states(
         expected_action,
         expected_action_kind,
     )
+    assert payload["output_goal"] == expected_output_goal
 
 
 def test_snapshot_gives_an_explicit_reprocess_step_for_an_unrecoverable_old_task(

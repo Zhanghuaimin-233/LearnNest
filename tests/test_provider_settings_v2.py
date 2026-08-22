@@ -1081,12 +1081,13 @@ def test_retry_or_any_budget_group_change_invalidates_automatic_authorization(
         run_automation_tasks(tmp_path, ["would-call"], providers)
 
 
-def test_provider_settings_join_the_live_refresh_without_repainting_active_forms() -> (
-    None
-):
+def test_settings_join_the_live_refresh_without_repainting_active_forms() -> None:
     script = (web_app._STATIC_DIRECTORY / "workspace.js").read_text(encoding="utf-8")
 
-    assert "Promise.all([loadFavorites(), refreshProviderSettingsWhenIdle()])" in script
+    assert (
+        "Promise.all([loadFavorites(), refreshProviderSettingsWhenIdle(), "
+        "loadStorageStatus(true)])"
+    ) in script
     assert "function settingsFormNeedsProtection(form)" in script
 
 

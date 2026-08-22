@@ -94,6 +94,9 @@ uv run learnnest process `
 uv run learnnest web launch
 ```
 
+在“设置 → 本地存储”中可以查看当前运行使用的完整路径，并保存下次正常启动要使用的新位置。
+切换位置需要重启语栖才会生效，不会搬迁或删除原位置中的任务。
+
 维护者也可以显式指定输出根：
 
 ```powershell

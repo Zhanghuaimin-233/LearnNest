@@ -74,6 +74,19 @@ def resolve_output_root(
     return root
 
 
+def save_launcher_output_root(
+    output_root: str | Path,
+    config_path: Path | None = None,
+) -> Path:
+    """Validate and save the output root used by the next normal WebUI launch."""
+    root = _validated_output_root(Path(output_root))
+    _write_config(
+        config_path or launcher_config_path(),
+        LauncherConfig(output_root=str(root)),
+    )
+    return root
+
+
 def select_output_root_directory() -> Path | None:
     """Use Windows' native folder picker without collecting any file contents."""
     try:

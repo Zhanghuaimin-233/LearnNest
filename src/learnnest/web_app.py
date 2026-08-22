@@ -47,6 +47,12 @@ from learnnest.learning_workspace import (
     LearningWorkspaceError,
     validate_public_web_url,
 )
+from learnnest.launcher import (
+    LauncherConfigError,
+    launcher_config_path as default_launcher_config_path,
+    load_launcher_config,
+    save_launcher_output_root,
+)
 from learnnest.locks import LockUnavailable, task_lock
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
@@ -172,6 +178,12 @@ class AutomationAuthorizeRequest(BaseModel):
     confirm_paid: Literal[True]
 
 
+class OutputRootRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    output_root: str = Field(min_length=1, max_length=4096)
+
+
 class LearningSubmitRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -188,6 +200,7 @@ class WebService:
         douyin_login: DouyinLoginSessionManager | None = None,
         douyin_favorites: DouyinFavoritesStore | None = None,
         coordinator: AutomationCoordinator | None = None,
+        launcher_config_path: Path | None = None,
     ) -> None:
         self.output_root = Path(output_root).resolve()
         self.jobs = WebJobStore(self.output_root)
@@ -198,6 +211,7 @@ class WebService:
             self.output_root
         )
         self.coordinator = coordinator
+        self.launcher_config_path = launcher_config_path
 
     def wake_automation(self) -> None:
         if self.coordinator is not None:
@@ -527,6 +541,31 @@ class WebService:
             raise ValueError("自动处理尚未完成设置。") from error
         return self.automation_status()
 
+    def storage_status(self) -> dict[str, Any]:
+        next_root = self.output_root
+        try:
+            config_path = self.launcher_config_path or default_launcher_config_path()
+            if config_path.is_file():
+                next_root = Path(load_launcher_config(config_path).output_root)
+        except LauncherConfigError:
+            next_root = self.output_root
+        return {
+            "current_output_root": str(self.output_root),
+            "next_output_root": str(next_root),
+            "restart_required": next_root != self.output_root,
+        }
+
+    def save_output_root(self, request: OutputRootRequest) -> dict[str, Any]:
+        candidate = Path(request.output_root)
+        if not candidate.is_absolute():
+            raise ValueError("保存位置必须填写绝对路径。")
+        try:
+            config_path = self.launcher_config_path or default_launcher_config_path()
+            save_launcher_output_root(candidate, config_path)
+        except LauncherConfigError as error:
+            raise ValueError("无法使用这个保存位置，请选择可写文件夹。") from error
+        return self.storage_status()
+
     def provider_settings(
         self,
         default_output: Literal["complete_note", "complete_note_with_audio"]
@@ -751,6 +790,7 @@ def create_web_app(
     douyin_login: DouyinLoginSessionManager | None = None,
     douyin_favorites: DouyinFavoritesStore | None = None,
     coordinator: AutomationCoordinator | None = None,
+    launcher_config_path: Path | None = None,
 ) -> FastAPI:
     """Create the loopback WebUI application without starting a server."""
     workspace = LearningWorkspace(output_root)
@@ -760,6 +800,7 @@ def create_web_app(
         douyin_login=douyin_login,
         douyin_favorites=douyin_favorites,
         coordinator=coordinator,
+        launcher_config_path=launcher_config_path,
     )
 
     @asynccontextmanager
@@ -1239,6 +1280,17 @@ syncInitialHashBookmark();
                 status_code=500, detail="自动化状态文件无效。"
             ) from error
 
+    @app.get("/api/storage")
+    def storage_status() -> dict[str, Any]:
+        return service.storage_status()
+
+    @app.put("/api/storage/output-root")
+    def save_output_root(request: OutputRootRequest) -> dict[str, Any]:
+        try:
+            return service.save_output_root(request)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
     @app.post("/api/automation/configure")
     def configure_automation(request: AutomationConfigureRequest) -> dict[str, Any]:
         try:
@@ -1353,6 +1405,7 @@ def _learning_item_payload(
         "action": item.action,
         "action_kind": item.action_kind,
         "failure_reason": item.failure_reason,
+        "output_goal": item.output_goal,
     }
     if workspace is not None:
         try:

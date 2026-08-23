@@ -174,6 +174,36 @@ def test_official_page_distinguishes_stalled_pagination() -> None:
     assert error.value.reason == "pagination_stalled"
 
 
+@pytest.mark.parametrize(
+    ("response", "reason", "status_code"),
+    [
+        (FakeResponse({}, status=429), "http_error", 429),
+        (
+            FakeResponse({"status_code": 9, "aweme_list": []}),
+            "business_error",
+            9,
+        ),
+        (
+            FakeResponse({"status_code": 0, "unexpected": []}),
+            "invalid_response",
+            None,
+        ),
+    ],
+)
+def test_official_page_classifies_safe_non_authentication_failures(
+    response: FakeResponse,
+    reason: str,
+    status_code: int | None,
+) -> None:
+    page = FakePage([[response]])
+
+    with pytest.raises(DouyinOfficialPageError) as error:
+        collect_official_favorites(page, timeout_ms=100, max_scrolls=1)
+
+    assert error.value.reason == reason
+    assert error.value.status_code == status_code
+
+
 class FakeContext:
     def __init__(self, page: FakePage, closed: list[str]) -> None:
         self.page = page
@@ -195,7 +225,10 @@ class FakeBrowser:
         self.context = context
         self.closed = closed
 
-    def new_context(self) -> FakeContext:
+        self.context_options: list[dict[str, object]] = []
+
+    def new_context(self, **kwargs: object) -> FakeContext:
+        self.context_options.append(kwargs)
         return self.context
 
     def close(self) -> None:
@@ -236,6 +269,7 @@ def test_official_transport_uses_isolated_headed_edge_and_closes_everything() ->
 
     assert result["aweme_list"][0]["aweme_id"] == "101"
     assert runtime.chromium.launches == [{"channel": "msedge", "headless": False}]
+    assert runtime.browser.context_options == [{"locale": "zh-CN"}]
     assert runtime.context.page.goto_calls[0][2] == 120_000
     assert runtime.context.cookies_added == [
         {
@@ -250,3 +284,38 @@ def test_official_transport_uses_isolated_headed_edge_and_closes_everything() ->
         },
     ]
     assert runtime.closed == ["context", "browser", "runtime"]
+
+
+def test_official_transport_restores_encrypted_browser_storage_state() -> None:
+    runtime = FakeRuntime(
+        FakePage([[FakeResponse(_payload("101", cursor=0, has_more=False))]])
+    )
+    storage_state = {
+        "cookies": [
+            {
+                "name": "sessionid",
+                "value": "secret",
+                "domain": ".douyin.com",
+                "path": "/",
+            }
+        ],
+        "origins": [
+            {
+                "origin": "https://www.douyin.com",
+                "localStorage": [{"name": "device-state", "value": "sentinel"}],
+            }
+        ],
+    }
+    transport = DouyinOfficialPageTransport(
+        SecretStr("sessionid=secret"),
+        storage_state=storage_state,
+        playwright_factory=lambda: runtime,
+    )
+
+    result = transport.list_video_favorites(cursor=0, count=20)
+
+    assert result["aweme_list"][0]["aweme_id"] == "101"
+    assert runtime.browser.context_options == [
+        {"locale": "zh-CN", "storage_state": storage_state}
+    ]
+    assert runtime.context.cookies_added == []

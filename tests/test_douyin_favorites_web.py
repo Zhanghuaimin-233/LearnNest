@@ -87,8 +87,21 @@ def _store(
 
 
 class FakeLogin:
+    browser_state = {
+        "cookies": [],
+        "origins": [
+            {
+                "origin": "https://www.douyin.com",
+                "localStorage": [{"name": "device-state", "value": "sentinel"}],
+            }
+        ],
+    }
+
     def cookie_for(self, _session_id: str) -> SecretStr:
         return SecretStr("fake-cookie")
+
+    def browser_storage_state_for(self, _session_id: str) -> Mapping[str, Any]:
+        return self.browser_state
 
     def invalidate(self, _session_id: str) -> None:
         return None
@@ -148,6 +161,48 @@ def test_first_favorite_sync_is_a_baseline_but_later_new_items_are_queued(
     service.sync_douyin_favorites("session")
 
     assert queued == [("https://www.douyin.com/video/2", "douyin_favorite")]
+
+
+def test_web_sync_passes_complete_browser_state_to_favorites_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = FakeTransport(
+        [
+            {
+                "status_code": 0,
+                "aweme_list": [_item("1", "收藏")],
+                "has_more": False,
+            }
+        ]
+    )
+    store = _store(tmp_path, transport)
+    login = FakeLogin()
+    service = WebService(
+        tmp_path,
+        douyin_login=login,  # type: ignore[arg-type]
+        douyin_favorites=store,
+    )
+    observed_state: list[Mapping[str, Any] | None] = []
+    original_sync = store.sync
+
+    def capture_sync(
+        cookie: SecretStr,
+        *,
+        browser_storage_state: Mapping[str, Any] | None = None,
+        on_authentication_failure: Any = None,
+    ) -> Any:
+        observed_state.append(browser_storage_state)
+        return original_sync(
+            cookie,
+            browser_storage_state=browser_storage_state,
+            on_authentication_failure=on_authentication_failure,
+        )
+
+    monkeypatch.setattr(store, "sync", capture_sync)
+
+    service.sync_douyin_favorites("session")
+
+    assert observed_state == [login.browser_state]
 
 
 def test_favorite_sync_with_auto_disabled_never_queues_new_items(

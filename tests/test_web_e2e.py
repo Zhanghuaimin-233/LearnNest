@@ -409,7 +409,7 @@ def test_douyin_login_failure_reason_survives_refresh_in_real_edge(
             page.goto(url)
             _open_view(page, "sources")
             expect(page.locator(".source-douyin")).to_contain_text(
-                "同步收藏时会短暂打开隔离的官方页面"
+                "同步收藏时会短暂恢复这套隔离页面环境"
             )
             page.locator("#connect-douyin").click()
             expect(page.locator("#douyin-login-message")).to_have_text(

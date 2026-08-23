@@ -110,6 +110,7 @@ class DouyinFavoritesStore:
         self.directory = self.output_root / _FAVORITES_DIRECTORY
         self.facts_path = self.directory / _FACTS_FILENAME
         self.thumbnail_directory = self.directory / _THUMBNAIL_DIRECTORY
+        self._uses_default_transport = transport_factory is None
         self._transport_factory = transport_factory or _default_transport_factory
         self._thumbnail_opener = thumbnail_opener or urlopen
         self._page_size = page_size
@@ -127,12 +128,20 @@ class DouyinFavoritesStore:
         self,
         cookie: SecretStr,
         *,
+        browser_storage_state: Mapping[str, Any] | None = None,
         on_authentication_failure: Callable[[], None] | None = None,
     ) -> DouyinFavoritesSnapshot:
         previous = self.read_snapshot()
         previous_by_id = {item.aweme_id: item for item in previous.items}
         try:
-            transport = self._transport_factory(cookie)
+            transport = (
+                DouyinOfficialPageTransport(
+                    cookie,
+                    storage_state=browser_storage_state,
+                )
+                if self._uses_default_transport
+                else self._transport_factory(cookie)
+            )
             raw_items = self._collect_pages(transport)
         except DouyinAuthenticationError as error:
             if (
@@ -147,9 +156,23 @@ class DouyinFavoritesStore:
                     "抖音官方页面已返回首批收藏，但继续加载下一批时没有响应；"
                     "本次收藏未更新，请重试。"
                 ) from None
+            if error.reason == "no_response":
+                raise DouyinFavoritesError(
+                    "抖音官方页面没有发起可验证的收藏请求；"
+                    "本次收藏未更新，请重新连接或稍后重试。"
+                ) from None
+            if error.reason == "http_error":
+                raise DouyinFavoritesError(
+                    f"抖音官方页收藏请求返回 HTTP {error.status_code or '未知'}；"
+                    "本次收藏未更新，请稍后重试。"
+                ) from None
+            if error.reason == "business_error":
+                raise DouyinFavoritesError(
+                    f"抖音官方页收藏请求返回业务状态 {error.status_code or '未知'}；"
+                    "本次收藏未更新，请重新验证登录或稍后重试。"
+                ) from None
             raise DouyinFavoritesError(
-                "抖音官方页面没有发起可验证的收藏请求；"
-                "本次收藏未更新，请重新连接或稍后重试。"
+                "抖音官方页收藏响应格式已变化；本次收藏未更新。"
             ) from None
         except DouyinAdapterError as error:
             if _is_authentication_error(error):

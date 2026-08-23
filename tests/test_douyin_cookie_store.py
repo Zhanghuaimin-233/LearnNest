@@ -39,6 +39,32 @@ def test_cookie_store_persists_only_protected_bytes_and_clears(tmp_path: Path) -
     assert store.load() is None
 
 
+def test_cookie_store_encrypts_cookie_and_browser_storage_state_together(
+    tmp_path: Path,
+) -> None:
+    cookie = SecretStr("sessionid=SESSION" + "_COOKIE_SENTINEL")
+    browser_state = SecretStr(
+        '{"cookies":[{"name":"sessionid","value":"STATE_SENTINEL"}],'
+        '"origins":[{"origin":"https://www.douyin.com","localStorage":[]}]}'
+    )
+    store = DouyinCookieStore(
+        tmp_path,
+        protect=_protect,
+        unprotect=_unprotect,
+    )
+
+    store.save_session(cookie, browser_state)
+
+    raw = store.path.read_bytes()
+    assert b"COOKIE_SENTINEL" not in raw
+    assert b"STATE_SENTINEL" not in raw
+    loaded = store.load_session()
+    assert loaded is not None
+    assert loaded.cookie == cookie
+    assert loaded.browser_state == browser_state
+    assert store.load() == cookie
+
+
 def test_cookie_store_rejects_corrupt_or_unsafe_plaintext(tmp_path: Path) -> None:
     store = DouyinCookieStore(
         tmp_path,

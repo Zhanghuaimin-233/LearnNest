@@ -733,8 +733,17 @@ class WebService:
     def sync_douyin_favorites(self, session_id: str) -> dict[str, Any]:
         previous = self.douyin_favorites.read_snapshot()
         cookie = self.douyin_login.cookie_for(session_id)
+        browser_state_getter = getattr(
+            self.douyin_login,
+            "browser_storage_state_for",
+            None,
+        )
+        browser_storage_state = (
+            browser_state_getter(session_id) if callable(browser_state_getter) else None
+        )
         snapshot = self.douyin_favorites.sync(
             cookie,
+            browser_storage_state=browser_storage_state,
             on_authentication_failure=lambda: self.douyin_login.invalidate(session_id),
         )
         status = load_automation_status(self.output_root)

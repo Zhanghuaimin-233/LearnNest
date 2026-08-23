@@ -143,8 +143,8 @@ running 调用事实。自动重试只能处理明确的临时错误，所有尝
 
 - API Key、Cookie、原始 Provider 请求、模型、媒体和运行产物不进入 Git。
 - Provider API Key 使用 Windows 当前用户 DPAPI 加密在对应输出根下；设置 API、任务、日志和页面只保存或显示状态与引用，不回显 Key。
-- WebUI 的抖音登录态使用 Windows 当前用户 DPAPI 加密，保存在对应输出根的 `.learnnest/douyin/session.dpapi`。
-- 程序不读取日常浏览器配置，不把解密 Cookie 写回 `.env`、任务、日志或 SQLite。
+- WebUI 将隔离官方窗口的 Cookie 与页面存储环境作为一个登录态，使用 Windows 当前用户 DPAPI 加密，保存在对应输出根的 `.learnnest/douyin/session.dpapi`；后续同步会恢复该隔离环境，不要求每次重新登录。
+- 程序不读取日常浏览器配置，不把解密 Cookie 或页面存储写回 `.env`、任务、日志或 SQLite。旧版本只保存 Cookie 的登录态需要重新验证一次完成升级。
 - 请只处理你有权访问、下载和使用的内容，并遵守目标平台规则和适用法律。
 
 不同版本可能使用不同锁目录；切换代码版本前，先停止正在访问同一输出根的旧进程。

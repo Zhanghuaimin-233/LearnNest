@@ -4,6 +4,7 @@ import base64
 import threading
 import time
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 from pydantic import SecretStr
@@ -188,6 +189,20 @@ class FakeContext:
                 },
             )
         return cookies
+
+    def storage_state(self, *, indexed_db: bool = False) -> dict[str, Any]:
+        assert indexed_db is True
+        return {
+            "cookies": self.cookies(),
+            "origins": [
+                {
+                    "origin": "https://www.douyin.com",
+                    "localStorage": [
+                        {"name": "device-state", "value": "STATE_SENTINEL"}
+                    ],
+                }
+            ],
+        }
 
     def close(self) -> None:
         self.closed.append("context")
@@ -492,7 +507,7 @@ def test_login_manager_captures_qr_and_closes_browser_after_http_smoke() -> None
         "status": "connected",
         "expires_in": 0,
         "qr_available": False,
-        "message": "登录凭据与收藏访问均已验证，可以同步收藏。",
+        "message": "登录凭据与收藏页面环境均已验证并加密保存，可以同步收藏。",
     }
     assert smoke_cookies[0].get_secret_value() == (
         "sessionid=COOKIE" + "_SENTINEL; passport_csrf_token=csrf-value"
@@ -535,6 +550,10 @@ def test_login_manager_uses_official_page_for_default_favorites_smoke(
     _wait_for_status(manager, session["session_id"], {"connected"})
 
     assert observed_pages == [factory.last_playwright.last_page]
+    storage_state = manager.browser_storage_state_for(session["session_id"])
+    assert storage_state["origins"][0]["localStorage"] == [
+        {"name": "device-state", "value": "STATE_SENTINEL"}
+    ]
     manager.shutdown()
 
 
@@ -885,6 +904,61 @@ def test_manager_restores_valid_persisted_cookie_without_browser() -> None:
     assert factory.calls == 0
     manager.shutdown()
     assert store.clear_calls == 0
+
+
+def test_manager_requires_one_revalidation_for_legacy_cookie_only_envelope() -> None:
+    cookie = SecretStr("sessionid=PERSISTED" + "_COOKIE_SENTINEL")
+
+    class CookieOnlySessionStore(FakeCookieStore):
+        def load_session(self) -> object:
+            return SimpleNamespace(cookie=self.loaded, browser_state=None)
+
+    store = CookieOnlySessionStore(cookie)
+    factory = FakeBrowserFactory()
+    manager = DouyinLoginSessionManager(
+        playwright_factory=factory,
+        cookie_store=store,
+    )
+
+    current = manager.current_session()
+
+    assert current["status"] == "failed"
+    assert current["message"] == (
+        "现有登录状态来自旧版本，只保存了 Cookie；请重新验证一次。"
+        "升级后会加密保存完整页面环境，不需要每次重新登录。"
+    )
+    assert factory.calls == 0
+    assert store.clear_calls == 0
+    manager.shutdown()
+
+
+def test_manager_restores_complete_browser_session_without_new_login() -> None:
+    cookie = SecretStr("sessionid=PERSISTED" + "_COOKIE_SENTINEL")
+    browser_state = SecretStr(
+        '{"cookies":[],"origins":[{"origin":"https://www.douyin.com",'
+        '"localStorage":[{"name":"device-state","value":"sentinel"}]}]}'
+    )
+
+    class CompleteSessionStore(FakeCookieStore):
+        def load_session(self) -> object:
+            return SimpleNamespace(
+                cookie=self.loaded,
+                browser_state=browser_state,
+            )
+
+    store = CompleteSessionStore(cookie)
+    factory = FakeBrowserFactory()
+    manager = DouyinLoginSessionManager(
+        playwright_factory=factory,
+        cookie_store=store,
+    )
+
+    current = manager.current_session()
+
+    assert current["status"] == "connected"
+    assert manager.browser_storage_state_for(current["session_id"])["origins"]
+    assert factory.calls == 0
+    manager.shutdown()
 
 
 def test_manager_clears_rejected_persisted_cookie() -> None:

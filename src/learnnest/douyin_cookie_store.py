@@ -3,26 +3,38 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import uuid
 from collections.abc import Callable
 from ctypes import wintypes
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import SecretStr
 
 _FILE_MAGIC = b"LEARNNEST_DOUYIN_DPAPI_V1\0"
 _PLAINTEXT_MAGIC = b"LEARNNEST_DOUYIN_COOKIE_V1\0"
+_SESSION_PLAINTEXT_MAGIC = b"LEARNNEST_DOUYIN_SESSION_V2\0"
 _DPAPI_ENTROPY = b"LearnNest-Douyin-Cookie-v1"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
+_MAX_BROWSER_STATE_BYTES = 8 * 1024 * 1024
 
 
 class DouyinCookieStoreError(RuntimeError):
     """A safe local credential-store failure."""
 
 
+@dataclass(frozen=True)
+class DouyinStoredSession:
+    """One encrypted login identity and its isolated browser storage state."""
+
+    cookie: SecretStr
+    browser_state: SecretStr | None = None
+
+
 class DouyinCookieStore:
-    """Persist one Cookie header encrypted for the current Windows user."""
+    """Persist one official-page session encrypted for the Windows user."""
 
     def __init__(
         self,
@@ -38,6 +50,10 @@ class DouyinCookieStore:
         self._unprotect = unprotect or _unprotect_windows
 
     def load(self) -> SecretStr | None:
+        session = self.load_session()
+        return session.cookie if session is not None else None
+
+    def load_session(self) -> DouyinStoredSession | None:
         try:
             payload = self.path.read_bytes()
         except FileNotFoundError:
@@ -50,20 +66,53 @@ class DouyinCookieStore:
             plaintext = self._unprotect(payload[len(_FILE_MAGIC) :])
         except Exception:
             raise DouyinCookieStoreError("本地抖音登录状态无法解密。") from None
-        if not plaintext.startswith(_PLAINTEXT_MAGIC):
+        if plaintext.startswith(_PLAINTEXT_MAGIC):
+            try:
+                cookie = plaintext[len(_PLAINTEXT_MAGIC) :].decode("utf-8")
+            except UnicodeDecodeError:
+                raise DouyinCookieStoreError("本地抖音登录状态格式无效。") from None
+            _validate_cookie(cookie)
+            return DouyinStoredSession(cookie=SecretStr(cookie))
+        if not plaintext.startswith(_SESSION_PLAINTEXT_MAGIC):
             raise DouyinCookieStoreError("本地抖音登录状态格式无效。")
         try:
-            cookie = plaintext[len(_PLAINTEXT_MAGIC) :].decode("utf-8")
-        except UnicodeDecodeError:
+            decoded = plaintext[len(_SESSION_PLAINTEXT_MAGIC) :].decode("utf-8")
+            session = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError):
             raise DouyinCookieStoreError("本地抖音登录状态格式无效。") from None
+        if not isinstance(session, dict):
+            raise DouyinCookieStoreError("本地抖音登录状态格式无效。")
+        cookie = session.get("cookie")
+        browser_state = session.get("browser_state")
+        if not isinstance(cookie, str) or not isinstance(browser_state, str):
+            raise DouyinCookieStoreError("本地抖音登录状态格式无效。")
         _validate_cookie(cookie)
-        return SecretStr(cookie)
+        _validate_browser_state(browser_state)
+        return DouyinStoredSession(
+            cookie=SecretStr(cookie),
+            browser_state=SecretStr(browser_state),
+        )
 
     def save(self, cookie: SecretStr) -> None:
         value = cookie.get_secret_value()
         _validate_cookie(value)
+        self._save_plaintext(_PLAINTEXT_MAGIC + value.encode("utf-8"))
+
+    def save_session(self, cookie: SecretStr, browser_state: SecretStr) -> None:
+        cookie_value = cookie.get_secret_value()
+        state_value = browser_state.get_secret_value()
+        _validate_cookie(cookie_value)
+        _validate_browser_state(state_value)
+        encoded = json.dumps(
+            {"cookie": cookie_value, "browser_state": state_value},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self._save_plaintext(_SESSION_PLAINTEXT_MAGIC + encoded)
+
+    def _save_plaintext(self, plaintext: bytes) -> None:
         try:
-            protected = self._protect(_PLAINTEXT_MAGIC + value.encode("utf-8"))
+            protected = self._protect(plaintext)
         except Exception:
             raise DouyinCookieStoreError("本地抖音登录状态无法加密。") from None
         if not protected:
@@ -184,4 +233,20 @@ def _unprotect_windows(protected: bytes) -> bytes:
 
 def _validate_cookie(value: str) -> None:
     if not value or any(character in value for character in "\r\n"):
+        raise DouyinCookieStoreError("本地抖音登录状态格式无效。")
+
+
+def _validate_browser_state(value: str) -> None:
+    encoded = value.encode("utf-8")
+    if not encoded or len(encoded) > _MAX_BROWSER_STATE_BYTES:
+        raise DouyinCookieStoreError("本地抖音登录状态格式无效。")
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        raise DouyinCookieStoreError("本地抖音登录状态格式无效。") from None
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("cookies"), list)
+        or not isinstance(payload.get("origins"), list)
+    ):
         raise DouyinCookieStoreError("本地抖音登录状态格式无效。")

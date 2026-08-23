@@ -39,10 +39,18 @@ class DouyinOfficialPageError(DouyinAdapterError):
         self,
         message: str,
         *,
-        reason: Literal["no_response", "pagination_stalled"],
+        reason: Literal[
+            "no_response",
+            "pagination_stalled",
+            "http_error",
+            "business_error",
+            "invalid_response",
+        ],
+        status_code: int | str | None = None,
     ) -> None:
         super().__init__(message)
         self.reason = reason
+        self.status_code = status_code
 
 
 class DouyinOfficialPageTransport:
@@ -52,6 +60,7 @@ class DouyinOfficialPageTransport:
         self,
         cookie: SecretStr,
         *,
+        storage_state: Mapping[str, Any] | None = None,
         playwright_factory: Callable[[], Any] | None = None,
         timeout_ms: int = _DEFAULT_SYNC_TIMEOUT_MS,
         max_scrolls: int = _DEFAULT_MAX_SCROLLS,
@@ -62,7 +71,13 @@ class DouyinOfficialPageTransport:
             raise ValueError("Douyin official page timeout must be positive")
         if max_scrolls < 1:
             raise ValueError("Douyin official page max_scrolls must be positive")
+        if storage_state is not None and (
+            not isinstance(storage_state.get("cookies"), list)
+            or not isinstance(storage_state.get("origins"), list)
+        ):
+            raise ValueError("Douyin browser storage state is incomplete")
         self.cookie = cookie
+        self._storage_state = dict(storage_state) if storage_state is not None else None
         self._playwright_factory = playwright_factory or _default_playwright_factory
         self._timeout_ms = timeout_ms
         self._max_scrolls = max_scrolls
@@ -78,8 +93,16 @@ class DouyinOfficialPageTransport:
         try:
             runtime = self._playwright_factory()
             browser = runtime.chromium.launch(channel="msedge", headless=False)
-            context = browser.new_context()
-            context.add_cookies(_cookie_records(self.cookie))
+            context = (
+                browser.new_context(
+                    locale="zh-CN",
+                    storage_state=self._storage_state,
+                )
+                if self._storage_state is not None
+                else browser.new_context(locale="zh-CN")
+            )
+            if self._storage_state is None:
+                context.add_cookies(_cookie_records(self.cookie))
             page = context.new_page()
             return collect_official_favorites(
                 page,
@@ -147,16 +170,19 @@ def collect_official_favorites(
                 return
             if not 200 <= status < 300:
                 failures.append(
-                    DouyinAdapterError(
-                        f"Douyin official page returned HTTP {status or 'unknown'}"
+                    DouyinOfficialPageError(
+                        f"Douyin official page returned HTTP {status or 'unknown'}",
+                        reason="http_error",
+                        status_code=status or None,
                     )
                 )
                 return
             payload = response.json()
             if not isinstance(payload, Mapping):
                 failures.append(
-                    DouyinAdapterError(
-                        "Douyin official page returned a non-object response"
+                    DouyinOfficialPageError(
+                        "Douyin official page returned a non-object response",
+                        reason="invalid_response",
                     )
                 )
                 return
@@ -172,8 +198,9 @@ def collect_official_favorites(
             failures.append(
                 error
                 if isinstance(error, DouyinAdapterError)
-                else DouyinAdapterError(
-                    "Douyin official page favorites response was unreadable"
+                else DouyinOfficialPageError(
+                    "Douyin official page favorites response was unreadable",
+                    reason="invalid_response",
                 )
             )
 
@@ -200,8 +227,9 @@ def collect_official_favorites(
             _validate_payload_status(payload)
             items = payload.get("aweme_list")
             if not isinstance(items, list):
-                raise DouyinAdapterError(
-                    "Douyin official page response has no aweme_list"
+                raise DouyinOfficialPageError(
+                    "Douyin official page response has no aweme_list",
+                    reason="invalid_response",
                 )
             for item in items:
                 if not isinstance(item, Mapping):
@@ -259,7 +287,11 @@ def _validate_payload_status(payload: Mapping[str, Any]) -> None:
             reason="business_rejected",
             status_code=str(status),
         )
-    raise DouyinAdapterError(f"Douyin official page returned status_code={status}")
+    raise DouyinOfficialPageError(
+        f"Douyin official page returned status_code={status}",
+        reason="business_error",
+        status_code=status if isinstance(status, (int, str)) else None,
+    )
 
 
 def _aweme_id(item: Mapping[str, Any]) -> str | None:

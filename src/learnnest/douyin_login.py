@@ -2,14 +2,16 @@
 
 The browser is confined to one headed, non-persistent Edge context per
 attempt. The official site owns every credential and verification interaction;
-this module only observes the resulting CookieJar and runs one strict favorites
-smoke request before declaring the session connected. An injected credential
-store may persist that CookieJar outside project facts.
+this module only observes the resulting CookieJar, validates one favorites
+response, and captures that isolated context's storage state before declaring
+the session connected. An injected credential store may persist both outside
+project facts.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import math
 import threading
@@ -51,7 +53,7 @@ _STATUS_MESSAGES = {
     "confirmed": "已确认，正在等待抖音签发登录凭据。",
     "verification_required": "抖音要求继续验证，请在原官方窗口完成页面提示。",
     "validating": "已取得登录凭据，正在通过抖音官方页面验证收藏访问。",
-    "connected": "登录凭据与收藏访问均已验证，可以同步收藏。",
+    "connected": "登录凭据与收藏页面环境均已验证并加密保存，可以同步收藏。",
     "expired": _EXPIRED_FAILURE,
     "failed": _SAFE_FAILURE,
     "cancelled": "已取消本次抖音连接。",
@@ -76,7 +78,7 @@ class FavoritesSmoke(Protocol):
 
 
 class CookieStore(Protocol):
-    """Persist an encrypted Cookie header outside project facts."""
+    """Persist encrypted official-page session state outside project facts."""
 
     def load(self) -> SecretStr | None: ...
 
@@ -93,6 +95,7 @@ class _LoginSession:
     expires_at: float | None = None
     qr_png: bytes | None = None
     cookie: SecretStr | None = field(default=None, repr=False)
+    browser_state: SecretStr | None = field(default=None, repr=False)
     error: str | None = field(default=None, repr=False)
     failure_kind: str | None = field(default=None, repr=False)
     generation: int = field(default=0, repr=False)
@@ -187,6 +190,7 @@ class DouyinLoginSessionManager:
             generation = session.generation
             old_stop.set()
             session.cookie = None
+            session.browser_state = None
             session.status = "starting"
             session.expires_at = None
             session.qr_png = None
@@ -217,6 +221,7 @@ class DouyinLoginSessionManager:
             session.generation += 1
             session.stop_event.set()
             session.cookie = None
+            session.browser_state = None
             session.qr_png = None
             session.expires_at = None
             session.startup_deadline = None
@@ -245,6 +250,26 @@ class DouyinLoginSessionManager:
                 raise DouyinLoginError("请先连接抖音。")
             return session.cookie
 
+    def browser_storage_state_for(self, session_id: str) -> Mapping[str, Any]:
+        """Return encrypted-at-rest browser state to the official-page transport."""
+        with self._lock:
+            session = self._require_session_locked(session_id)
+            if session.status != "connected" or session.cookie is None:
+                raise DouyinLoginError("请先连接抖音。")
+            if session.browser_state is None:
+                raise DouyinLoginError(
+                    "当前登录状态只保存了 Cookie，无法恢复抖音官方页面环境；"
+                    "请重新验证一次。"
+                )
+            value = session.browser_state.get_secret_value()
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            raise DouyinLoginError("本地抖音登录状态格式无效。") from None
+        if not isinstance(payload, Mapping):
+            raise DouyinLoginError("本地抖音登录状态格式无效。")
+        return dict(payload)
+
     def invalidate(self, session_id: str) -> None:
         """Forget a rejected CookieJar and require a fresh official login."""
         with self._lock:
@@ -253,6 +278,7 @@ class DouyinLoginSessionManager:
             session.generation += 1
             session.stop_event.set()
             session.cookie = None
+            session.browser_state = None
             session.qr_png = None
             session.expires_at = None
             session.startup_deadline = None
@@ -277,6 +303,7 @@ class DouyinLoginSessionManager:
                 session.generation += 1
                 session.stop_event.set()
                 session.cookie = None
+                session.browser_state = None
                 session.startup_deadline = None
                 if session.status not in {"connected", "failed"}:
                     session.status = "cancelled"
@@ -286,8 +313,17 @@ class DouyinLoginSessionManager:
     def _restore_persisted_session(self) -> None:
         if self._cookie_store is None:
             return
+        browser_state: SecretStr | None = None
+        loaded_session_envelope = False
         try:
-            cookie = self._cookie_store.load()
+            load_session = getattr(self._cookie_store, "load_session", None)
+            if callable(load_session):
+                loaded_session_envelope = True
+                stored = load_session()
+                cookie = stored.cookie if stored is not None else None
+                browser_state = stored.browser_state if stored is not None else None
+            else:
+                cookie = self._cookie_store.load()
         except Exception as error:
             _LOGGER.warning(
                 "douyin login outcome=persisted_cookie_unavailable exception_type=%s",
@@ -316,11 +352,19 @@ class DouyinLoginSessionManager:
                     type(error).__name__,
                 )
                 return
+        needs_upgrade = loaded_session_envelope and browser_state is None
         session = _LoginSession(
             session_id=uuid.uuid4().hex,
             login_mode="restored",
-            status="connected",
+            status="failed" if needs_upgrade else "connected",
             cookie=cookie,
+            browser_state=browser_state,
+            error=(
+                "现有登录状态来自旧版本，只保存了 Cookie；请重新验证一次。"
+                "升级后会加密保存完整页面环境，不需要每次重新登录。"
+                if needs_upgrade
+                else None
+            ),
         )
         self._sessions[session.session_id] = session
         self._current_session_id = session.session_id
@@ -521,9 +565,28 @@ class DouyinLoginSessionManager:
                                 "已取得登录凭据，但抖音官方页面没有返回可验证的收藏结果。"
                             ) from None
                     _validate_favorites_smoke(smoke_payload)
+                    try:
+                        browser_state = _browser_state_secret(
+                            context.storage_state(indexed_db=True)
+                        )
+                    except Exception as error:
+                        _LOGGER.warning(
+                            "douyin login outcome=browser_state_capture_failed "
+                            "exception_type=%s",
+                            type(error).__name__,
+                        )
+                        raise DouyinLoginError(_COOKIE_SAVE_FAILURE) from error
                     if self._cookie_store is not None:
                         try:
-                            self._cookie_store.save(cookie_secret)
+                            save_session = getattr(
+                                self._cookie_store,
+                                "save_session",
+                                None,
+                            )
+                            if callable(save_session):
+                                save_session(cookie_secret, browser_state)
+                            else:
+                                self._cookie_store.save(cookie_secret)
                         except Exception as error:
                             _LOGGER.warning(
                                 "douyin login outcome=cookie_save_failed exception_type=%s",
@@ -538,6 +601,7 @@ class DouyinLoginSessionManager:
                         ):
                             raise _LoginCancelled
                         session.cookie = cookie_secret
+                        session.browser_state = browser_state
                         session.status = "connected"
                         session.expires_at = None
                         session.qr_png = None
@@ -724,6 +788,7 @@ class DouyinLoginSessionManager:
             session.expires_at = None
             session.qr_png = None
             session.cookie = None
+            session.browser_state = None
             session.error = session.error or _EXPIRED_FAILURE
             session.failure_kind = None
 
@@ -742,6 +807,7 @@ class DouyinLoginSessionManager:
             session.expires_at = None
             session.qr_png = None
             session.cookie = None
+            session.browser_state = None
             session.startup_deadline = None
             session.error = message
             session.failure_kind = failure_kind
@@ -790,6 +856,22 @@ class _LoginStartupTimeout(Exception):
 
 def _default_playwright_factory() -> Any:
     return sync_playwright().start()
+
+
+def _browser_state_secret(value: object) -> SecretStr:
+    if not isinstance(value, Mapping):
+        raise ValueError("Douyin browser state must be an object")
+    if not isinstance(value.get("cookies"), list) or not isinstance(
+        value.get("origins"), list
+    ):
+        raise ValueError("Douyin browser state is incomplete")
+    return SecretStr(
+        json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
 
 
 def _validate_favorites_smoke(payload: object) -> None:

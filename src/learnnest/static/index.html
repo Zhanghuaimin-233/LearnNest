@@ -167,8 +167,8 @@
               </section>
 
               <section class="settings-panel" data-settings-panel="connections" hidden>
-                <div class="settings-panel-header"><div><p class="panel-kicker">已注册服务</p><h2>模型与连接</h2><p>查看当前职责、保存的连接，以及这个版本可以添加的模型与语音服务。</p></div><button class="primary-action compact-action" id="open-connection-dialog" type="button"><span aria-hidden="true">＋</span> 添加连接</button></div>
-                <section class="settings-block"><div class="block-heading"><div><h3>产出职责</h3><p>默认成品需要的职责会显示在这里。</p></div><span id="provider-settings-state" class="status-pill">未配置</span></div><section id="setup-readiness" class="setup-readiness" aria-live="polite" aria-label="所选结果的准备情况"></section></section>
+                <div class="settings-panel-header"><div><p class="panel-kicker">已注册服务</p><h2>模型与连接</h2><p>查看材料提取、笔记与音频实际使用的模型和职责连接。</p></div><button class="primary-action compact-action" id="open-connection-dialog" type="button"><span aria-hidden="true">＋</span> 添加连接</button></div>
+                <section class="settings-block"><div class="block-heading"><div><h3>处理职责</h3><p>材料提取始终可见；笔记和音频职责随默认成品变化。</p></div><span id="provider-settings-state" class="status-pill">未配置</span></div><section id="setup-readiness" class="setup-readiness" aria-live="polite" aria-label="模型与职责准备情况"></section></section>
                 <section class="settings-block"><div class="block-heading"><div><h3>连接库</h3><p>密钥使用 Windows 当前用户加密保存，页面不会再次显示。</p></div></div><p id="provider-feedback" class="inline-feedback" aria-live="polite">保存、检查、绑定或删除后会在这里显示结果。</p><div id="provider-connection-list" class="provider-list"></div></section>
                 <section class="settings-block"><div class="block-heading"><div><h3>可添加的服务</h3><p>这里只显示当前版本真正支持的连接能力。</p></div></div><div id="provider-adapter-list" class="adapter-grid"><p class="empty">正在读取可用服务。</p></div></section>
               </section>
@@ -237,11 +237,11 @@
 
     <dialog id="connection-dialog" class="app-dialog">
       <form id="provider-connection-form" class="dialog-shell provider-form">
-        <div class="dialog-heading"><div><p class="eyebrow">模型与连接</p><h2>添加连接</h2><p>选择当前版本支持的服务，保存后再绑定到产出职责。</p></div><button class="dialog-close" data-close-connection type="button" aria-label="关闭">×</button></div>
+        <div class="dialog-heading"><div><p class="eyebrow">模型与连接</p><h2>添加连接</h2><p>选择当前版本支持的服务，保存后再绑定到对应的处理职责。</p></div><button class="dialog-close" data-close-connection type="button" aria-label="关闭">×</button></div>
         <label>连接名称<input name="name" required autocomplete="off" placeholder="例如 mimo-note" /><small>本地服务会自动填写名称；可以按需修改。</small></label>
-        <label>服务<select name="preset"><option value="windows-tts">Windows 系统语音（本地）</option><option value="mimo">MiMo（文本）</option><option value="deepseek">DeepSeek（文本）</option><option value="mimo-tts">MiMo TTS</option></select></label>
+        <label>服务<select name="preset"><option value="windows-tts">Windows 系统语音（本地）</option><option value="local-asr">本地 ASR（faster-whisper large-v3）</option><option value="local-ocr">本地 OCR（PaddleOCR）</option><option value="mimo">MiMo（文本）</option><option value="deepseek">DeepSeek（文本）</option><option value="mimo-tts">MiMo TTS</option></select></label>
         <label id="windows-voice-field">Windows 语音<select name="voice" id="windows-voice"></select></label>
-        <label>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="本地 Windows 语音无需填写" /></label>
+        <label id="provider-key-field" hidden>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="仅云端服务需要填写" /><small>本地 ASR、OCR 和 Windows 语音不需要密钥。</small></label>
         <div class="dialog-actions"><button class="secondary-button" data-close-connection type="button">取消</button><button type="submit">保存连接</button></div>
       </form>
     </dialog>

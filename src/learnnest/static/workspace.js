@@ -34,6 +34,7 @@ const loginCountdown = document.querySelector("#douyin-countdown");
 const refreshDouyinButton = document.querySelector("#refresh-douyin");
 const cancelDouyinButton = document.querySelector("#cancel-douyin");
 const providerForm = document.querySelector("#provider-connection-form");
+const providerKeyField = document.querySelector("#provider-key-field");
 const providerList = document.querySelector("#provider-connection-list");
 const providerState = document.querySelector("#provider-settings-state");
 const providerFeedback = document.querySelector("#provider-feedback");
@@ -217,17 +218,21 @@ function renderSetupReadiness(readiness) {
   settingsReadinessTitle.textContent = ready ? "当前可以完整产出" : readiness.state;
   settingsReadinessCopy.textContent = readiness.message;
   singleVideoReadiness.textContent = readiness.message;
+  const roleRows = (roles) => roles.map((role) => {
+    const options = role.options.map((item) => `<option value="${escapeHtml(item.name)}"${item.name === role.connection ? " selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.provider)}</option>`).join("");
+    const control = role.connection
+      ? `<button type="button" data-unbind-setup-role="${escapeHtml(role.name)}">解绑</button>`
+      : role.options.length
+        ? `<select aria-label="为${escapeHtml(role.name)}选择连接" data-setup-role-select="${escapeHtml(role.name)}"><option value="">选择连接</option>${options}</select><button type="button" data-bind-setup-role="${escapeHtml(role.name)}">绑定</button>`
+        : `<span class="field-hint">${escapeHtml(role.hint || "请先添加兼容连接。")}</span>`;
+    const connection = role.connection || (role.state === "使用内置本地能力" ? "未显式绑定" : "等待选择");
+    return `<div class="provider-role-summary"><span>${escapeHtml(role.name)}</span><span>${escapeHtml(connection)}</span><div class="provider-role-actions"><strong>${escapeHtml(role.state)}</strong>${control}</div></div>`;
+  }).join("");
   setupReadiness.innerHTML = `<p class="panel-kicker">所选结果：${escapeHtml(readiness.default_output)}</p>`
     + `<p>${escapeHtml(readiness.message)}</p>`
-    + `<div class="provider-role-list">${readiness.required_roles.map((role) => {
-      const options = role.options.map((item) => `<option value="${escapeHtml(item.name)}"${item.name === role.connection ? " selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.provider)}</option>`).join("");
-      const control = role.connection
-        ? `<button type="button" data-unbind-setup-role="${escapeHtml(role.name)}">解绑</button>`
-        : role.options.length
-          ? `<select aria-label="为${escapeHtml(role.name)}选择连接" data-setup-role-select="${escapeHtml(role.name)}"><option value="">选择连接</option>${options}</select><button type="button" data-bind-setup-role="${escapeHtml(role.name)}">绑定</button>`
-          : `<span class="field-hint">${escapeHtml(role.hint || "请先添加兼容连接。")}</span>`;
-      return `<div class="provider-role-summary"><span>${escapeHtml(role.name)}</span><span>${escapeHtml(role.connection || role.state)}</span><div class="provider-role-actions"><strong>${escapeHtml(role.state)}</strong>${control}</div></div>`;
-    }).join("")}</div><p>自动处理：${escapeHtml(readiness.authorization.state)}。${escapeHtml(readiness.authorization.message)}</p>`;
+    + `<section class="provider-role-group"><div class="role-group-heading"><h4>材料提取</h4><p>ASR 与 OCR 会冻结到新任务；未显式绑定时继续使用内置本地能力。</p></div><div class="provider-role-list">${roleRows(readiness.material_roles || [])}</div></section>`
+    + `<section class="provider-role-group"><div class="role-group-heading"><h4>成品生成</h4><p>这些职责由当前默认成品决定。</p></div><div class="provider-role-list">${roleRows(readiness.required_roles)}</div></section>`
+    + `<p>自动处理：${escapeHtml(readiness.authorization.state)}。${escapeHtml(readiness.authorization.message)}</p>`;
   setupReadiness.querySelectorAll("button[data-bind-setup-role]").forEach((button) => button.addEventListener("click", () => bindSetupRole(button)));
   setupReadiness.querySelectorAll("button[data-unbind-setup-role]").forEach((button) => button.addEventListener("click", () => clearSetupRole(button)));
   setupReadiness.querySelectorAll("select[data-setup-role-select]").forEach((select) => select.addEventListener("change", () => dirtySettingsForms.add(setupReadiness)));
@@ -303,13 +308,21 @@ async function refreshWindowsVoices() {
   windowsVoicesLoaded = true;
 }
 
+async function refreshProviderConnectionFields() {
+  const preset = providerForm.elements.preset.value;
+  const local = ["windows-tts", "local-asr", "local-ocr"].includes(preset);
+  providerKeyField.hidden = local;
+  if (local) providerForm.elements.api_key.value = "";
+  await refreshWindowsVoices();
+}
+
 async function loadProviderSettings(defaultOutput = null, protectDirty = false) {
   try {
     const settings = await api(`/api/providers/settings${defaultOutput ? `?default_output=${encodeURIComponent(defaultOutput)}` : ""}`);
     if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(setupReadiness))) return;
     if (protectDirty && settingsFormNeedsProtection(providerLimitsForm)) return;
     renderProviderSettings(settings);
-    await refreshWindowsVoices();
+    await refreshProviderConnectionFields();
   } catch (error) { providerState.textContent = "无法读取"; }
 }
 
@@ -659,7 +672,7 @@ function showSettingsPanel(panelName) {
 function openConnectionDialog(preset = null) {
   if (preset) providerForm.elements.preset.value = preset;
   suggestProviderConnectionName();
-  refreshWindowsVoices().catch((error) => say(error.message));
+  refreshProviderConnectionFields().catch((error) => say(error.message));
   connectionDialog.showModal();
   window.requestAnimationFrame(() => providerForm.elements.name.focus());
 }
@@ -1064,7 +1077,7 @@ providerForm.addEventListener("submit", async (event) => {
 providerForm.elements.preset.addEventListener("change", () => {
   suggestProviderConnectionName();
   windowsVoicesLoaded = false;
-  refreshWindowsVoices().catch((error) => say(error.message));
+  refreshProviderConnectionFields().catch((error) => say(error.message));
 });
 
 providerLimitsForm.addEventListener("submit", async (event) => {

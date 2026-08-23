@@ -350,6 +350,10 @@ input:focus, select:focus { border-color: var(--blue); outline: 3px solid rgba(5
 .automation-access-actions { display: flex; gap: 8px; }
 .setup-readiness { margin-top: 20px; }
 .setup-readiness > p { margin: 5px 0; color: var(--slate); font-size: 12px; }
+.provider-role-group { margin-top: 22px; }
+.role-group-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; }
+.role-group-heading h4 { margin: 0; font-size: 13px; }
+.role-group-heading p { margin: 0; color: var(--slate); font-size: 10px; line-height: 1.6; text-align: right; }
 .provider-role-list, .provider-list { margin-top: 14px; border-top: 1px solid var(--line); }
 .provider-role-summary, .provider-row { min-height: 58px; display: grid; grid-template-columns: minmax(120px, 1fr) minmax(150px, 1.4fr) auto; align-items: center; gap: 14px; border-bottom: 1px solid var(--line); font-size: 12px; }
 .provider-role-actions, .provider-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
@@ -485,6 +489,8 @@ input:focus, select:focus { border-color: var(--blue); outline: 3px solid rgba(5
   .automation-access { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
   .automation-access-actions { grid-column: 1 / -1; flex-wrap: wrap; }
   .provider-role-summary, .provider-row { padding: 12px 0; grid-template-columns: 1fr; gap: 7px; }
+  .role-group-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .role-group-heading p { text-align: left; }
   .provider-role-actions, .provider-actions { justify-content: flex-start; flex-wrap: wrap; }
   .provider-role-actions select { width: min(100%, 260px); }
   .adapter-grid { grid-template-columns: 1fr 1fr; }

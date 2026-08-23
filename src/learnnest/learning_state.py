@@ -21,6 +21,7 @@ from learnnest.automation_store import (
 )
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.provider_profiles import (
+    ProviderSettings,
     freeze_role_bindings,
     load_settings,
     role_binding_is_compatible,
@@ -36,18 +37,24 @@ _ROLE_LABELS = {
     "note_reviewer": "笔记 Reviewer",
     "podcast": "播客",
     "tts": "TTS",
+    "asr": "语音识别（ASR）",
+    "ocr": "画面文字（OCR）",
 }
 _ROLE_CAPABILITIES = {
     "note_writer": "llm",
     "note_reviewer": "llm",
     "podcast": "llm",
     "tts": "tts",
+    "asr": "asr",
+    "ocr": "ocr",
 }
 _ROLE_SETUP_HINTS = {
     "note_writer": "请先添加可用的 MiMo/DeepSeek 连接。",
     "note_reviewer": "请先添加可用的 MiMo/DeepSeek 连接。",
     "podcast": "播客需要单独的 MiMo/DeepSeek 连接，不能复用笔记连接。",
     "tts": "请先添加可用的 Windows 系统语音或 MiMo TTS 连接。",
+    "asr": "当前使用内置 faster-whisper large-v3；添加本地 ASR 连接后可显式绑定。",
+    "ocr": "当前使用内置 PaddleOCR；添加本地 OCR 连接后可显式绑定。",
 }
 _OUTPUT_LABELS = {
     "complete_note": "完整笔记",
@@ -58,6 +65,8 @@ _PROVIDER_LABELS = {
     "deepseek": "DeepSeek",
     "xiaomi-mimo-tts": "MiMo TTS",
     "windows-tts": "Windows 系统语音",
+    "local-asr": "faster-whisper large-v3",
+    "local-ocr": "PaddleOCR",
 }
 
 
@@ -379,38 +388,15 @@ def required_automation_roles(
     raise ValueError("automation output is invalid")
 
 
-def public_setup_readiness(
-    output_root: str | Path, default_output: str | None = None
-) -> dict[str, object]:
-    """Project the selected delivery's setup facts in plain user language.
-
-    This reads existing settings, policy, and stored secret readability only.
-    It intentionally neither creates a binding nor constructs a Provider, so
-    rendering the settings page cannot become a paid-call entry point.
-    """
-    root = Path(output_root).resolve()
-    try:
-        settings = load_settings(root)
-        status = load_status(root)
-    except ValueError:
-        return {
-            "default_output": _OUTPUT_LABELS["complete_note_with_audio"],
-            "required_roles": [],
-            "state": "需要检查设置",
-            "message": "设置暂时无法读取，请重新保存需要的连接。",
-            "authorization": {
-                "state": "等待设置",
-                "message": "完成连接设置后才能确认自动整理。",
-            },
-        }
-    selected = default_output or (
-        status.policy.default_output
-        if status is not None
-        else "complete_note_with_audio"
-    )
-    required = required_automation_roles(selected)
-    roles: list[dict[str, object]] = []
-    for role in required:
+def _public_role_settings(
+    root: Path,
+    settings: ProviderSettings,
+    roles: tuple[str, ...],
+    *,
+    implicit_local: bool = False,
+) -> list[dict[str, object]]:
+    projected: list[dict[str, object]] = []
+    for role in roles:
         binding = settings.role_bindings.get(role)
         connection = (
             settings.connections.get(binding.connection_id)
@@ -431,12 +417,16 @@ def public_setup_readiness(
                 settings, role=role, connection_name=item.name
             )
         ]
-        roles.append(
+        projected.append(
             {
                 "name": _ROLE_LABELS[role],
                 "connection": connection.name if connection is not None else None,
                 "state": (
-                    connection_state if connection is not None else "尚未绑定连接"
+                    connection_state
+                    if connection is not None
+                    else "使用内置本地能力"
+                    if implicit_local
+                    else "尚未绑定连接"
                 ),
                 "options": options,
                 "hint": (
@@ -446,6 +436,44 @@ def public_setup_readiness(
                 ),
             }
         )
+    return projected
+
+
+def public_setup_readiness(
+    output_root: str | Path, default_output: str | None = None
+) -> dict[str, object]:
+    """Project the selected delivery's setup facts in plain user language.
+
+    This reads existing settings, policy, and stored secret readability only.
+    It intentionally neither creates a binding nor constructs a Provider, so
+    rendering the settings page cannot become a paid-call entry point.
+    """
+    root = Path(output_root).resolve()
+    try:
+        settings = load_settings(root)
+        status = load_status(root)
+    except ValueError:
+        return {
+            "default_output": _OUTPUT_LABELS["complete_note_with_audio"],
+            "required_roles": [],
+            "material_roles": [],
+            "state": "需要检查设置",
+            "message": "设置暂时无法读取，请重新保存需要的连接。",
+            "authorization": {
+                "state": "等待设置",
+                "message": "完成连接设置后才能确认自动整理。",
+            },
+        }
+    selected = default_output or (
+        status.policy.default_output
+        if status is not None
+        else "complete_note_with_audio"
+    )
+    required = required_automation_roles(selected)
+    roles = _public_role_settings(root, settings, required)
+    material_roles = _public_role_settings(
+        root, settings, ("asr", "ocr"), implicit_local=True
+    )
     configured = all(
         role["state"] in {"连接配置可读取", "本地配置可读取"} for role in roles
     )
@@ -484,6 +512,7 @@ def public_setup_readiness(
     return {
         "default_output": _OUTPUT_LABELS[selected],
         "required_roles": roles,
+        "material_roles": material_roles,
         "state": state,
         "message": message,
         "authorization": authorization,

@@ -367,6 +367,8 @@
 模型与连接
 
 当前使用
+语音识别         faster-whisper large-v3      [更换]
+画面文字         PaddleOCR                    [更换]
 笔记             MiMo 主连接                  [更换]
 播客             DeepSeek 主连接              [更换]
 语音             Windows 系统语音             [更换]
@@ -380,6 +382,7 @@ DeepSeek 主连接 DeepSeek   已连接               [编辑]
 ────────────────────────────────────────────
 
 可添加的服务
+[ faster-whisper large-v3 ]  [ PaddleOCR ]
 [ MiMo ]  [ DeepSeek ]  [ MiMo TTS ]  [ Windows 系统语音 ]
 ```
 
@@ -390,6 +393,9 @@ DeepSeek 主连接 DeepSeek   已连接               [编辑]
 - “可添加的服务”可以使用紧凑选择卡，因为每项是可单独选择的对象；
 - 新出现的服务沿用同一选择卡和连接表单，不创建专属页面结构；
 - 技术参数放在编辑表单中，列表只展示用户需要识别的信息。
+- 材料提取职责始终显示；笔记、播客和语音职责随默认成品变化；
+- 本地 faster-whisper large-v3 与 PaddleOCR 不显示 API Key 输入；未显式绑定时说明继续使用内置本地能力；
+- 显式绑定 ASR/OCR 后只影响新任务，并随其他职责一起冻结进任务事实。
 
 ### 7.5 设置反馈
 

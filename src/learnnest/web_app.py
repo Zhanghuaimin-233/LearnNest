@@ -102,6 +102,14 @@ _SETUP_ROLE_NAMES = {
     "笔记 Reviewer": "note_reviewer",
     "播客": "podcast",
     "TTS": "tts",
+    "语音识别（ASR）": "asr",
+    "画面文字（OCR）": "ocr",
+}
+_CAPABILITY_LABELS = {
+    "llm": "文本模型",
+    "tts": "语音服务",
+    "asr": "语音识别",
+    "ocr": "画面文字识别",
 }
 
 
@@ -586,19 +594,15 @@ class WebService:
                     ),
                 }
                 for item in settings["connections"]
-                if item["capability"] in {"llm", "tts"}
             ],
             "adapters": [
                 {
                     "preset": preset,
                     "name": public_provider_label(adapter.provider),
-                    "capability": "文本模型"
-                    if adapter.capability == "llm"
-                    else "语音服务",
+                    "capability": _CAPABILITY_LABELS[adapter.capability],
                     "local": not adapter.requires_secret,
                 }
                 for preset, adapter in adapters.items()
-                if adapter.capability in {"llm", "tts"}
             ],
             "limits": {
                 "retries_per_role": settings["retries_per_role"],
@@ -1223,7 +1227,14 @@ syncInitialHashBookmark();
 
     @app.post("/api/providers/setup-roles/{role_name}")
     def save_provider_setup_role(
-        role_name: Literal["笔记 Writer", "笔记 Reviewer", "播客", "TTS"],
+        role_name: Literal[
+            "笔记 Writer",
+            "笔记 Reviewer",
+            "播客",
+            "TTS",
+            "语音识别（ASR）",
+            "画面文字（OCR）",
+        ],
         request: ProviderRoleBindingRequest,
     ) -> dict[str, object]:
         try:
@@ -1244,7 +1255,14 @@ syncInitialHashBookmark();
 
     @app.delete("/api/providers/setup-roles/{role_name}")
     def clear_provider_setup_role(
-        role_name: Literal["笔记 Writer", "笔记 Reviewer", "播客", "TTS"],
+        role_name: Literal[
+            "笔记 Writer",
+            "笔记 Reviewer",
+            "播客",
+            "TTS",
+            "语音识别（ASR）",
+            "画面文字（OCR）",
+        ],
     ) -> dict[str, object]:
         try:
             return service.clear_provider_role(_SETUP_ROLE_NAMES[role_name])

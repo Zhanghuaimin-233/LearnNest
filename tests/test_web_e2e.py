@@ -24,6 +24,7 @@ from learnnest.automation_store import load_intake, load_status, load_task_state
 from learnnest.douyin_favorites import DouyinFavorite, DouyinFavoritesSnapshot
 from learnnest.models import ContentPack, Evidence, StageStatus
 from learnnest.pipeline import PipelineError
+from learnnest.provider_profiles import load_settings
 from learnnest.task_store import create_task, find_task_by_id, write_task_atomic
 from learnnest.web_app import create_web_app
 
@@ -287,10 +288,29 @@ def _add_connection(page: Page, *, name: str, preset: str, key: str) -> None:
     expect(page.locator("#connection-dialog")).to_be_visible()
     page.locator("#provider-connection-form [name=name]").fill(name)
     page.locator("#provider-connection-form [name=preset]").select_option(preset)
-    page.locator("#provider-connection-form [name=api_key]").fill(key)
+    if page.locator("#provider-key-field").is_visible():
+        page.locator("#provider-connection-form [name=api_key]").fill(key)
     page.locator("#provider-connection-form button[type=submit]").click()
     expect(page.locator("#connection-dialog")).not_to_be_visible()
     expect(page.get_by_text(name, exact=True)).to_be_visible()
+
+
+def _add_and_bind_local_material_model(page: Page, *, preset: str, role: str) -> None:
+    page.locator(f'button[data-add-adapter="{preset}"]').click()
+    expect(page.locator("#connection-dialog")).to_be_visible()
+    expect(page.locator("#provider-connection-form [name=preset]")).to_have_value(
+        preset
+    )
+    expect(page.locator("#provider-connection-form [name=name]")).to_have_value(preset)
+    expect(page.locator("#provider-key-field")).to_be_hidden()
+    expect(page.locator("#windows-voice-field")).to_be_hidden()
+    page.locator("#provider-connection-form button[type=submit]").click()
+    expect(page.locator("#connection-dialog")).not_to_be_visible()
+    select = page.locator(f'select[data-setup-role-select="{role}"]')
+    expect(select).to_be_visible()
+    select.select_option(preset)
+    page.locator(f'button[data-bind-setup-role="{role}"]').click()
+    expect(page.locator(f'button[data-unbind-setup-role="{role}"]')).to_be_visible()
 
 
 def _enable_note_automation(page: Page, *, key: str) -> None:
@@ -573,6 +593,56 @@ def test_goal4_waiting_setup_survives_refresh_without_constructing_a_provider(
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
         expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
         assert loopback_app.provider_runs == []
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth"
+        )
+        browser.close()
+
+
+def test_local_asr_and_ocr_are_visible_bindable_and_persist_in_real_edge(
+    loopback_app: _LoopbackApp,
+) -> None:
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        console_issues: list[str] = []
+        page.on(
+            "console",
+            lambda message: (
+                console_issues.append(message.text)
+                if message.type in {"error", "warning"}
+                else None
+            ),
+        )
+        page.goto(loopback_app.url)
+        _open_settings_panel(page, "connections")
+
+        expect(page.locator("#provider-adapter-list")).to_contain_text(
+            "faster-whisper large-v3"
+        )
+        expect(page.locator("#provider-adapter-list")).to_contain_text("PaddleOCR")
+        expect(page.locator("#setup-readiness")).to_contain_text("使用内置本地能力")
+        _add_and_bind_local_material_model(
+            page, preset="local-asr", role="语音识别（ASR）"
+        )
+        _add_and_bind_local_material_model(
+            page, preset="local-ocr", role="画面文字（OCR）"
+        )
+
+        page.reload()
+        _open_settings_panel(page, "connections")
+        expect(
+            page.locator('button[data-unbind-setup-role="语音识别（ASR）"]')
+        ).to_be_visible()
+        expect(
+            page.locator('button[data-unbind-setup-role="画面文字（OCR）"]')
+        ).to_be_visible()
+        settings = load_settings(loopback_app.root)
+        assert settings.role_bindings["asr"].connection_id == "local-asr"
+        assert settings.role_bindings["ocr"].connection_id == "local-ocr"
+        assert loopback_app.provider_runs == []
+        assert console_issues == []
         assert page.evaluate(
             "document.documentElement.scrollWidth <= window.innerWidth"
         )

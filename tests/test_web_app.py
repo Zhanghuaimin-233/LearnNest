@@ -1495,11 +1495,14 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
         "single-video-output",
         "storage-form",
         "output-root",
+        "provider-key-field",
         "automation-access",
         "automation-authorization-dialog",
     ):
         assert f'id="{element_id}"' in page
     assert page.count("data-open-single-video") == 1
+    assert '<option value="local-asr">' in page
+    assert '<option value="local-ocr">' in page
     assert 'id="confirm-paid"' not in page
     assert "mobile-primary-action" not in page
     assert "学习库" not in page
@@ -1538,6 +1541,8 @@ def test_workspace_settings_polling_preserves_dirty_forms_and_uses_inline_feedba
     assert "const select = button.previousElementSibling;" in script
     assert "role.options.length" in script
     assert "role.hint" in script
+    assert "readiness.material_roles || []" in script
+    assert 'role.state === "使用内置本地能力" ? "未显式绑定"' in script
     assert "window.setTimeout(() => refresh(), document.hidden ? 5000 : 2000)" in script
 
 

@@ -99,6 +99,18 @@ def test_provider_settings_projects_the_real_webui_catalog_and_editable_limits(
             "local": False,
         },
         {
+            "preset": "local-asr",
+            "name": "faster-whisper large-v3",
+            "capability": "语音识别",
+            "local": True,
+        },
+        {
+            "preset": "local-ocr",
+            "name": "PaddleOCR",
+            "capability": "画面文字识别",
+            "local": True,
+        },
+        {
             "preset": "windows-tts",
             "name": "Windows 系统语音",
             "capability": "语音服务",
@@ -126,6 +138,8 @@ def test_provider_settings_projects_the_real_webui_catalog_and_editable_limits(
         ("deepseek", "deepseek", "deepseek-label-secret", "DeepSeek"),
         ("mimo-tts", "mimo-tts", "mimo-tts-label-secret", "MiMo TTS"),
         ("windows-tts", "windows-tts", None, "Windows 系统语音"),
+        ("local-asr", "local-asr", None, "faster-whisper large-v3"),
+        ("local-ocr", "local-ocr", None, "PaddleOCR"),
     ],
 )
 def test_webui_provider_settings_labels_persistent_provider_ids(
@@ -145,7 +159,9 @@ def test_webui_provider_settings_labels_persistent_provider_ids(
             "name": name,
             "provider": expected_provider,
             "state": (
-                "本地配置可读取" if preset == "windows-tts" else "连接配置可读取"
+                "本地配置可读取"
+                if preset in {"windows-tts", "local-asr", "local-ocr"}
+                else "连接配置可读取"
             ),
         }
     ]
@@ -782,7 +798,7 @@ def test_webui_settings_page_and_api_expose_selected_readiness_but_never_a_key(
     settings = client.get("/api/providers/settings")
 
     assert page.status_code == 200
-    assert "所选结果的准备情况" in page.text
+    assert "模型与职责准备情况" in page.text
     assert "never-show-this" not in page.text
     assert settings.status_code == 200
     assert settings.json()["readiness"]["state"] == "等待设置"
@@ -869,12 +885,24 @@ def test_webui_projects_only_selected_output_readiness_without_exposing_internal
     assert readiness["default_output"] in {"完整笔记", "完整笔记和播客音频"}
     assert [role["name"] for role in readiness["required_roles"]] == expected_roles
     assert [role["state"] for role in readiness["required_roles"]] == expected_states
+    assert [role["name"] for role in readiness["material_roles"]] == [
+        "语音识别（ASR）",
+        "画面文字（OCR）",
+    ]
+    assert [role["state"] for role in readiness["material_roles"]] == [
+        "使用内置本地能力",
+        "使用内置本地能力",
+    ]
+    assert [role["options"][0]["name"] for role in readiness["material_roles"]] == [
+        "legacy-asr",
+        "legacy-ocr",
+    ]
     assert readiness["authorization"]["state"] == "等待授权"
     assert "settings_sha256" not in response.text
     assert "never-show" not in response.text
 
 
-def test_webui_hides_unsupported_input_and_budget_controls_but_keeps_existing_settings(
+def test_webui_exposes_supported_local_material_controls_and_keeps_existing_settings(
     tmp_path: Path,
 ) -> None:
     connect(tmp_path, name="legacy-asr", preset="local-asr")
@@ -885,8 +913,8 @@ def test_webui_hides_unsupported_input_and_budget_controls_but_keeps_existing_se
     page = client.get("/")
 
     assert page.status_code == 200
-    assert "local-asr" not in page.text
-    assert "local-ocr" not in page.text
+    assert '<option value="local-asr">' in page.text
+    assert '<option value="local-ocr">' in page.text
     assert "每日调用上限" not in page.text
     assert 'id="provider-role-form"' not in page.text
     assert load_settings(tmp_path).model_dump(mode="json") == before
@@ -911,13 +939,48 @@ def test_webui_local_connections_save_without_api_keys(tmp_path: Path) -> None:
 
     settings = client.get("/api/providers/settings").json()
 
-    assert {item["name"] for item in settings["connections"]} == {"windows-tts"}
-    assert settings["connections"][0]["state"] == "本地配置可读取"
+    assert {item["name"] for item in settings["connections"]} == {
+        "local-asr",
+        "local-ocr",
+        "windows-tts",
+    }
+    assert {item["state"] for item in settings["connections"]} == {"本地配置可读取"}
     assert {item.name for item in load_settings(tmp_path).connections.values()} == {
         "local-asr",
         "local-ocr",
         "windows-tts",
     }
+
+
+def test_webui_binds_local_material_models_into_new_task_snapshots(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_web_app(tmp_path))
+    for name, preset in (("asr-local", "local-asr"), ("ocr-local", "local-ocr")):
+        saved = client.post(
+            "/api/providers/connections", json={"name": name, "preset": preset}
+        )
+        assert saved.status_code == 200
+
+    asr = client.post(
+        "/api/providers/setup-roles/语音识别（ASR）",
+        json={"connection_name": "asr-local"},
+    )
+    ocr = client.post(
+        "/api/providers/setup-roles/画面文字（OCR）",
+        json={"connection_name": "ocr-local"},
+    )
+
+    assert asr.status_code == 200
+    assert ocr.status_code == 200
+    roles = ocr.json()["readiness"]["material_roles"]
+    assert [(role["name"], role["connection"], role["state"]) for role in roles] == [
+        ("语音识别（ASR）", "asr-local", "本地配置可读取"),
+        ("画面文字（OCR）", "ocr-local", "本地配置可读取"),
+    ]
+    frozen = freeze_role_bindings(tmp_path)
+    assert frozen["asr"].provider == "local-asr"
+    assert frozen["ocr"].provider == "local-ocr"
 
 
 def test_webui_deletes_only_unbound_connections_without_exposing_secrets(
@@ -935,7 +998,8 @@ def test_webui_deletes_only_unbound_connections_without_exposing_secrets(
 
     assert deleted.status_code == 200
     assert deleted_local.status_code == 200
-    assert deleted.json()["connections"] == []
+    assert [item["name"] for item in deleted.json()["connections"]] == ["local-asr"]
+    assert deleted_local.json()["connections"] == []
     assert not secret_path.exists()
     assert missing.status_code == 404
     assert "never-show" not in deleted.text + missing.text

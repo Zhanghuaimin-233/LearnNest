@@ -52,7 +52,7 @@ LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面�
 - **效率模式**：`assisted-note` 的 Writer + Reviewer 路线，后续作为默认笔记产品路径。
 - **质量模式**：`quality-note`，仍处于开发调试阶段，成功率较低，不属于稳定承诺。
 - **严格生成路线**：已退出运行时；历史 V2/V3 产物只保留必要的只读兼容，不应反向影响标准笔记合同。
-- **Provider 范围**：稳定 WebUI 只维护 MiMo、DeepSeek、MiMo TTS 和 Windows 系统语音。底层仍保留本地 ASR/OCR 注册与兼容配置，但当前确定性材料管线不消费这些 Web 设置，因此页面不作无效承诺；保留新增 Provider 的模块接口。
+- **Provider 范围**：稳定 WebUI 维护 MiMo、DeepSeek、MiMo TTS、Windows 系统语音，以及材料提取使用的本地 faster-whisper large-v3 和 PaddleOCR。ASR/OCR 未显式绑定时沿用内置本地默认，显式绑定后会冻结进新任务；保留新增 Provider 的模块接口，但当前不承诺其他 ASR/OCR 服务。
 - **TTS 边界**：Windows System.Speech 是默认本地方案，可在设置页选择并保存精确 voice；MiMo TTS 是独立的可选云端连接、密钥引用、预算和失败域。
 
 阶段 0–5.5 已完成共享内核、Provider/TTS、自动收件箱以及三类来源的 fake/offline 浏览器产品门禁。
@@ -125,9 +125,7 @@ uv run learnnest podcast --help
 uv run learnnest tts --help
 ```
 
-MiMo、DeepSeek、MiMo TTS 和 Windows TTS 连接可通过 WebUI 维护，Windows TTS 可选择精确 voice。
-本地 ASR/OCR 兼容配置仍保留在底层和高级入口，但在接入确定性材料管线前不显示于稳定 WebUI。
-任务开始时冻结职责绑定，设置变化不会改写运行中任务。
+MiMo、DeepSeek、MiMo TTS、Windows TTS、本地 faster-whisper large-v3 和 PaddleOCR 连接都可通过 WebUI 维护，Windows TTS 可选择精确 voice。本地 ASR/OCR 不需要 API Key；未显式绑定时继续使用内置本地能力，显式绑定后与其他职责一样在任务开始时冻结，设置变化不会改写运行中任务。
 `.env` 只保留显式旧 CLI 的迁移兼容入口，具体参数以命令帮助和
 [`.env.example`](.env.example) 为准。
 

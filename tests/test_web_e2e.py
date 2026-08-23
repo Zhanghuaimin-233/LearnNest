@@ -169,6 +169,62 @@ class _HistoricalFavorites:
         raise FileNotFoundError
 
 
+class _ObservableFailedLogin:
+    def __init__(self) -> None:
+        self.session_id = "offline-douyin-session"
+        self.status = "disconnected"
+        self.polls = 0
+
+    def _payload(self, message: str) -> dict[str, object]:
+        return {
+            "session_id": self.session_id,
+            "status": self.status,
+            "expires_in": 60 if self.status not in {"failed", "cancelled"} else 0,
+            "qr_available": False,
+            "message": message,
+        }
+
+    def create_browser_session(self) -> dict[str, object]:
+        self.status = "browser_ready"
+        self.polls = 0
+        return self._payload("官方验证窗口已打开，等待完成手机号与扫码验证。")
+
+    def current_session(self) -> dict[str, object]:
+        if self.status == "disconnected":
+            return {
+                "session_id": None,
+                "status": "disconnected",
+                "expires_in": 0,
+                "qr_available": False,
+                "message": "尚未连接抖音。",
+            }
+        return self._payload(
+            "已取得登录凭据，但收藏接口暂不可用。"
+            if self.status == "failed"
+            else "正在完成抖音验证。"
+        )
+
+    def get_session(self, session_id: str) -> dict[str, object]:
+        assert session_id == self.session_id
+        self.polls += 1
+        if self.polls == 1:
+            self.status = "verification_required"
+            return self._payload("抖音要求继续验证，请在原官方窗口完成页面提示。")
+        if self.polls == 2:
+            self.status = "validating"
+            return self._payload("已取得登录凭据，正在验证收藏访问。")
+        self.status = "failed"
+        return self._payload("已取得登录凭据，但收藏接口暂不可用。")
+
+    def cancel_session(self, session_id: str) -> dict[str, object]:
+        assert session_id == self.session_id
+        self.status = "cancelled"
+        return self._payload("已取消本次抖音连接。")
+
+    def shutdown(self) -> None:
+        return None
+
+
 @dataclass
 class _LoopbackApp:
     url: str
@@ -193,6 +249,7 @@ def _start_loopback_server(
     root: Path,
     run_tasks: Callable[..., object],
     clock: Callable[[], datetime] | None = None,
+    douyin_login: object | None = None,
 ) -> tuple[str, uvicorn.Server, threading.Thread]:
     coordinator = AutomationCoordinator(  # type: ignore[arg-type]
         root, run_tasks=run_tasks, clock=clock or (lambda: datetime.now(UTC))
@@ -203,6 +260,7 @@ def _start_loopback_server(
             create_web_app(
                 root,
                 coordinator=coordinator,
+                douyin_login=douyin_login,  # type: ignore[arg-type]
                 douyin_favorites=_HistoricalFavorites(),
             ),
             host="127.0.0.1",
@@ -280,6 +338,51 @@ def _open_settings_panel(page: Page, panel: str) -> None:
     _open_view(page, "settings")
     page.locator(f'[data-settings-tab="{panel}"]').click()
     expect(page.locator(f'[data-settings-panel="{panel}"]')).to_be_visible()
+
+
+def test_douyin_login_failure_reason_survives_refresh_in_real_edge(
+    tmp_path: Path,
+) -> None:
+    login = _ObservableFailedLogin()
+    url, server, thread = _start_loopback_server(
+        tmp_path,
+        lambda *_args, **_kwargs: [],
+        douyin_login=login,
+    )
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(edge), headless=True
+            )
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            console_issues: list[str] = []
+            page.on(
+                "console",
+                lambda message: (
+                    console_issues.append(message.text)
+                    if message.type in {"error", "warning"}
+                    else None
+                ),
+            )
+            page.goto(url)
+            _open_view(page, "sources")
+            page.locator("#connect-douyin").click()
+            expect(page.locator("#douyin-login-message")).to_have_text(
+                "已取得登录凭据，但收藏接口暂不可用。",
+                timeout=6_000,
+            )
+
+            page.reload()
+            _open_view(page, "sources")
+            expect(page.locator("#douyin-connection-state")).to_have_text("需重连")
+            expect(page.locator("#douyin-login-message")).to_have_text(
+                "已取得登录凭据，但收藏接口暂不可用。"
+            )
+            assert console_issues == []
+            browser.close()
+    finally:
+        _stop_loopback_server(server, thread)
 
 
 def _add_connection(page: Page, *, name: str, preset: str, key: str) -> None:

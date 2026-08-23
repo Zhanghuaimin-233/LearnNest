@@ -108,6 +108,7 @@ const loginLabel = {
   scanned: "已扫码",
   confirmed: "待确认",
   verification_required: "需验证",
+  validating: "正在校验",
   connected: "已连接",
   expired: "需重连",
   failed: "需重连",
@@ -743,6 +744,7 @@ function showLoginState(state) {
   } else {
     loginMessage.textContent = "正在打开抖音官方短信与扫码验证窗口。";
   }
+  if (state.message) loginMessage.textContent = state.message;
   loginQr.hidden = !state.qr_available;
   loginCountdown.hidden = !state.qr_available;
   refreshDouyinButton.hidden = !state.qr_available;
@@ -829,9 +831,10 @@ async function cancelDouyin() {
 async function restoreDouyinLogin() {
   try {
     const state = await api("/api/douyin/login/current");
-    if (!state.session_id || state.status !== "connected") return;
+    if (!state.session_id || state.status === "disconnected") return;
     douyinSessionId = state.session_id;
     showLoginState(state);
+    scheduleLoginPoll();
   } catch (_) {
     /* A missing or temporarily unverifiable local session stays disconnected. */
   }

@@ -1635,7 +1635,7 @@ def test_douyin_webui_keeps_login_and_favorite_vocabulary_human_facing(
         "Windows 当前用户加密",
         "手机号验证码",
         "抖音 App 扫码确认",
-        "两步完成后才会连接",
+        "通过后才显示已连接",
         "已扫码",
         "需验证",
         "需重连",
@@ -1656,6 +1656,8 @@ def test_douyin_webui_keeps_login_and_favorite_vocabulary_human_facing(
     assert "error.status === 401" in script
     assert "登录已失效，请重新连接抖音。" in script
     assert "请在原抖音官方窗口继续完成短信、扫码或页面要求的额外验证。" in script
+    assert "loginMessage.textContent = state.message" in script
+    assert 'state.status === "disconnected"' in script
     assert 'api("/api/douyin/login/browser"' in script
     assert 'api("/api/douyin/login/current"' in script
     assert 'type="tel"' not in page

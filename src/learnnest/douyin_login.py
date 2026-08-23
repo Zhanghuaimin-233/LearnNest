@@ -39,6 +39,22 @@ _POST_CONFIRM_TTL = 30.0
 _VERIFICATION_TTL = 300.0
 _SAFE_FAILURE = "登录失败，请重新连接抖音。"
 _RECONNECT_FAILURE = "登录已失效，请重新连接抖音。"
+_AUTHENTICATION_FAILURE = "已取得登录凭据，但抖音未接受本次登录。"
+_COOKIE_SAVE_FAILURE = "登录凭据已通过校验，但无法安全保存到本机。"
+_EXPIRED_FAILURE = "验证窗口已超时，系统没有取得可用登录凭据。"
+_STATUS_MESSAGES = {
+    "starting": "正在打开抖音官方验证窗口。",
+    "browser_ready": "官方验证窗口已打开，等待完成手机号与扫码验证。",
+    "qr_ready": "请使用抖音 App 扫描二维码。",
+    "scanned": "已扫码，请在手机或官方窗口继续确认。",
+    "confirmed": "已确认，正在等待抖音签发登录凭据。",
+    "verification_required": "抖音要求继续验证，请在原官方窗口完成页面提示。",
+    "validating": "已取得登录凭据，正在验证收藏访问。",
+    "connected": "登录凭据与收藏访问均已验证，可以同步收藏。",
+    "expired": _EXPIRED_FAILURE,
+    "failed": _SAFE_FAILURE,
+    "cancelled": "已取消本次抖音连接。",
+}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -106,6 +122,7 @@ class DouyinLoginSessionManager:
         self._startup_timeout = startup_timeout
         self._sessions: dict[str, _LoginSession] = {}
         self._current_session_id: str | None = None
+        self._latest_session_id: str | None = None
         self._lock = threading.RLock()
         self._shutdown = False
         self._restore_persisted_session()
@@ -119,17 +136,23 @@ class DouyinLoginSessionManager:
         return self._create_session("browser")
 
     def current_session(self) -> dict[str, Any]:
-        """Return the current connected session without exposing credentials."""
+        """Return the latest safe session state without exposing credentials."""
         with self._lock:
             if self._current_session_id is not None:
                 session = self._sessions.get(self._current_session_id)
                 if session is not None and session.status == "connected":
+                    return self._public_payload_locked(session)
+            if self._latest_session_id is not None:
+                session = self._sessions.get(self._latest_session_id)
+                if session is not None:
+                    self._expire_if_needed_locked(session)
                     return self._public_payload_locked(session)
             return {
                 "session_id": None,
                 "status": "disconnected",
                 "expires_in": 0,
                 "qr_available": False,
+                "message": "尚未连接抖音。",
             }
 
     def _create_session(self, login_mode: str) -> dict[str, Any]:
@@ -141,6 +164,7 @@ class DouyinLoginSessionManager:
                 login_mode=login_mode,
             )
             self._sessions[session.session_id] = session
+            self._latest_session_id = session.session_id
             session.generation = 1
             self._spawn_worker_locked(session, session.generation)
             return self._public_payload_locked(session)
@@ -289,6 +313,7 @@ class DouyinLoginSessionManager:
         )
         self._sessions[session.session_id] = session
         self._current_session_id = session.session_id
+        self._latest_session_id = session.session_id
 
     def _clear_persisted_cookie(self) -> None:
         if self._cookie_store is None:
@@ -331,6 +356,15 @@ class DouyinLoginSessionManager:
         except _LoginStartupTimeout:
             _LOGGER.warning("douyin login outcome=startup_timeout")
             self._mark_failed(session, generation, _SAFE_FAILURE)
+        except DouyinAuthenticationError:
+            _LOGGER.warning("douyin login outcome=favorites_authentication_rejected")
+            self._mark_failed(session, generation, _AUTHENTICATION_FAILURE)
+        except DouyinLoginError as error:
+            _LOGGER.warning(
+                "douyin login outcome=safe_failure exception_type=%s",
+                type(error).__name__,
+            )
+            self._mark_failed(session, generation, str(error))
         except Exception as error:
             _LOGGER.warning(
                 "douyin login outcome=exception exception_type=%s",
@@ -427,6 +461,7 @@ class DouyinLoginSessionManager:
                         raise _LoginExpired
                     auth_candidate = session.status in {
                         "browser_ready",
+                        "scanned",
                         "confirmed",
                         "verification_required",
                     }
@@ -442,8 +477,23 @@ class DouyinLoginSessionManager:
                         continue
                     cookie = _cookie_header(cookies)
                     cookie_secret = SecretStr(cookie)
+                    with self._lock:
+                        if not self._is_current_locked(session, generation):
+                            raise _LoginCancelled
+                        session.status = "validating"
+                        session.expires_at = None
+                        session.error = None
                     smoke_payload = self._favorites_smoke(cookie_secret)
                     _validate_favorites_smoke(smoke_payload)
+                    if self._cookie_store is not None:
+                        try:
+                            self._cookie_store.save(cookie_secret)
+                        except Exception as error:
+                            _LOGGER.warning(
+                                "douyin login outcome=cookie_save_failed exception_type=%s",
+                                type(error).__name__,
+                            )
+                            raise DouyinLoginError(_COOKIE_SAVE_FAILURE) from error
                     with self._lock:
                         if (
                             self._shutdown
@@ -451,8 +501,6 @@ class DouyinLoginSessionManager:
                             or stop_event.is_set()
                         ):
                             raise _LoginCancelled
-                        if self._cookie_store is not None:
-                            self._cookie_store.save(cookie_secret)
                         session.cookie = cookie_secret
                         session.status = "connected"
                         session.expires_at = None
@@ -531,10 +579,7 @@ class DouyinLoginSessionManager:
         with self._lock:
             if not self._is_current_locked(session, generation):
                 return
-            if session.login_mode == "browser":
-                # QR waiting/expiry is one official-page substep. It must not
-                # close the same window while SMS or a refreshed QR is active.
-                return
+            browser_mode = session.login_mode == "browser"
         data = _payload_data(payload)
         error_code = data.get("error_code", payload.get("error_code", 0))
         account_flow = (
@@ -558,6 +603,10 @@ class DouyinLoginSessionManager:
                 session.error = None
             return
         if str(error_code) not in {"0", "None"}:
+            if browser_mode:
+                # A QR substep may fail or expire while the same official
+                # window continues through SMS. Keep the browser attempt alive.
+                return
             _LOGGER.warning(
                 "douyin login path=%s outcome=check_business_error error_code=%s",
                 _CHECK_QR_PATH,
@@ -579,9 +628,10 @@ class DouyinLoginSessionManager:
                 session.expires_at = time.monotonic() + _POST_CONFIRM_TTL
                 session.qr_png = None
             elif status in {"expired", "4", "refused", "5"}:
-                session.status = "expired"
-                session.expires_at = None
-                session.qr_png = None
+                if not browser_mode:
+                    session.status = "expired"
+                    session.expires_at = None
+                    session.qr_png = None
             elif status:
                 _LOGGER.warning(
                     "douyin login path=%s outcome=unknown_check_status",
@@ -616,6 +666,7 @@ class DouyinLoginSessionManager:
             session.status = "expired"
             session.expires_at = None
             session.qr_png = None
+            session.error = _EXPIRED_FAILURE
 
     def _is_current_locked(self, session: _LoginSession, generation: int) -> bool:
         return not self._shutdown and session.generation == generation
@@ -637,6 +688,7 @@ class DouyinLoginSessionManager:
             session.expires_at = None
             session.qr_png = None
             session.cookie = None
+            session.error = session.error or _EXPIRED_FAILURE
 
     def _mark_failed(
         self, session: _LoginSession, generation: int, message: str
@@ -660,6 +712,8 @@ class DouyinLoginSessionManager:
             "status": session.status,
             "expires_in": remaining,
             "qr_available": session.qr_png is not None,
+            "message": session.error
+            or _STATUS_MESSAGES.get(session.status, _SAFE_FAILURE),
         }
 
     def _require_session_locked(self, session_id: str) -> _LoginSession:
@@ -698,25 +752,25 @@ def _default_favorites_smoke(cookie: SecretStr) -> Mapping[str, Any]:
     except DouyinAuthenticationError:
         raise
     except DouyinAdapterError:
-        raise DouyinLoginError("收藏接口暂不可用，登录未完成。") from None
+        raise DouyinLoginError("已取得登录凭据，但收藏接口暂不可用。") from None
     _validate_favorites_smoke(payload)
     return payload
 
 
 def _validate_favorites_smoke(payload: object) -> None:
     if not isinstance(payload, Mapping):
-        raise DouyinLoginError("收藏接口响应格式无效，登录未完成。")
+        raise DouyinLoginError("已取得登录凭据，但收藏接口返回了无法识别的结果。")
     status = payload.get("status_code")
     if str(status) in _AUTH_STATUS_CODES:
         raise DouyinAuthenticationError("Douyin authentication failed")
     if status != 0:
-        raise DouyinLoginError("收藏接口业务校验失败，登录未完成。")
+        raise DouyinLoginError("已取得登录凭据，但收藏接口校验未通过。")
     items = payload.get("aweme_list")
     if not isinstance(items, list) or not any(
         isinstance(item, Mapping) and _numeric_aweme_id(item) is not None
         for item in items
     ):
-        raise DouyinLoginError("收藏接口未返回有效作品，登录未完成。")
+        raise DouyinLoginError("已取得登录凭据，但收藏接口没有返回可验证的作品。")
 
 
 def _payload_data(payload: Mapping[str, Any]) -> Mapping[str, Any]:

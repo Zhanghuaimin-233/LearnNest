@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -417,6 +418,15 @@ class BrowserLoginAfterNavigationTimeoutPage(BrowserLoginPage):
         raise TimeoutError
 
 
+class ConfirmedWithoutCookiePage(BrowserLoginPage):
+    def _tick(self) -> None:
+        self.wait_calls += 1
+        if self.wait_calls == 1:
+            self._emit_status("scanned")
+        elif self.wait_calls == 2:
+            self._emit_status("confirmed")
+
+
 class FakeCookieStore:
     def __init__(self, loaded: SecretStr | None = None) -> None:
         self.loaded = loaded
@@ -481,6 +491,7 @@ def test_login_manager_captures_qr_and_closes_browser_after_http_smoke() -> None
         "status": "connected",
         "expires_in": 0,
         "qr_available": False,
+        "message": "登录凭据与收藏访问均已验证，可以同步收藏。",
     }
     assert smoke_cookies[0].get_secret_value() == (
         "sessionid=COOKIE" + "_SENTINEL; passport_csrf_token=csrf-value"
@@ -632,6 +643,112 @@ def test_browser_login_waits_for_official_cookie_and_persists_it() -> None:
     assert factory.closed.count("context") == 1
     manager.shutdown()
     assert store.loaded is not None
+
+
+def test_browser_login_projects_secondary_verification_progress() -> None:
+    factory = FakeBrowserFactory(
+        page_factory=VerificationPage,
+        authenticated_cookies=False,
+    )
+    manager = DouyinLoginSessionManager(
+        playwright_factory=factory,
+        favorites_smoke=lambda _cookie: _valid_smoke_payload(),
+    )
+
+    session = manager.create_browser_session()
+    verification = _wait_for_status(
+        manager,
+        session["session_id"],
+        {"verification_required"},
+    )
+
+    assert verification["message"] == ("抖音要求继续验证，请在原官方窗口完成页面提示。")
+    _wait_for_status(manager, session["session_id"], {"connected"}, timeout=2.0)
+    manager.shutdown()
+
+
+def test_browser_login_projects_favorites_validation_before_success() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def smoke(_cookie: SecretStr) -> dict[str, Any]:
+        entered.set()
+        release.wait(timeout=1.0)
+        return _valid_smoke_payload()
+
+    manager = DouyinLoginSessionManager(
+        playwright_factory=FakeBrowserFactory(page_factory=BrowserLoginPage),
+        favorites_smoke=smoke,
+    )
+
+    session = manager.create_browser_session()
+    assert entered.wait(timeout=1.0)
+    try:
+        validating = manager.get_session(session["session_id"])
+        assert validating["status"] == "validating"
+        assert validating["message"] == "已取得登录凭据，正在验证收藏访问。"
+    finally:
+        release.set()
+    _wait_for_status(manager, session["session_id"], {"connected"})
+    manager.shutdown()
+
+
+def test_failed_browser_login_keeps_the_specific_safe_result_for_page_restore() -> None:
+    def unavailable(_cookie: SecretStr) -> dict[str, Any]:
+        raise DouyinLoginError("已取得登录凭据，但收藏接口暂不可用。")
+
+    manager = DouyinLoginSessionManager(
+        playwright_factory=FakeBrowserFactory(page_factory=BrowserLoginPage),
+        favorites_smoke=unavailable,
+    )
+
+    session = manager.create_browser_session()
+    failed = _wait_for_status(manager, session["session_id"], {"failed"})
+
+    assert failed["message"] == "已取得登录凭据，但收藏接口暂不可用。"
+    assert manager.current_session() == failed
+    manager.shutdown()
+
+
+def test_confirmed_browser_login_reports_when_no_usable_cookie_arrives(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(douyin_login_module, "_POST_CONFIRM_TTL", 0.03)
+    manager = DouyinLoginSessionManager(
+        playwright_factory=FakeBrowserFactory(
+            page_factory=ConfirmedWithoutCookiePage,
+            authenticated_cookies=False,
+        ),
+        favorites_smoke=lambda _cookie: _valid_smoke_payload(),
+    )
+
+    session = manager.create_browser_session()
+    expired = _wait_for_status(manager, session["session_id"], {"expired"})
+
+    assert expired["message"] == "验证窗口已超时，系统没有取得可用登录凭据。"
+    assert manager.current_session() == expired
+    manager.shutdown()
+
+
+def test_browser_login_reports_local_encrypted_save_failure_without_details() -> None:
+    class FailingCookieStore(FakeCookieStore):
+        def save(self, cookie: SecretStr) -> None:
+            del cookie
+            raise OSError("PRIVATE_PATH COOKIE_SENTINEL")
+
+    manager = DouyinLoginSessionManager(
+        playwright_factory=FakeBrowserFactory(page_factory=BrowserLoginPage),
+        favorites_smoke=lambda _cookie: _valid_smoke_payload(),
+        cookie_store=FailingCookieStore(),
+    )
+
+    session = manager.create_browser_session()
+    failed = _wait_for_status(manager, session["session_id"], {"failed"})
+
+    assert failed["message"] == "登录凭据已通过校验，但无法安全保存到本机。"
+    assert "PRIVATE_PATH" not in str(failed)
+    assert "COOKIE_SENTINEL" not in str(failed)
+    manager.shutdown()
 
 
 def test_browser_login_uses_official_controls_after_navigation_timeout() -> None:

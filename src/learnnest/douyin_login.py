@@ -25,9 +25,9 @@ from pydantic import SecretStr
 from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import (
     DouyinAuthenticationError,
-    DouyinHttpTransport,
     douyin_authentication_message,
 )
+from learnnest.adapters.douyin_official_page import collect_official_favorites
 
 _DOUYIN_HOME_URL = "https://www.douyin.com/"
 _QR_PATH = "/passport/web/get_qrcode/"
@@ -50,7 +50,7 @@ _STATUS_MESSAGES = {
     "scanned": "已扫码，请在手机或官方窗口继续确认。",
     "confirmed": "已确认，正在等待抖音签发登录凭据。",
     "verification_required": "抖音要求继续验证，请在原官方窗口完成页面提示。",
-    "validating": "已取得登录凭据，正在验证收藏访问。",
+    "validating": "已取得登录凭据，正在通过抖音官方页面验证收藏访问。",
     "connected": "登录凭据与收藏访问均已验证，可以同步收藏。",
     "expired": _EXPIRED_FAILURE,
     "failed": _SAFE_FAILURE,
@@ -118,7 +118,7 @@ class DouyinLoginSessionManager:
         if startup_timeout <= 0:
             raise ValueError("Douyin login startup timeout must be positive")
         self._playwright_factory = playwright_factory or _default_playwright_factory
-        self._favorites_smoke = favorites_smoke or _default_favorites_smoke
+        self._favorites_smoke = favorites_smoke
         self._cookie_store = cookie_store
         self._qr_ttl = qr_ttl
         self._startup_timeout = startup_timeout
@@ -296,24 +296,26 @@ class DouyinLoginSessionManager:
             return
         if cookie is None:
             return
-        try:
-            smoke_payload = self._favorites_smoke(cookie)
-            _validate_favorites_smoke(smoke_payload)
-        except DouyinAuthenticationError as error:
-            _LOGGER.warning(
-                "douyin login outcome=persisted_cookie_rejected "
-                "reason=%s status_code=%s",
-                error.reason,
-                error.status_code if error.status_code is not None else "unknown",
-            )
-            self._clear_persisted_cookie()
-            return
-        except Exception as error:
-            _LOGGER.warning(
-                "douyin login outcome=persisted_cookie_unverified exception_type=%s",
-                type(error).__name__,
-            )
-            return
+        if self._favorites_smoke is not None:
+            try:
+                smoke_payload = self._favorites_smoke(cookie)
+                _validate_favorites_smoke(smoke_payload)
+            except DouyinAuthenticationError as error:
+                _LOGGER.warning(
+                    "douyin login outcome=persisted_cookie_rejected "
+                    "reason=%s status_code=%s",
+                    error.reason,
+                    error.status_code if error.status_code is not None else "unknown",
+                )
+                self._clear_persisted_cookie()
+                return
+            except Exception as error:
+                _LOGGER.warning(
+                    "douyin login outcome=persisted_cookie_unverified "
+                    "exception_type=%s",
+                    type(error).__name__,
+                )
+                return
         session = _LoginSession(
             session_id=uuid.uuid4().hex,
             login_mode="restored",
@@ -504,7 +506,20 @@ class DouyinLoginSessionManager:
                         session.expires_at = None
                         session.error = None
                         session.failure_kind = None
-                    smoke_payload = self._favorites_smoke(cookie_secret)
+                    if self._favorites_smoke is not None:
+                        smoke_payload = self._favorites_smoke(cookie_secret)
+                    else:
+                        try:
+                            smoke_payload = collect_official_favorites(
+                                page,
+                                first_page_only=True,
+                            )
+                        except DouyinAuthenticationError:
+                            raise
+                        except DouyinAdapterError:
+                            raise DouyinLoginError(
+                                "已取得登录凭据，但抖音官方页面没有返回可验证的收藏结果。"
+                            ) from None
                     _validate_favorites_smoke(smoke_payload)
                     if self._cookie_store is not None:
                         try:
@@ -775,17 +790,6 @@ class _LoginStartupTimeout(Exception):
 
 def _default_playwright_factory() -> Any:
     return sync_playwright().start()
-
-
-def _default_favorites_smoke(cookie: SecretStr) -> Mapping[str, Any]:
-    try:
-        payload = DouyinHttpTransport(cookie).list_video_favorites(cursor=0, count=1)
-    except DouyinAuthenticationError:
-        raise
-    except DouyinAdapterError:
-        raise DouyinLoginError("已取得登录凭据，但收藏接口暂不可用。") from None
-    _validate_favorites_smoke(payload)
-    return payload
 
 
 def _validate_favorites_smoke(payload: object) -> None:

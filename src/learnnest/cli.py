@@ -43,7 +43,7 @@ from learnnest.assisted_note_generation import (
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.artifact_layout import migrate_artifact_layout, plan_artifact_layout
 from learnnest.adapters.douyin import DouyinFavoritesAdapter
-from learnnest.adapters.douyin_http import DouyinHttpTransport
+from learnnest.adapters.douyin_official_page import DouyinOfficialPageTransport
 from learnnest.adapters.folder import FolderAdapter
 from learnnest.batch import resume_batch, run_batch
 from learnnest.batch_store import load_batch
@@ -2241,9 +2241,9 @@ def _schedule_adapter(schedule, credentials):
         )
     if schedule.source.folder_ids:
         raise RuntimeError(
-            "custom Douyin folder monitoring is not verified on the pure HTTP path"
+            "custom Douyin folder monitoring is not verified on the official page path"
         )
-    transport = DouyinHttpTransport(credentials)
+    transport = DouyinOfficialPageTransport(credentials)
     return DouyinFavoritesAdapter(
         transport,
         folder_ids=(),

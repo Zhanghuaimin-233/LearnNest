@@ -289,7 +289,7 @@ def test_non_json_transport_failure_is_safe() -> None:
         Path("artifacts/local/douyin-test"),
         transport_factory=lambda _cookie: NonJsonTransport(),
     )
-    with pytest.raises(DouyinFavoritesError, match="收藏同步失败"):
+    with pytest.raises(DouyinFavoritesError, match="官方页面没有返回可验证"):
         store.sync(SecretStr("COOKIE" + "_SENTINEL"))
 
 
@@ -597,3 +597,34 @@ def test_douyin_favorites_web_request_rejection_keeps_login_and_explains_drift(
         "当前网页接口校验已变化，不是扫码或验证码失败。"
     )
     assert login.invalidated is False
+
+
+def test_douyin_favorites_web_explains_missing_official_page_response(
+    tmp_path: Path,
+) -> None:
+    class MissingResponseTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            raise DouyinAdapterError("runtime detail must not escape")
+
+    store = DouyinFavoritesStore(
+        tmp_path,
+        transport_factory=lambda _cookie: MissingResponseTransport(),
+    )
+    app = create_web_app(
+        tmp_path,
+        douyin_login=FakeLoginBoundary(),
+        douyin_favorites=store,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/douyin/favorites",
+            json={"session_id": "session1234567890"},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == (
+        "抖音官方页面没有返回可验证的收藏结果；收藏未更新，请稍后重试。"
+    )
+    assert "runtime detail" not in response.text

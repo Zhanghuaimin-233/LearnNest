@@ -736,11 +736,11 @@ function showLoginState(state) {
   if (state.status === "connected") {
     loginMessage.textContent = "官方短信与扫码验证已完成，可以同步收藏。";
   } else if (state.status === "browser_ready") {
-    loginMessage.textContent = "请在抖音官方窗口完成手机号验证码，并按提示使用抖音 App 扫码确认；两步完成后才会连接。";
+    loginMessage.textContent = "请在抖音官方窗口完成手机号验证码，并按提示使用抖音 App 扫码确认；随后官方页面会自动验证收藏访问。";
   } else if (state.status === "scanned") {
     loginMessage.textContent = "已扫码，请在手机上确认登录。";
   } else if (state.status === "confirmed") {
-    loginMessage.textContent = "已确认，正在完成连接。";
+    loginMessage.textContent = "已确认，正在等待官方页面验证收藏访问。";
   } else if (state.status === "verification_required") {
     loginMessage.textContent = "请在原抖音官方窗口继续完成短信、扫码或页面要求的额外验证。";
   } else if (reconnect) {
@@ -850,7 +850,7 @@ async function syncFavorites() {
     return;
   }
   syncFavoritesButton.disabled = true;
-  favoriteStatus.textContent = "正在同步收藏…";
+  favoriteStatus.textContent = "正在通过抖音官方页面同步收藏，请勿关闭临时窗口…";
   try {
     const snapshot = await api("/api/douyin/favorites", {
       method: "POST",

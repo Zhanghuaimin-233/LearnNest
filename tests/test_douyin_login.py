@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from pytest import MonkeyPatch
 
 import learnnest.douyin_login as douyin_login_module
+from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import DouyinAuthenticationError
 from learnnest.douyin_login import DouyinLoginError, DouyinLoginSessionManager
 
@@ -516,6 +517,46 @@ def test_login_manager_uses_response_events_without_page_evaluation() -> None:
     manager.shutdown()
 
 
+def test_login_manager_uses_official_page_for_default_favorites_smoke(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    observed_pages: list[object] = []
+
+    def collect(page: object, **kwargs: object) -> dict[str, Any]:
+        observed_pages.append(page)
+        assert kwargs["first_page_only"] is True
+        return _valid_smoke_payload()
+
+    monkeypatch.setattr(douyin_login_module, "collect_official_favorites", collect)
+    factory = FakeBrowserFactory()
+    manager = DouyinLoginSessionManager(playwright_factory=factory)
+
+    session = manager.create_session()
+    _wait_for_status(manager, session["session_id"], {"connected"})
+
+    assert observed_pages == [factory.last_playwright.last_page]
+    manager.shutdown()
+
+
+def test_login_manager_explains_missing_official_favorites_response(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    def collect(_page: object, **_kwargs: object) -> dict[str, Any]:
+        raise DouyinAdapterError("runtime detail must not escape")
+
+    monkeypatch.setattr(douyin_login_module, "collect_official_favorites", collect)
+    manager = DouyinLoginSessionManager(playwright_factory=FakeBrowserFactory())
+
+    session = manager.create_session()
+    failed = _wait_for_status(manager, session["session_id"], {"failed"})
+
+    assert failed["message"] == (
+        "已取得登录凭据，但抖音官方页面没有返回可验证的收藏结果。"
+    )
+    assert "runtime detail" not in str(failed)
+    manager.shutdown()
+
+
 def test_login_manager_prefers_official_site_login_button_and_events() -> None:
     factory = FakeBrowserFactory(official_login=True)
     manager = DouyinLoginSessionManager(
@@ -686,7 +727,9 @@ def test_browser_login_projects_favorites_validation_before_success() -> None:
     try:
         validating = manager.get_session(session["session_id"])
         assert validating["status"] == "validating"
-        assert validating["message"] == "已取得登录凭据，正在验证收藏访问。"
+        assert validating["message"] == (
+            "已取得登录凭据，正在通过抖音官方页面验证收藏访问。"
+        )
     finally:
         release.set()
     _wait_for_status(manager, session["session_id"], {"connected"})

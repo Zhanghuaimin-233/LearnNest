@@ -774,18 +774,8 @@ class WebService:
         ]
 
     def startup_sync(self) -> None:
-        """Refresh only an already-connected local Douyin session on app start."""
-        if self.douyin_favorites.read_snapshot().synced_at is None:
-            # The first visible sync is a user-controlled historical baseline.
-            return
-        current = self.douyin_login.current_session()
-        session_id = current.get("session_id")
-        if current.get("status") != "connected" or not isinstance(session_id, str):
-            return
-        try:
-            self.sync_douyin_favorites(session_id)
-        except (DouyinAuthenticationError, DouyinLoginError, DouyinFavoritesError):
-            return
+        """Keep official-page synchronization user-controlled on app start."""
+        return
 
     def shutdown(self) -> None:
         self.douyin_login.shutdown()
@@ -933,6 +923,8 @@ syncInitialHashBookmark();
             ) from error
         except DouyinLoginError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+        except DouyinFavoritesError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
         except Exception as error:
             raise HTTPException(
                 status_code=502,

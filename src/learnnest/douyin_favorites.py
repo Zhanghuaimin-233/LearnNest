@@ -1,4 +1,4 @@
-"""Pure-HTTP synchronization and safe local projection for Douyin favorites."""
+"""Official-page synchronization and safe local projection for Douyin favorites."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from pydantic import SecretStr
 from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import (
     DouyinAuthenticationError,
-    DouyinHttpTransport,
 )
+from learnnest.adapters.douyin_official_page import DouyinOfficialPageTransport
 
 _FAVORITES_DIRECTORY = Path(".learnnest") / "douyin"
 _FACTS_FILENAME = "favorites.json"
@@ -145,7 +145,9 @@ class DouyinFavoritesStore:
                 raise DouyinAuthenticationError(
                     "Douyin authentication failed"
                 ) from None
-            raise DouyinFavoritesError("抖音收藏同步失败。") from None
+            raise DouyinFavoritesError(
+                "抖音官方页面没有返回可验证的收藏结果；收藏未更新，请稍后重试。"
+            ) from None
         except (OSError, ValueError, TypeError) as error:
             raise DouyinFavoritesError("抖音收藏同步失败。") from error
 
@@ -272,7 +274,7 @@ class DouyinFavoritesStore:
 
 
 def _default_transport_factory(cookie: SecretStr) -> FavoritesTransport:
-    return DouyinHttpTransport(cookie)
+    return DouyinOfficialPageTransport(cookie)
 
 
 def _safe_snapshot(

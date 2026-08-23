@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from learnnest.adapters.douyin_http import (
     DouyinAuthenticationError,
     DouyinHttpTransport,
+    DouyinHttpRequestError,
     DouyinSignedRequest,
 )
 from learnnest.adapters.douyin import DouyinAdapterError
@@ -116,30 +117,20 @@ def test_http_transport_fails_closed_on_html_response() -> None:
         SecretStr("secret-cookie"), signer=signer, opener=opener
     )
 
-    with pytest.raises(DouyinAdapterError, match="non-JSON") as error:
+    with pytest.raises(DouyinHttpRequestError, match="non-JSON") as error:
         transport.list_video_favorites(cursor=0, count=20)
 
-    assert not isinstance(error.value, DouyinAuthenticationError)
+    assert error.value.reason == "invalid_response"
     assert "secret-cookie" not in str(error.value)
 
 
-def test_http_transport_uses_verified_unsigned_video_baseline_without_signer() -> None:
-    opener = RecordingOpener(b'{"aweme_list": [], "has_more": false}')
-    transport = DouyinHttpTransport(
-        SecretStr("session-cookie"),
-        base_url="https://douyin.test",
-        opener=opener,
-    )
+def test_http_transport_requires_current_runtime_signature_for_video_favorites() -> (
+    None
+):
+    transport = DouyinHttpTransport(SecretStr("session-cookie"))
 
-    transport.list_video_favorites(cursor=0, count=20)
-
-    request, _ = opener.requests[0]
-    assert request.full_url == (
-        "https://douyin.test/aweme/v1/web/aweme/listcollection/"
-        "?device_platform=webapp&aid=6383&channel=channel_pc_web"
-        "&publish_video_strategy_type=2"
-    )
-    assert request.data == b"count=20&cursor=0"
+    with pytest.raises(DouyinAdapterError, match="runtime request signer"):
+        transport.list_video_favorites(cursor=0, count=20)
 
 
 def test_http_transport_distinguishes_request_rejection_from_expired_login() -> None:
@@ -149,6 +140,7 @@ def test_http_transport_distinguishes_request_rejection_from_expired_login() -> 
 
     transport = DouyinHttpTransport(
         SecretStr("session-cookie"),
+        signer=RecordingSigner(),
         base_url="https://douyin.test",
         opener=reject,
     )

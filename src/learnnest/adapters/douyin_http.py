@@ -2,8 +2,8 @@
 
 The transport deliberately does not implement Douyin's rotating request
 signature.  A signer is injected at runtime for endpoints that need one.  The
-verified default-video favorites endpoint also has an explicit unsigned
-baseline; other endpoints remain fail-closed when no signer is supplied.
+detail endpoint has an explicit unsigned baseline; favorites and other
+endpoints remain fail-closed when no signer is supplied.
 Browser automation is not required by this module.
 """
 
@@ -28,7 +28,7 @@ _FOLDERS_PATH = "/aweme/v1/web/collects/list/"
 _FOLDER_ITEMS_PATH = "/aweme/v1/web/collects/video/list/"
 _DEFAULT_WEB_AID = "6383"
 _DEFAULT_WEB_CHANNEL = "channel_pc_web"
-_UNSIGNED_BASELINE_PATHS = frozenset({_VIDEO_FAVORITES_PATH, _DETAIL_PATH})
+_UNSIGNED_BASELINE_PATHS = frozenset({_DETAIL_PATH})
 _DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -47,6 +47,21 @@ class DouyinAuthenticationError(DouyinAdapterError):
             "credentials_rejected", "request_rejected", "business_rejected"
         ] = "credentials_rejected",
         status_code: int | str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.status_code = status_code
+
+
+class DouyinHttpRequestError(DouyinAdapterError):
+    """A safe, structured failure of direct favorites pagination."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: Literal["http_error", "network_error", "invalid_response"],
+        status_code: int | None = None,
     ) -> None:
         super().__init__(message)
         self.reason = reason
@@ -95,7 +110,7 @@ class DouyinUnsignedRequestSigner:
 
     This is intentionally a narrow transport primitive, not a claim that all
     Douyin endpoints accept unsigned requests.  ``DouyinHttpTransport`` only
-    uses it automatically for the verified default-video favorites endpoint.
+    uses it automatically only for endpoints with a verified unsigned path.
     """
 
     def sign(
@@ -263,8 +278,10 @@ class DouyinHttpTransport:
                 if status is not None and not 200 <= int(status) < 300:
                     if int(status) in {401, 403}:
                         raise _http_authentication_error(int(status))
-                    raise DouyinAdapterError(
-                        f"Douyin API request returned HTTP {int(status)}"
+                    raise DouyinHttpRequestError(
+                        f"Douyin API request returned HTTP {int(status)}",
+                        reason="http_error",
+                        status_code=int(status),
                     )
                 raw = response.read()
         except DouyinAdapterError:
@@ -272,11 +289,16 @@ class DouyinHttpTransport:
         except HTTPError as error:
             if error.code in {401, 403}:
                 raise _http_authentication_error(error.code) from error
-            raise DouyinAdapterError(
-                f"Douyin API request returned HTTP {error.code}"
+            raise DouyinHttpRequestError(
+                f"Douyin API request returned HTTP {error.code}",
+                reason="http_error",
+                status_code=error.code,
             ) from error
         except (OSError, URLError) as error:
-            raise DouyinAdapterError("Douyin API request failed") from error
+            raise DouyinHttpRequestError(
+                "Douyin API request failed",
+                reason="network_error",
+            ) from error
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, JSONDecodeError) as error:
@@ -284,11 +306,15 @@ class DouyinHttpTransport:
             # session, but it may also be a transient edge/WAF response. Only
             # explicit authentication signals are allowed to destroy a
             # persisted login.
-            raise DouyinAdapterError(
-                "Douyin API returned a non-JSON response"
+            raise DouyinHttpRequestError(
+                "Douyin API returned a non-JSON response",
+                reason="invalid_response",
             ) from error
         if not isinstance(payload, Mapping):
-            raise DouyinAdapterError("Douyin API returned a non-object response")
+            raise DouyinHttpRequestError(
+                "Douyin API returned a non-object response",
+                reason="invalid_response",
+            )
         return payload
 
 

@@ -409,7 +409,7 @@ def test_douyin_login_failure_reason_survives_refresh_in_real_edge(
             page.goto(url)
             _open_view(page, "sources")
             expect(page.locator(".source-douyin")).to_contain_text(
-                "同步收藏时会短暂恢复这套隔离页面环境"
+                "同步时会短暂恢复这套隔离页面环境"
             )
             page.locator("#connect-douyin").click()
             expect(page.locator("#douyin-login-message")).to_have_text(
@@ -466,7 +466,7 @@ def test_douyin_login_auto_sync_keeps_the_specific_failure_visible_in_real_edge(
             page.locator("#connect-douyin").click()
 
             expect(page.locator("#favorites-status")).to_have_text(
-                "正在通过抖音官方页面同步收藏，请勿关闭临时窗口…",
+                "正在获取抖音当前请求校验，并由后端同步全部收藏…",
                 timeout=6_000,
             )
             expected = (

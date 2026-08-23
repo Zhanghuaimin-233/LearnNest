@@ -862,7 +862,7 @@ async function syncFavorites(options = {}) {
   const automatic = options?.automatic === true;
   favoriteStatusProtected = true;
   syncFavoritesButton.disabled = true;
-  favoriteStatus.textContent = "正在通过抖音官方页面同步收藏，请勿关闭临时窗口…";
+  favoriteStatus.textContent = "正在获取抖音当前请求校验，并由后端同步全部收藏…";
   try {
     const snapshot = await api("/api/douyin/favorites", {
       method: "POST",

@@ -9,7 +9,10 @@ import pytest
 from pydantic import SecretStr
 
 from learnnest.adapters.douyin import DouyinAdapterError
-from learnnest.adapters.douyin_http import DouyinAuthenticationError
+from learnnest.adapters.douyin_http import (
+    DouyinAuthenticationError,
+    DouyinHttpRequestError,
+)
 from learnnest.adapters.douyin_official_page import DouyinOfficialPageError
 from learnnest.douyin_favorites import (
     DouyinFavoritesError,
@@ -339,14 +342,35 @@ def test_non_json_transport_failure_is_safe() -> None:
     class NonJsonTransport:
         def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
             del cursor, count
-            raise DouyinAdapterError("Douyin API returned a non-JSON response")
+            raise DouyinHttpRequestError(
+                "Douyin API returned a non-JSON response",
+                reason="invalid_response",
+            )
 
     store = DouyinFavoritesStore(
         Path("artifacts/local/douyin-test"),
         transport_factory=lambda _cookie: NonJsonTransport(),
     )
-    with pytest.raises(DouyinFavoritesError, match="官方页面没有返回可验证"):
+    with pytest.raises(DouyinFavoritesError, match="非 JSON 或非对象响应"):
         store.sync(SecretStr("COOKIE" + "_SENTINEL"))
+
+
+def test_official_runtime_change_is_specific() -> None:
+    class ChangedRuntimeTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            raise DouyinOfficialPageError(
+                "runtime detail must not escape",
+                reason="runtime_unavailable",
+            )
+
+    store = DouyinFavoritesStore(
+        Path("artifacts/local/douyin-test"),
+        transport_factory=lambda _cookie: ChangedRuntimeTransport(),
+    )
+
+    with pytest.raises(DouyinFavoritesError, match="请求组件已变化"):
+        store.sync(SecretStr("cookie"))
 
 
 def test_official_page_pagination_stall_is_specific_and_keeps_snapshot(
@@ -389,6 +413,48 @@ def test_official_page_pagination_stall_is_specific_and_keeps_snapshot(
         store.sync(SecretStr("cookie"))
 
     assert store.read_snapshot().items[0].title == "旧收藏"
+
+
+def test_direct_pagination_rejects_a_cursor_that_does_not_advance(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport(
+        [
+            {
+                "status_code": 0,
+                "aweme_list": [_item("1", "第一页")],
+                "cursor": 0,
+                "has_more": True,
+            }
+        ]
+    )
+
+    with pytest.raises(DouyinFavoritesError, match="游标没有前进"):
+        _store(tmp_path, transport).sync(SecretStr("cookie"))
+
+    assert not (tmp_path / ".learnnest" / "douyin" / "favorites.json").exists()
+
+
+def test_direct_pagination_reports_the_safety_page_limit(tmp_path: Path) -> None:
+    transport = FakeTransport(
+        [
+            {
+                "status_code": 0,
+                "aweme_list": [_item("1", "第一页")],
+                "cursor": 10,
+                "has_more": True,
+            }
+        ]
+    )
+    store = DouyinFavoritesStore(
+        tmp_path,
+        transport_factory=lambda _cookie: transport,
+        thumbnail_opener=FakeThumbnailOpener({}),
+        max_pages=1,
+    )
+
+    with pytest.raises(DouyinFavoritesError, match="安全分页上限（1 页）"):
+        store.sync(SecretStr("cookie"))
 
 
 def test_favorites_require_success_status_and_numeric_aweme_id(tmp_path: Path) -> None:

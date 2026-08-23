@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
 import pytest
 from pydantic import SecretStr
 
+from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import DouyinAuthenticationError
 from learnnest.adapters.douyin_official_page import (
     DouyinOfficialPageError,
@@ -99,7 +101,7 @@ def test_official_page_collects_signed_favorite_pages_without_replaying_request(
     assert result["has_more"] is False
     assert page.goto_calls == [
         (
-            "https://www.douyin.com/user/self?showTab=favorite_collection",
+            "https://www.douyin.com/user/self?from_tab_name=main&showTab=favorite_collection",
             "domcontentloaded",
             1_000,
         )
@@ -256,21 +258,84 @@ class FakeRuntime:
         self.closed.append("runtime")
 
 
-def test_official_transport_uses_isolated_headed_edge_and_closes_everything() -> None:
-    runtime = FakeRuntime(
-        FakePage([[FakeResponse(_payload("101", cursor=0, has_more=False))]])
+class FakeBootstrapRequest:
+    method = "POST"
+    url = (
+        "https://www.douyin.com/aweme/v1/web/aweme/listcollection/"
+        "?aid=6383&a_bogus=runtime-only&msToken=runtime-only"
     )
+    post_data = "count=20&cursor=0"
+
+    def all_headers(self) -> dict[str, str]:
+        return {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "origin": "https://www.douyin.com",
+            "referer": "https://www.douyin.com/",
+            "user-agent": "official-edge-agent",
+            "uifid": "runtime-only",
+            "cookie": "must-not-be-reused",
+            "content-length": "must-not-be-reused",
+        }
+
+
+class FakeBootstrapPage:
+    def __init__(self, payload: Mapping[str, Any]) -> None:
+        self.payload = payload
+        self.handlers: dict[str, list[Any]] = {}
+        self.goto_calls: list[tuple[str, str, int]] = []
+        self.evaluate_calls: list[Mapping[str, int]] = []
+
+    def on(self, event: str, handler: Any) -> None:
+        self.handlers.setdefault(event, []).append(handler)
+
+    def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+        self.goto_calls.append((url, wait_until, timeout))
+
+    def evaluate(self, _script: str, argument: Mapping[str, int]) -> Mapping[str, Any]:
+        self.evaluate_calls.append(argument)
+        for handler in self.handlers.get("request", []):
+            handler(FakeBootstrapRequest())
+        return self.payload
+
+
+def test_official_transport_uses_isolated_headed_edge_and_closes_everything() -> None:
+    page = FakeBootstrapPage(_payload("101", cursor=10, has_more=True))
+    runtime = FakeRuntime(page)  # type: ignore[arg-type]
+
+    class DirectResponse:
+        status = 200
+
+        def __enter__(self) -> DirectResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(_payload("102", cursor=20, has_more=False)).encode()
+
+    direct_requests: list[Any] = []
+
+    def open_direct(request: Any, *, timeout: float) -> DirectResponse:
+        direct_requests.append((request, timeout))
+        return DirectResponse()
+
     transport = DouyinOfficialPageTransport(
         SecretStr("sessionid=secret; passport_csrf_token=csrf"),
         playwright_factory=lambda: runtime,
+        http_opener=open_direct,
     )
 
-    result = transport.list_video_favorites(cursor=0, count=20)
+    first = transport.list_video_favorites(cursor=0, count=20)
+    second = transport.list_video_favorites(cursor=10, count=20)
 
-    assert result["aweme_list"][0]["aweme_id"] == "101"
+    assert first["aweme_list"][0]["aweme_id"] == "101"
+    assert second["aweme_list"][0]["aweme_id"] == "102"
     assert runtime.chromium.launches == [{"channel": "msedge", "headless": False}]
     assert runtime.browser.context_options == [{"locale": "zh-CN"}]
-    assert runtime.context.page.goto_calls[0][2] == 120_000
+    assert page.goto_calls[0][2] == 120_000
+    assert page.evaluate_calls == [{"cursor": 0, "count": 20, "timeoutMs": 120_000}]
     assert runtime.context.cookies_added == [
         {
             "name": "sessionid",
@@ -284,12 +349,24 @@ def test_official_transport_uses_isolated_headed_edge_and_closes_everything() ->
         },
     ]
     assert runtime.closed == ["context", "browser", "runtime"]
+    request, timeout = direct_requests[0]
+    assert request.full_url == (
+        "https://www.douyin.com/aweme/v1/web/aweme/listcollection/"
+        "?aid=6383&a_bogus=runtime-only&msToken=runtime-only"
+    )
+    assert request.data == b"count=20&cursor=10"
+    assert request.get_header("Cookie") == (
+        "sessionid=secret; passport_csrf_token=csrf"
+    )
+    assert request.get_header("User-agent") == "official-edge-agent"
+    assert request.get_header("Uifid") == "runtime-only"
+    assert request.get_header("Content-length") is None
+    assert timeout == 20.0
 
 
 def test_official_transport_restores_encrypted_browser_storage_state() -> None:
-    runtime = FakeRuntime(
-        FakePage([[FakeResponse(_payload("101", cursor=0, has_more=False))]])
-    )
+    page = FakeBootstrapPage(_payload("101", cursor=0, has_more=False))
+    runtime = FakeRuntime(page)  # type: ignore[arg-type]
     storage_state = {
         "cookies": [
             {
@@ -319,3 +396,28 @@ def test_official_transport_restores_encrypted_browser_storage_state() -> None:
         {"locale": "zh-CN", "storage_state": storage_state}
     ]
     assert runtime.context.cookies_added == []
+
+
+def test_official_transport_rejects_nonzero_cursor_before_runtime_bootstrap() -> None:
+    transport = DouyinOfficialPageTransport(
+        SecretStr("sessionid=secret"),
+        playwright_factory=lambda: pytest.fail("browser must not start"),
+    )
+
+    with pytest.raises(DouyinAdapterError, match="initial cursor"):
+        transport.list_video_favorites(cursor=10, count=20)
+
+
+def test_official_transport_projects_bootstrap_http_rejection() -> None:
+    page = FakeBootstrapPage({"__learnnest_http_error__": 403})
+    runtime = FakeRuntime(page)  # type: ignore[arg-type]
+    transport = DouyinOfficialPageTransport(
+        SecretStr("sessionid=secret"),
+        playwright_factory=lambda: runtime,
+    )
+
+    with pytest.raises(DouyinAuthenticationError) as error:
+        transport.list_video_favorites(cursor=0, count=20)
+
+    assert error.value.reason == "request_rejected"
+    assert error.value.status_code == 403

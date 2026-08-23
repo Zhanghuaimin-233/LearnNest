@@ -19,6 +19,7 @@ from pydantic import SecretStr
 from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import (
     DouyinAuthenticationError,
+    DouyinHttpRequestError,
 )
 from learnnest.adapters.douyin_official_page import (
     DouyinOfficialPageError,
@@ -171,8 +172,32 @@ class DouyinFavoritesStore:
                     f"抖音官方页收藏请求返回业务状态 {error.status_code or '未知'}；"
                     "本次收藏未更新，请重新验证登录或稍后重试。"
                 ) from None
+            if error.reason == "runtime_unavailable":
+                raise DouyinFavoritesError(
+                    "抖音官方网页的请求组件已变化，无法生成本次 HTTP 请求签名；"
+                    "本次收藏未更新。"
+                ) from None
+            if error.reason == "network_error":
+                raise DouyinFavoritesError(
+                    "抖音官方运行时生成首批收藏请求时网络连接失败；"
+                    "本次收藏未更新，请重试。"
+                ) from None
             raise DouyinFavoritesError(
                 "抖音官方页收藏响应格式已变化；本次收藏未更新。"
+            ) from None
+        except DouyinHttpRequestError as error:
+            if error.reason == "http_error":
+                raise DouyinFavoritesError(
+                    f"后端直接请求收藏下一页时返回 HTTP "
+                    f"{error.status_code or '未知'}；本次收藏未更新。"
+                ) from None
+            if error.reason == "network_error":
+                raise DouyinFavoritesError(
+                    "后端直接请求收藏下一页时网络连接失败；本次收藏未更新，请重试。"
+                ) from None
+            raise DouyinFavoritesError(
+                "后端直接请求收藏下一页时收到非 JSON 或非对象响应；"
+                "抖音接口格式可能已变化，本次收藏未更新。"
             ) from None
         except DouyinAdapterError as error:
             if _is_authentication_error(error):
@@ -238,6 +263,7 @@ class DouyinFavoritesStore:
         cursor = 0
         collected: list[Mapping[str, Any]] = []
         seen_ids: set[str] = set()
+        has_more = False
         for _ in range(self._max_pages):
             payload = transport.list_video_favorites(
                 cursor=cursor,
@@ -260,12 +286,23 @@ class DouyinFavoritesStore:
                 if item_id not in seen_ids:
                     seen_ids.add(item_id)
                     collected.append(raw)
-            if not bool(payload.get("has_more")) or not page_ids:
+            has_more = bool(payload.get("has_more"))
+            if not has_more:
                 break
+            if not page_ids:
+                raise DouyinFavoritesError(
+                    "抖音收藏下一页标记为仍有内容，但没有返回有效作品；本次收藏未更新。"
+                )
             next_cursor = _cursor_value(payload.get("cursor"))
             if next_cursor == cursor:
-                break
+                raise DouyinFavoritesError(
+                    "抖音收藏下一页游标没有前进；本次收藏未更新。"
+                )
             cursor = next_cursor
+        if has_more:
+            raise DouyinFavoritesError(
+                f"抖音收藏超过安全分页上限（{self._max_pages} 页）；本次收藏未更新。"
+            )
         if not collected:
             raise DouyinFavoritesError("抖音收藏响应未返回有效作品。")
         return collected
@@ -373,7 +410,7 @@ def _validate_status(payload: Mapping[str, Any]) -> None:
             reason="business_rejected",
             status_code=str(status),
         )
-    raise DouyinFavoritesError("抖音收藏响应格式无效。")
+    raise DouyinFavoritesError(f"抖音收藏接口返回业务状态 {status}；本次收藏未更新。")
 
 
 def _is_authentication_error(error: Exception) -> bool:

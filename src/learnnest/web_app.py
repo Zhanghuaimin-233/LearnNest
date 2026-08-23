@@ -36,7 +36,10 @@ from learnnest.automation_store import (
     save_policy as save_automation_policy,
     save_task_state,
 )
-from learnnest.adapters.douyin_http import DouyinAuthenticationError
+from learnnest.adapters.douyin_http import (
+    DouyinAuthenticationError,
+    douyin_authentication_message,
+)
 from learnnest.douyin_favorites import DouyinFavoritesError, DouyinFavoritesStore
 from learnnest.douyin_cookie_store import DouyinCookieStore
 from learnnest.douyin_login import DouyinLoginError, DouyinLoginSessionManager
@@ -919,9 +922,14 @@ syncInitialHashBookmark();
         try:
             return service.sync_douyin_favorites(request.session_id)
         except DouyinAuthenticationError as error:
+            detail = (
+                "登录已失效，请重新连接抖音。"
+                if error.reason == "credentials_rejected" and error.status_code is None
+                else douyin_authentication_message(error)
+            )
             raise HTTPException(
-                status_code=401,
-                detail="登录已失效，请重新连接抖音。",
+                status_code=502 if error.reason == "request_rejected" else 401,
+                detail=detail,
             ) from error
         except DouyinLoginError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error

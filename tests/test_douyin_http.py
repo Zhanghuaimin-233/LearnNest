@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.error import HTTPError
 
 import pytest
 from pydantic import SecretStr
@@ -93,7 +94,12 @@ def test_http_transport_signs_and_sends_all_favorite_endpoints() -> None:
     assert video_request.get_header("X-runtime-signer") == "test"
     assert video_timeout == 20.0
     assert signer.calls[0]["body"] == {"count": "20", "cursor": "0"}
-    assert signer.calls[0]["params"] == {"aid": "6383"}
+    assert signer.calls[0]["params"] == {
+        "device_platform": "webapp",
+        "aid": "6383",
+        "channel": "channel_pc_web",
+        "publish_video_strategy_type": "2",
+    }
     assert signer.calls[1]["params"] == {"count": "10", "cursor": "20"}
     assert signer.calls[2]["params"] == {
         "collects_id": "folder-1",
@@ -129,9 +135,30 @@ def test_http_transport_uses_verified_unsigned_video_baseline_without_signer() -
 
     request, _ = opener.requests[0]
     assert request.full_url == (
-        "https://douyin.test/aweme/v1/web/aweme/listcollection/?aid=6383"
+        "https://douyin.test/aweme/v1/web/aweme/listcollection/"
+        "?device_platform=webapp&aid=6383&channel=channel_pc_web"
+        "&publish_video_strategy_type=2"
     )
     assert request.data == b"count=20&cursor=0"
+
+
+def test_http_transport_distinguishes_request_rejection_from_expired_login() -> None:
+    def reject(request: Any, *, timeout: float) -> FakeResponse:
+        del timeout
+        raise HTTPError(request.full_url, 403, "Forbidden", {}, None)
+
+    transport = DouyinHttpTransport(
+        SecretStr("session-cookie"),
+        base_url="https://douyin.test",
+        opener=reject,
+    )
+
+    with pytest.raises(DouyinAuthenticationError) as error:
+        transport.list_video_favorites(cursor=0, count=1)
+
+    assert error.value.reason == "request_rejected"
+    assert error.value.status_code == 403
+    assert "session-cookie" not in str(error.value)
 
 
 def test_http_transport_uses_verified_unsigned_detail_baseline_without_signer() -> None:

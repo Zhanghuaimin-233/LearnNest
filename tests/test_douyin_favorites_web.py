@@ -564,3 +564,36 @@ def test_douyin_favorites_web_auth_failure_requires_reconnect(tmp_path: Path) ->
     assert response.status_code == 401
     assert response.json()["detail"] == "登录已失效，请重新连接抖音。"
     assert login.invalidated is True
+
+
+def test_douyin_favorites_web_request_rejection_keeps_login_and_explains_drift(
+    tmp_path: Path,
+) -> None:
+    class RejectedTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            raise DouyinAuthenticationError(
+                "Douyin API request returned HTTP 403",
+                reason="request_rejected",
+                status_code=403,
+            )
+
+    login = FakeLoginBoundary()
+    store = DouyinFavoritesStore(
+        tmp_path,
+        transport_factory=lambda _cookie: RejectedTransport(),
+    )
+    app = create_web_app(tmp_path, douyin_login=login, douyin_favorites=store)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/douyin/favorites",
+            json={"session_id": "session1234567890"},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == (
+        "登录凭据已取得，但收藏请求被抖音拦截（HTTP 403）；"
+        "当前网页接口校验已变化，不是扫码或验证码失败。"
+    )
+    assert login.invalidated is False

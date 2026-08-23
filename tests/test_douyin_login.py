@@ -710,6 +710,49 @@ def test_failed_browser_login_keeps_the_specific_safe_result_for_page_restore() 
     manager.shutdown()
 
 
+def test_browser_login_reports_http_request_rejection_as_protocol_drift() -> None:
+    def rejected(_cookie: SecretStr) -> dict[str, Any]:
+        raise DouyinAuthenticationError(
+            "Douyin API request returned HTTP 403",
+            reason="request_rejected",
+            status_code=403,
+        )
+
+    manager = DouyinLoginSessionManager(
+        playwright_factory=FakeBrowserFactory(page_factory=BrowserLoginPage),
+        favorites_smoke=rejected,
+    )
+
+    session = manager.create_browser_session()
+    failed = _wait_for_status(manager, session["session_id"], {"failed"})
+
+    assert failed["message"] == (
+        "登录凭据已取得，但收藏请求被抖音拦截（HTTP 403）；"
+        "当前网页接口校验已变化，不是扫码或验证码失败。"
+    )
+    assert failed["failure_kind"] == "request_rejected"
+    assert manager.current_session() == failed
+    manager.shutdown()
+
+
+def test_browser_login_reports_business_authentication_code() -> None:
+    manager = DouyinLoginSessionManager(
+        playwright_factory=FakeBrowserFactory(page_factory=BrowserLoginPage),
+        favorites_smoke=lambda _cookie: {
+            "status_code": 1001,
+            "aweme_list": [],
+        },
+    )
+
+    session = manager.create_browser_session()
+    failed = _wait_for_status(manager, session["session_id"], {"failed"})
+
+    assert failed["message"] == (
+        "登录凭据已取得，但收藏接口返回登录失效（状态码 1001）。"
+    )
+    manager.shutdown()
+
+
 def test_confirmed_browser_login_reports_when_no_usable_cookie_arrives(
     monkeypatch: MonkeyPatch,
 ) -> None:

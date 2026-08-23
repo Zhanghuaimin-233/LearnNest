@@ -176,13 +176,16 @@ class _ObservableFailedLogin:
         self.polls = 0
 
     def _payload(self, message: str) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "session_id": self.session_id,
             "status": self.status,
             "expires_in": 60 if self.status not in {"failed", "cancelled"} else 0,
             "qr_available": False,
             "message": message,
         }
+        if self.status == "failed":
+            payload["failure_kind"] = "request_rejected"
+        return payload
 
     def create_browser_session(self) -> dict[str, object]:
         self.status = "browser_ready"
@@ -199,7 +202,8 @@ class _ObservableFailedLogin:
                 "message": "尚未连接抖音。",
             }
         return self._payload(
-            "已取得登录凭据，但收藏接口暂不可用。"
+            "登录凭据已取得，但收藏请求被抖音拦截（HTTP 403）；"
+            "当前网页接口校验已变化，不是扫码或验证码失败。"
             if self.status == "failed"
             else "正在完成抖音验证。"
         )
@@ -214,7 +218,10 @@ class _ObservableFailedLogin:
             self.status = "validating"
             return self._payload("已取得登录凭据，正在验证收藏访问。")
         self.status = "failed"
-        return self._payload("已取得登录凭据，但收藏接口暂不可用。")
+        return self._payload(
+            "登录凭据已取得，但收藏请求被抖音拦截（HTTP 403）；"
+            "当前网页接口校验已变化，不是扫码或验证码失败。"
+        )
 
     def cancel_session(self, session_id: str) -> dict[str, object]:
         assert session_id == self.session_id
@@ -369,15 +376,20 @@ def test_douyin_login_failure_reason_survives_refresh_in_real_edge(
             _open_view(page, "sources")
             page.locator("#connect-douyin").click()
             expect(page.locator("#douyin-login-message")).to_have_text(
-                "已取得登录凭据，但收藏接口暂不可用。",
+                "登录凭据已取得，但收藏请求被抖音拦截（HTTP 403）；"
+                "当前网页接口校验已变化，不是扫码或验证码失败。",
                 timeout=6_000,
             )
+            expect(page.locator("#douyin-connection-state")).to_have_text("接口变化")
+            expect(page.locator("#connect-douyin")).to_be_disabled()
+            expect(page.locator("#connect-douyin")).to_have_text("暂不需要重新扫码")
 
             page.reload()
             _open_view(page, "sources")
-            expect(page.locator("#douyin-connection-state")).to_have_text("需重连")
+            expect(page.locator("#douyin-connection-state")).to_have_text("接口变化")
             expect(page.locator("#douyin-login-message")).to_have_text(
-                "已取得登录凭据，但收藏接口暂不可用。"
+                "登录凭据已取得，但收藏请求被抖音拦截（HTTP 403）；"
+                "当前网页接口校验已变化，不是扫码或验证码失败。"
             )
             assert console_issues == []
             browser.close()

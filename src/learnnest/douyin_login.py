@@ -26,6 +26,7 @@ from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import (
     DouyinAuthenticationError,
     DouyinHttpTransport,
+    douyin_authentication_message,
 )
 
 _DOUYIN_HOME_URL = "https://www.douyin.com/"
@@ -93,6 +94,7 @@ class _LoginSession:
     qr_png: bytes | None = None
     cookie: SecretStr | None = field(default=None, repr=False)
     error: str | None = field(default=None, repr=False)
+    failure_kind: str | None = field(default=None, repr=False)
     generation: int = field(default=0, repr=False)
     worker: threading.Thread | None = field(default=None, repr=False)
     stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -189,6 +191,7 @@ class DouyinLoginSessionManager:
             session.expires_at = None
             session.qr_png = None
             session.error = None
+            session.failure_kind = None
             session.startup_deadline = None
 
         self._join_worker(old_worker)
@@ -218,6 +221,7 @@ class DouyinLoginSessionManager:
             session.expires_at = None
             session.startup_deadline = None
             session.error = None
+            session.failure_kind = None
             session.status = "cancelled"
             if self._current_session_id == session_id:
                 self._current_session_id = None
@@ -295,8 +299,13 @@ class DouyinLoginSessionManager:
         try:
             smoke_payload = self._favorites_smoke(cookie)
             _validate_favorites_smoke(smoke_payload)
-        except DouyinAuthenticationError:
-            _LOGGER.warning("douyin login outcome=persisted_cookie_rejected")
+        except DouyinAuthenticationError as error:
+            _LOGGER.warning(
+                "douyin login outcome=persisted_cookie_rejected "
+                "reason=%s status_code=%s",
+                error.reason,
+                error.status_code if error.status_code is not None else "unknown",
+            )
             self._clear_persisted_cookie()
             return
         except Exception as error:
@@ -356,9 +365,19 @@ class DouyinLoginSessionManager:
         except _LoginStartupTimeout:
             _LOGGER.warning("douyin login outcome=startup_timeout")
             self._mark_failed(session, generation, _SAFE_FAILURE)
-        except DouyinAuthenticationError:
-            _LOGGER.warning("douyin login outcome=favorites_authentication_rejected")
-            self._mark_failed(session, generation, _AUTHENTICATION_FAILURE)
+        except DouyinAuthenticationError as error:
+            _LOGGER.warning(
+                "douyin login outcome=favorites_authentication_rejected "
+                "reason=%s status_code=%s",
+                error.reason,
+                error.status_code if error.status_code is not None else "unknown",
+            )
+            self._mark_failed(
+                session,
+                generation,
+                douyin_authentication_message(error),
+                failure_kind=error.reason,
+            )
         except DouyinLoginError as error:
             _LOGGER.warning(
                 "douyin login outcome=safe_failure exception_type=%s",
@@ -434,6 +453,7 @@ class DouyinLoginSessionManager:
                     session.qr_png = None
                     session.startup_deadline = None
                     session.error = None
+                    session.failure_kind = None
 
             while True:
                 self._ensure_current(session, generation, stop_event)
@@ -483,6 +503,7 @@ class DouyinLoginSessionManager:
                         session.status = "validating"
                         session.expires_at = None
                         session.error = None
+                        session.failure_kind = None
                     smoke_payload = self._favorites_smoke(cookie_secret)
                     _validate_favorites_smoke(smoke_payload)
                     if self._cookie_store is not None:
@@ -689,9 +710,15 @@ class DouyinLoginSessionManager:
             session.qr_png = None
             session.cookie = None
             session.error = session.error or _EXPIRED_FAILURE
+            session.failure_kind = None
 
     def _mark_failed(
-        self, session: _LoginSession, generation: int, message: str
+        self,
+        session: _LoginSession,
+        generation: int,
+        message: str,
+        *,
+        failure_kind: str | None = None,
     ) -> None:
         with self._lock:
             if not self._is_current_locked(session, generation):
@@ -702,12 +729,13 @@ class DouyinLoginSessionManager:
             session.cookie = None
             session.startup_deadline = None
             session.error = message
+            session.failure_kind = failure_kind
 
     def _public_payload_locked(self, session: _LoginSession) -> dict[str, Any]:
         remaining = 0
         if session.expires_at is not None:
             remaining = max(0, math.ceil(session.expires_at - time.monotonic()))
-        return {
+        payload = {
             "session_id": session.session_id,
             "status": session.status,
             "expires_in": remaining,
@@ -715,6 +743,9 @@ class DouyinLoginSessionManager:
             "message": session.error
             or _STATUS_MESSAGES.get(session.status, _SAFE_FAILURE),
         }
+        if session.failure_kind is not None:
+            payload["failure_kind"] = session.failure_kind
+        return payload
 
     def _require_session_locked(self, session_id: str) -> _LoginSession:
         if not isinstance(session_id, str) or not session_id:
@@ -762,7 +793,11 @@ def _validate_favorites_smoke(payload: object) -> None:
         raise DouyinLoginError("已取得登录凭据，但收藏接口返回了无法识别的结果。")
     status = payload.get("status_code")
     if str(status) in _AUTH_STATUS_CODES:
-        raise DouyinAuthenticationError("Douyin authentication failed")
+        raise DouyinAuthenticationError(
+            "Douyin authentication failed",
+            reason="business_rejected",
+            status_code=str(status),
+        )
     if status != 0:
         raise DouyinLoginError("已取得登录凭据，但收藏接口校验未通过。")
     items = payload.get("aweme_list")

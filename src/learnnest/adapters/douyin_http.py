@@ -13,7 +13,7 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from json import JSONDecodeError
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
@@ -27,6 +27,7 @@ _DETAIL_PATH = "/aweme/v1/web/aweme/detail/"
 _FOLDERS_PATH = "/aweme/v1/web/collects/list/"
 _FOLDER_ITEMS_PATH = "/aweme/v1/web/collects/video/list/"
 _DEFAULT_WEB_AID = "6383"
+_DEFAULT_WEB_CHANNEL = "channel_pc_web"
 _UNSIGNED_BASELINE_PATHS = frozenset({_VIDEO_FAVORITES_PATH, _DETAIL_PATH})
 _DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -37,6 +38,34 @@ _DEFAULT_USER_AGENT = (
 
 class DouyinAuthenticationError(DouyinAdapterError):
     """The runtime CookieJar is no longer accepted by Douyin."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: Literal[
+            "credentials_rejected", "request_rejected", "business_rejected"
+        ] = "credentials_rejected",
+        status_code: int | str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.status_code = status_code
+
+
+def douyin_authentication_message(error: DouyinAuthenticationError) -> str:
+    """Project one safe, actionable authentication/request rejection reason."""
+    status = error.status_code
+    if error.reason == "request_rejected" and status is not None:
+        return (
+            f"登录凭据已取得，但收藏请求被抖音拦截（HTTP {status}）；"
+            "当前网页接口校验已变化，不是扫码或验证码失败。"
+        )
+    if error.reason == "business_rejected" and status is not None:
+        return f"登录凭据已取得，但收藏接口返回登录失效（状态码 {status}）。"
+    if error.reason == "credentials_rejected" and status is not None:
+        return f"登录凭据已取得，但收藏接口拒绝了该登录（HTTP {status}）。"
+    return "已取得登录凭据，但抖音未接受本次登录。"
 
 
 @dataclass(frozen=True)
@@ -128,7 +157,12 @@ class DouyinHttpTransport:
         return self._request(
             "POST",
             _VIDEO_FAVORITES_PATH,
-            params={"aid": _DEFAULT_WEB_AID},
+            params={
+                "device_platform": "webapp",
+                "aid": _DEFAULT_WEB_AID,
+                "channel": _DEFAULT_WEB_CHANNEL,
+                "publish_video_strategy_type": "2",
+            },
             body={"count": str(count), "cursor": str(cursor)},
         )
 
@@ -227,22 +261,18 @@ class DouyinHttpTransport:
             with self.opener(request, timeout=self.timeout) as response:
                 status = getattr(response, "status", None)
                 if status is not None and not 200 <= int(status) < 300:
-                    error_type = (
-                        DouyinAuthenticationError
-                        if int(status) in {401, 403}
-                        else DouyinAdapterError
+                    if int(status) in {401, 403}:
+                        raise _http_authentication_error(int(status))
+                    raise DouyinAdapterError(
+                        f"Douyin API request returned HTTP {int(status)}"
                     )
-                    raise error_type(f"Douyin API request returned HTTP {int(status)}")
                 raw = response.read()
         except DouyinAdapterError:
             raise
         except HTTPError as error:
-            error_type = (
-                DouyinAuthenticationError
-                if error.code in {401, 403}
-                else DouyinAdapterError
-            )
-            raise error_type(
+            if error.code in {401, 403}:
+                raise _http_authentication_error(error.code) from error
+            raise DouyinAdapterError(
                 f"Douyin API request returned HTTP {error.code}"
             ) from error
         except (OSError, URLError) as error:
@@ -267,3 +297,12 @@ def _validate_page(*, cursor: int, count: int) -> None:
         raise ValueError("Douyin cursor must not be negative")
     if count < 1:
         raise ValueError("Douyin page count must be positive")
+
+
+def _http_authentication_error(status_code: int) -> DouyinAuthenticationError:
+    reason = "request_rejected" if status_code == 403 else "credentials_rejected"
+    return DouyinAuthenticationError(
+        f"Douyin API request returned HTTP {status_code}",
+        reason=reason,
+        status_code=status_code,
+    )

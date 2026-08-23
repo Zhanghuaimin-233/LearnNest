@@ -724,10 +724,14 @@ function setLoginCountdown(seconds) {
 
 function showLoginState(state) {
   douyinLoginStatus = state.status;
-  loginState.textContent = loginLabel[state.status] || "需重连";
+  const requestContractBlocked = state.failure_kind === "request_rejected";
+  loginState.textContent = requestContractBlocked ? "接口变化" : (loginLabel[state.status] || "需重连");
   loginState.className = `status-pill ${state.status}`;
   loginPanel.hidden = false;
-  connectDouyinButton.textContent = state.status === "connected" ? "重新验证" : "打开抖音验证窗口";
+  connectDouyinButton.disabled = requestContractBlocked;
+  connectDouyinButton.textContent = requestContractBlocked
+    ? "暂不需要重新扫码"
+    : (state.status === "connected" ? "重新验证" : "打开抖音验证窗口");
   const reconnect = ["expired", "failed", "cancelled"].includes(state.status);
   if (state.status === "connected") {
     loginMessage.textContent = "官方短信与扫码验证已完成，可以同步收藏。";

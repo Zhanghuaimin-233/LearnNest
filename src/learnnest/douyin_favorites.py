@@ -131,8 +131,11 @@ class DouyinFavoritesStore:
         try:
             transport = self._transport_factory(cookie)
             raw_items = self._collect_pages(transport)
-        except DouyinAuthenticationError:
-            if on_authentication_failure is not None:
+        except DouyinAuthenticationError as error:
+            if (
+                error.reason != "request_rejected"
+                and on_authentication_failure is not None
+            ):
                 on_authentication_failure()
             raise
         except DouyinAdapterError as error:
@@ -327,7 +330,11 @@ def _validate_status(payload: Mapping[str, Any]) -> None:
     if status == 0 and not isinstance(status, bool):
         return
     if str(status) in {"401", "403", "-1", "1001", "1002"}:
-        raise DouyinAuthenticationError("Douyin authentication failed")
+        raise DouyinAuthenticationError(
+            "Douyin authentication failed",
+            reason="business_rejected",
+            status_code=str(status),
+        )
     raise DouyinFavoritesError("抖音收藏响应格式无效。")
 
 

@@ -1660,6 +1660,10 @@ def test_douyin_webui_keeps_login_and_favorite_vocabulary_human_facing(
     assert 'state.status === "disconnected"' in script
     assert 'api("/api/douyin/login/browser"' in script
     assert 'api("/api/douyin/login/current"' in script
+    assert "let syncFavoritesAfterLogin = false;" in script
+    assert "let favoriteStatusProtected = false;" in script
+    assert 'if (state.status === "connected" && syncFavoritesAfterLogin)' in script
+    assert "if (!favoriteStatusProtected)" in script
     assert 'type="tel"' not in page
 
 

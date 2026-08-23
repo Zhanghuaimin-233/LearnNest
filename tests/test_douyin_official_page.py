@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from learnnest.adapters.douyin_http import DouyinAuthenticationError
 from learnnest.adapters.douyin_official_page import (
+    DouyinOfficialPageError,
     DouyinOfficialPageTransport,
     collect_official_favorites,
 )
@@ -124,6 +125,32 @@ def test_official_page_first_page_mode_is_a_bounded_login_smoke() -> None:
     assert page.batch_index == 1
 
 
+def test_official_page_retries_scroll_until_the_next_page_responds() -> None:
+    page = FakePage(
+        [
+            [FakeResponse(_payload("101", cursor=10, has_more=True))],
+            [FakeResponse(_payload("102", cursor=20, has_more=False))],
+        ]
+    )
+
+    class DelayedMouse:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wheel(self, _x: int, _y: int) -> None:
+            self.calls += 1
+            if self.calls >= 2:
+                page.emit_next()
+
+    mouse = DelayedMouse()
+    page.mouse = mouse
+
+    result = collect_official_favorites(page, timeout_ms=1_000, max_scrolls=3)
+
+    assert [item["aweme_id"] for item in result["aweme_list"]] == ["101", "102"]
+    assert mouse.calls == 2
+
+
 def test_official_page_projects_http_403_without_response_body() -> None:
     class BodyMustNotBeRead(FakeResponse):
         def json(self) -> Mapping[str, Any]:
@@ -136,6 +163,15 @@ def test_official_page_projects_http_403_without_response_body() -> None:
 
     assert error.value.reason == "request_rejected"
     assert error.value.status_code == 403
+
+
+def test_official_page_distinguishes_stalled_pagination() -> None:
+    page = FakePage([[FakeResponse(_payload("101", cursor=10, has_more=True))]])
+
+    with pytest.raises(DouyinOfficialPageError) as error:
+        collect_official_favorites(page, timeout_ms=100, max_scrolls=1)
+
+    assert error.value.reason == "pagination_stalled"
 
 
 class FakeContext:
@@ -200,6 +236,7 @@ def test_official_transport_uses_isolated_headed_edge_and_closes_everything() ->
 
     assert result["aweme_list"][0]["aweme_id"] == "101"
     assert runtime.chromium.launches == [{"channel": "msedge", "headless": False}]
+    assert runtime.context.page.goto_calls[0][2] == 120_000
     assert runtime.context.cookies_added == [
         {
             "name": "sessionid",

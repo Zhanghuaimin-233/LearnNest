@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
@@ -24,10 +24,25 @@ _FAVORITES_URL = "https://www.douyin.com/user/self?showTab=favorite_collection"
 _FAVORITES_PATH = "/aweme/v1/web/aweme/listcollection/"
 _AUTH_STATUS_CODES = frozenset({"401", "403", "-1", "1001", "1002"})
 _DEFAULT_TIMEOUT_MS = 20_000
+_DEFAULT_SYNC_TIMEOUT_MS = 120_000
 _DEFAULT_MAX_SCROLLS = 60
 _SCROLL_DISTANCE = 6_000
 _POLL_INTERVAL_MS = 100
+_SCROLL_RETRY_MS = 500
 _LOGGER = logging.getLogger(__name__)
+
+
+class DouyinOfficialPageError(DouyinAdapterError):
+    """A safe, structured failure of official-page response collection."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: Literal["no_response", "pagination_stalled"],
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class DouyinOfficialPageTransport:
@@ -38,7 +53,7 @@ class DouyinOfficialPageTransport:
         cookie: SecretStr,
         *,
         playwright_factory: Callable[[], Any] | None = None,
-        timeout_ms: int = _DEFAULT_TIMEOUT_MS,
+        timeout_ms: int = _DEFAULT_SYNC_TIMEOUT_MS,
         max_scrolls: int = _DEFAULT_MAX_SCROLLS,
     ) -> None:
         if not cookie.get_secret_value().strip():
@@ -174,6 +189,8 @@ def collect_official_favorites(
     collected: list[Mapping[str, Any]] = []
     seen_ids: set[str] = set()
     scrolls = 0
+    awaiting_more = False
+    next_scroll_at = 0.0
     while time.monotonic() < deadline:
         if failures:
             raise failures[0]
@@ -203,18 +220,33 @@ def collect_official_favorites(
                     "has_more": False,
                     "aweme_list": collected,
                 }
+            awaiting_more = True
+            next_scroll_at = 0.0
+            continue
+        now = time.monotonic()
+        if awaiting_more and now >= next_scroll_at:
             if scrolls >= max_scrolls:
-                raise DouyinAdapterError(
-                    "Douyin official page did not finish loading favorites"
+                raise DouyinOfficialPageError(
+                    "Douyin official page did not finish loading favorites",
+                    reason="pagination_stalled",
                 )
             scrolls += 1
             page.mouse.wheel(0, _SCROLL_DISTANCE)
+            next_scroll_at = now + _SCROLL_RETRY_MS / 1000
             continue
         page.wait_for_timeout(_POLL_INTERVAL_MS)
 
     if failures:
         raise failures[0]
-    raise DouyinAdapterError("Douyin official page did not return favorites")
+    if awaiting_more:
+        raise DouyinOfficialPageError(
+            "Douyin official page did not finish loading favorites",
+            reason="pagination_stalled",
+        )
+    raise DouyinOfficialPageError(
+        "Douyin official page did not return favorites",
+        reason="no_response",
+    )
 
 
 def _validate_payload_status(payload: Mapping[str, Any]) -> None:

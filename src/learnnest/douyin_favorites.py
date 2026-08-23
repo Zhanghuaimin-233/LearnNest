@@ -20,7 +20,10 @@ from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import (
     DouyinAuthenticationError,
 )
-from learnnest.adapters.douyin_official_page import DouyinOfficialPageTransport
+from learnnest.adapters.douyin_official_page import (
+    DouyinOfficialPageError,
+    DouyinOfficialPageTransport,
+)
 
 _FAVORITES_DIRECTORY = Path(".learnnest") / "douyin"
 _FACTS_FILENAME = "favorites.json"
@@ -138,6 +141,16 @@ class DouyinFavoritesStore:
             ):
                 on_authentication_failure()
             raise
+        except DouyinOfficialPageError as error:
+            if error.reason == "pagination_stalled":
+                raise DouyinFavoritesError(
+                    "抖音官方页面已返回首批收藏，但继续加载下一批时没有响应；"
+                    "本次收藏未更新，请重试。"
+                ) from None
+            raise DouyinFavoritesError(
+                "抖音官方页面没有发起可验证的收藏请求；"
+                "本次收藏未更新，请重新连接或稍后重试。"
+            ) from None
         except DouyinAdapterError as error:
             if _is_authentication_error(error):
                 if on_authentication_failure is not None:

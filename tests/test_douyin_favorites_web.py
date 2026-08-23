@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import DouyinAuthenticationError
+from learnnest.adapters.douyin_official_page import DouyinOfficialPageError
 from learnnest.douyin_favorites import (
     DouyinFavoritesError,
     DouyinFavoritesStore,
@@ -291,6 +292,48 @@ def test_non_json_transport_failure_is_safe() -> None:
     )
     with pytest.raises(DouyinFavoritesError, match="官方页面没有返回可验证"):
         store.sync(SecretStr("COOKIE" + "_SENTINEL"))
+
+
+def test_official_page_pagination_stall_is_specific_and_keeps_snapshot(
+    tmp_path: Path,
+) -> None:
+    facts = tmp_path / ".learnnest" / "douyin" / "favorites.json"
+    facts.parent.mkdir(parents=True)
+    facts.write_text(
+        json.dumps(
+            {
+                "synced_at": "2026-08-11T00:00:00Z",
+                "items": [
+                    {
+                        "aweme_id": "1",
+                        "title": "旧收藏",
+                        "url": "https://www.douyin.com/video/1",
+                        "synced_at": "2026-08-11T00:00:00Z",
+                        "thumbnail_path": None,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class StalledTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            raise DouyinOfficialPageError(
+                "runtime detail must not escape",
+                reason="pagination_stalled",
+            )
+
+    store = DouyinFavoritesStore(
+        tmp_path,
+        transport_factory=lambda _cookie: StalledTransport(),
+    )
+
+    with pytest.raises(DouyinFavoritesError, match="已返回首批收藏"):
+        store.sync(SecretStr("cookie"))
+
+    assert store.read_snapshot().items[0].title == "旧收藏"
 
 
 def test_favorites_require_success_status_and_numeric_aweme_id(tmp_path: Path) -> None:

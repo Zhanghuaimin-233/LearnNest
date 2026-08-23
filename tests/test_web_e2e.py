@@ -16,12 +16,17 @@ from typing import Callable, Iterator
 import pytest
 import uvicorn
 from playwright.sync_api import Browser, Page, expect, sync_playwright
+from pydantic import SecretStr
 
 from learnnest.automation_coordinator import AutomationCoordinator
 from learnnest.automation_runner import AutomationProviders
 from learnnest.automation_runner import run_automation_tasks
 from learnnest.automation_store import load_intake, load_status, load_task_state
-from learnnest.douyin_favorites import DouyinFavorite, DouyinFavoritesSnapshot
+from learnnest.douyin_favorites import (
+    DouyinFavorite,
+    DouyinFavoritesError,
+    DouyinFavoritesSnapshot,
+)
 from learnnest.models import ContentPack, Evidence, StageStatus
 from learnnest.pipeline import PipelineError
 from learnnest.provider_profiles import load_settings
@@ -232,6 +237,34 @@ class _ObservableFailedLogin:
         return None
 
 
+class _ObservableConnectedLogin(_ObservableFailedLogin):
+    def get_session(self, session_id: str) -> dict[str, object]:
+        assert session_id == self.session_id
+        self.polls += 1
+        if self.polls == 1:
+            self.status = "validating"
+            return self._payload("已取得登录凭据，正在验证收藏访问。")
+        self.status = "connected"
+        return self._payload("登录凭据与收藏访问均已验证。")
+
+    def cookie_for(self, session_id: str) -> SecretStr:
+        assert session_id == self.session_id
+        return SecretStr("offline-cookie")
+
+
+class _StalledFavorites(_HistoricalFavorites):
+    def __init__(self) -> None:
+        self.sync_calls = 0
+
+    def sync(self, _cookie: SecretStr, **_kwargs: object) -> DouyinFavoritesSnapshot:
+        self.sync_calls += 1
+        time.sleep(2.5)
+        raise DouyinFavoritesError(
+            "抖音官方页面已返回首批收藏，但继续加载下一批时没有响应；"
+            "本次收藏未更新，请重试。"
+        )
+
+
 @dataclass
 class _LoopbackApp:
     url: str
@@ -257,6 +290,7 @@ def _start_loopback_server(
     run_tasks: Callable[..., object],
     clock: Callable[[], datetime] | None = None,
     douyin_login: object | None = None,
+    douyin_favorites: object | None = None,
 ) -> tuple[str, uvicorn.Server, threading.Thread]:
     coordinator = AutomationCoordinator(  # type: ignore[arg-type]
         root, run_tasks=run_tasks, clock=clock or (lambda: datetime.now(UTC))
@@ -268,7 +302,7 @@ def _start_loopback_server(
                 root,
                 coordinator=coordinator,
                 douyin_login=douyin_login,  # type: ignore[arg-type]
-                douyin_favorites=_HistoricalFavorites(),
+                douyin_favorites=douyin_favorites or _HistoricalFavorites(),  # type: ignore[arg-type]
             ),
             host="127.0.0.1",
             port=port,
@@ -395,6 +429,62 @@ def test_douyin_login_failure_reason_survives_refresh_in_real_edge(
                 "当前网页接口校验已变化，不是扫码或验证码失败。"
             )
             assert console_issues == []
+            browser.close()
+    finally:
+        _stop_loopback_server(server, thread)
+
+
+def test_douyin_login_auto_sync_keeps_the_specific_failure_visible_in_real_edge(
+    tmp_path: Path,
+) -> None:
+    login = _ObservableConnectedLogin()
+    favorites = _StalledFavorites()
+    url, server, thread = _start_loopback_server(
+        tmp_path,
+        lambda *_args, **_kwargs: [],
+        douyin_login=login,
+        douyin_favorites=favorites,
+    )
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(edge), headless=True
+            )
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            console_issues: list[str] = []
+            page.on(
+                "console",
+                lambda message: (
+                    console_issues.append(message.text)
+                    if message.type in {"error", "warning"}
+                    else None
+                ),
+            )
+            page.goto(url)
+            _open_view(page, "sources")
+            page.locator("#connect-douyin").click()
+
+            expect(page.locator("#favorites-status")).to_have_text(
+                "正在通过抖音官方页面同步收藏，请勿关闭临时窗口…",
+                timeout=6_000,
+            )
+            expected = (
+                "抖音官方页面已返回首批收藏，但继续加载下一批时没有响应；"
+                "本次收藏未更新，请重试。"
+            )
+            expect(page.locator("#favorites-status")).to_have_text(
+                expected,
+                timeout=6_000,
+            )
+            page.wait_for_timeout(2_500)
+            expect(page.locator("#favorites-status")).to_have_text(expected)
+            expect(page.locator("#douyin-login-message")).to_have_text(
+                "登录有效，但收藏同步未完成；具体原因见收藏状态。"
+            )
+            assert favorites.sync_calls == 1
+            assert console_issues
+            assert all("502" in issue for issue in console_issues)
             browser.close()
     finally:
         _stop_loopback_server(server, thread)

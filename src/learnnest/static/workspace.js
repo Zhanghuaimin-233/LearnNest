@@ -122,6 +122,8 @@ let douyinLoginStatus = null;
 let loginPollTimer = null;
 let loginCountdownTimer = null;
 let loginRefreshInFlight = false;
+let syncFavoritesAfterLogin = false;
+let favoriteStatusProtected = false;
 let selectedFavoriteIdsState = new Set();
 let suggestedProviderConnectionName = "";
 const dirtySettingsForms = new Set();
@@ -526,11 +528,11 @@ function renderFavorites(snapshot) {
   );
   if (!snapshot.items.length) {
     favoriteList.innerHTML = `<p class="empty">还没有同步的抖音收藏。</p>`;
-    favoriteStatus.textContent = "连接抖音后，收藏会出现在这里。";
+    if (!favoriteStatusProtected) favoriteStatus.textContent = "连接抖音后，收藏会出现在这里。";
     updateFavoriteSelection();
     return;
   }
-  favoriteStatus.textContent = `最近同步：${formatSyncTime(snapshot.synced_at)}`;
+  if (!favoriteStatusProtected) favoriteStatus.textContent = `最近同步：${formatSyncTime(snapshot.synced_at)}`;
   favoriteList.innerHTML = snapshot.items.map((item) => {
     const thumbnail = item.thumbnail_path
       ? `<img src="${thumbnailHref(item.thumbnail_path)}" alt="" loading="lazy" />`
@@ -780,6 +782,11 @@ async function pollDouyinLogin() {
   try {
     const state = await api(`/api/douyin/login/${encodeURIComponent(douyinSessionId)}`);
     showLoginState(state);
+    if (state.status === "connected" && syncFavoritesAfterLogin) {
+      syncFavoritesAfterLogin = false;
+      loginMessage.textContent = "登录验证完成，正在同步全部收藏。";
+      await syncFavorites({ automatic: true });
+    }
     scheduleLoginPoll();
   } catch (error) {
     showLoginFailure();
@@ -805,6 +812,8 @@ async function refreshDouyinQr() {
 async function connectDouyin() {
   stopLoginPolling();
   stopLoginCountdown();
+  syncFavoritesAfterLogin = true;
+  favoriteStatusProtected = false;
   if (douyinSessionId) {
     try { await api(`/api/douyin/login/${encodeURIComponent(douyinSessionId)}`, { method: "DELETE" }); } catch (_) { /* the old local session may already be gone */ }
   }
@@ -815,6 +824,7 @@ async function connectDouyin() {
     scheduleLoginPoll();
     say("抖音官方验证窗口已打开。");
   } catch (error) {
+    syncFavoritesAfterLogin = false;
     showLoginFailure();
     say(error.message);
   }
@@ -844,11 +854,13 @@ async function restoreDouyinLogin() {
   }
 }
 
-async function syncFavorites() {
+async function syncFavorites(options = {}) {
   if (!douyinSessionId || douyinLoginStatus !== "connected") {
     favoriteStatus.textContent = "请先在设置中连接抖音。";
     return;
   }
+  const automatic = options?.automatic === true;
+  favoriteStatusProtected = true;
   syncFavoritesButton.disabled = true;
   favoriteStatus.textContent = "正在通过抖音官方页面同步收藏，请勿关闭临时窗口…";
   try {
@@ -856,11 +868,14 @@ async function syncFavorites() {
       method: "POST",
       body: JSON.stringify({ session_id: douyinSessionId }),
     });
+    favoriteStatusProtected = false;
     renderFavorites(snapshot);
+    if (automatic) loginMessage.textContent = "登录和收藏同步均已完成。";
     say("收藏已同步。");
   } catch (error) {
     if (error.status === 401) showLoginFailure();
     favoriteStatus.textContent = error.message;
+    if (automatic) loginMessage.textContent = "登录有效，但收藏同步未完成；具体原因见收藏状态。";
   } finally {
     syncFavoritesButton.disabled = douyinLoginStatus !== "connected";
   }

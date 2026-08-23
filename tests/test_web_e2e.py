@@ -480,7 +480,7 @@ def test_douyin_login_auto_sync_keeps_the_specific_failure_visible_in_real_edge(
             page.wait_for_timeout(2_500)
             expect(page.locator("#favorites-status")).to_have_text(expected)
             expect(page.locator("#douyin-login-message")).to_have_text(
-                "登录有效，但收藏同步未完成；具体原因见收藏状态。"
+                f"登录有效，但收藏同步未完成：{expected}"
             )
             assert favorites.sync_calls == 1
             assert console_issues

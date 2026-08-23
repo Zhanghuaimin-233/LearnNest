@@ -875,7 +875,8 @@ async function syncFavorites(options = {}) {
   } catch (error) {
     if (error.status === 401) showLoginFailure();
     favoriteStatus.textContent = error.message;
-    if (automatic) loginMessage.textContent = "登录有效，但收藏同步未完成；具体原因见收藏状态。";
+    if (automatic) loginMessage.textContent = `登录有效，但收藏同步未完成：${error.message}`;
+    say(error.message);
   } finally {
     syncFavoritesButton.disabled = douyinLoginStatus !== "connected";
   }

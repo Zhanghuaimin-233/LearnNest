@@ -1664,6 +1664,8 @@ def test_douyin_webui_keeps_login_and_favorite_vocabulary_human_facing(
     assert "let favoriteStatusProtected = false;" in script
     assert 'if (state.status === "connected" && syncFavoritesAfterLogin)' in script
     assert "if (!favoriteStatusProtected)" in script
+    assert "登录有效，但收藏同步未完成：${error.message}" in script
+    assert "具体原因见收藏状态" not in script
     assert 'type="tel"' not in page
 
 

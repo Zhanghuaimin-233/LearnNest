@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 import pytest
+from pydantic import SecretStr
 from typer.testing import CliRunner
 
 import learnnest.cli as cli
@@ -37,6 +38,7 @@ from learnnest.automation_store import (
 from learnnest.models import ContentPack, Evidence, StageStatus, TaskRecord
 from learnnest.pipeline import PipelineError
 from learnnest.task_store import create_task, load_task, write_task_atomic
+from learnnest.task_control import load_task_control
 from learnnest.provider_profiles import (
     connect,
     freeze_role_bindings,
@@ -166,7 +168,7 @@ def _prepare_due_automation_retry(
     service.configure_automation(
         web_app.AutomationConfigureRequest(
             default_output=default_output,
-            check_interval_seconds=30,
+            check_interval_minutes=1,
             max_items_per_tick=1,
         )
     )
@@ -287,6 +289,44 @@ def test_web_app_lists_sanitized_tasks_and_serves_declared_artifacts(
         client.get(f"/api/tasks/{task.task_id}/artifacts/../../task.json").status_code
         == 404
     )
+
+
+def test_learning_api_pauses_and_resumes_without_advancing_task_facts(
+    tmp_path: Path,
+) -> None:
+    task_dir, task = _task(tmp_path)
+    client = _client(tmp_path)
+
+    paused = client.post(f"/api/learning/items/{task.task_id}/pause")
+
+    assert paused.status_code == 200
+    paused_item = paused.json()["item"]
+    assert {
+        key: paused_item[key]
+        for key in (
+            "state",
+            "action",
+            "action_kind",
+            "manually_paused",
+            "can_pause",
+        )
+    } == {
+        "state": "queued",
+        "action": "继续任务",
+        "action_kind": "resume_task",
+        "manually_paused": True,
+        "can_pause": False,
+    }
+    assert load_task(task_dir) == task
+    assert load_task_control(task_dir, task.task_id).manually_paused is True
+
+    resumed = client.post(f"/api/learning/items/{task.task_id}/resume")
+
+    assert resumed.status_code == 200
+    assert resumed.json()["item"]["manually_paused"] is False
+    assert resumed.json()["item"]["can_pause"] is True
+    assert load_task(task_dir) == task
+    assert load_task_control(task_dir, task.task_id).manually_paused is False
 
 
 def test_web_app_validates_source_without_returning_local_path(tmp_path: Path) -> None:
@@ -493,7 +533,7 @@ def test_web_app_restarts_attention_that_never_reached_a_provider(
     service.configure_automation(
         web_app.AutomationConfigureRequest(
             default_output="complete_note",
-            check_interval_seconds=30,
+            check_interval_minutes=1,
             max_items_per_tick=1,
         )
     )
@@ -554,7 +594,7 @@ def test_web_app_restarts_with_the_intake_frozen_output_not_the_new_default(
     service.configure_automation(
         web_app.AutomationConfigureRequest(
             default_output="complete_note",
-            check_interval_seconds=30,
+            check_interval_minutes=1,
             max_items_per_tick=1,
         )
     )
@@ -600,6 +640,28 @@ def test_learning_api_moves_one_task_to_the_internal_trash(tmp_path: Path) -> No
     assert other_dir.is_dir()
     assert list((tmp_path / ".learnnest" / "trash" / "tasks").glob("*/task/task.json"))
 
+    listing = _client(tmp_path).get("/api/learning/trash")
+    assert listing.status_code == 200
+    assert len(listing.json()["items"]) == 1
+    trashed = listing.json()["items"][0]
+    assert set(trashed) == {"bundle_id", "task_id", "title", "trashed_at"}
+    assert trashed["task_id"] == task.task_id
+    assert "private-media" not in listing.text
+
+    restored = _client(tmp_path).post(
+        f"/api/learning/trash/{trashed['bundle_id']}/restore"
+    )
+    assert restored.status_code == 200
+    assert restored.json() == {"status": "restored", "task_id": task.task_id}
+    assert task_dir.is_dir()
+    assert _client(tmp_path).get("/api/learning/trash").json() == {"items": []}
+    assert (
+        _client(tmp_path)
+        .post(f"/api/learning/trash/{trashed['bundle_id']}/restore")
+        .status_code
+        == 404
+    )
+
 
 def test_skipped_provider_stages_are_not_a_paid_execution_trace(tmp_path: Path) -> None:
     _task_dir, task = _task(tmp_path)
@@ -640,7 +702,7 @@ def test_web_app_explains_and_resumes_a_zero_call_budget_block(
     service.configure_automation(
         web_app.AutomationConfigureRequest(
             default_output="complete_note",
-            check_interval_seconds=30,
+            check_interval_minutes=1,
             max_items_per_tick=1,
         )
     )
@@ -828,7 +890,7 @@ def test_web_app_never_retries_an_unsafe_automation_fact(
     service.configure_automation(
         web_app.AutomationConfigureRequest(
             default_output="complete_note",
-            check_interval_seconds=30,
+            check_interval_minutes=1,
             max_items_per_tick=1,
         )
     )
@@ -1101,6 +1163,9 @@ def test_web_app_exposes_automation_as_read_only_status(tmp_path: Path) -> None:
     assert client.get("/api/automation/status").json() == {
         "configured": False,
         "enabled": False,
+        "paid_authorized": False,
+        "auto_new_favorites_enabled": False,
+        "auto_new_favorites_active": False,
     }
 
 
@@ -1117,7 +1182,7 @@ def test_web_app_configures_authorizes_and_disables_automation_without_calls(
         json={
             "default_output": "complete_note",
             "auto_organize_new_favorites": False,
-            "check_interval_seconds": 300,
+            "check_interval_minutes": 5,
             "max_items_per_tick": 1,
         },
     )
@@ -1128,13 +1193,34 @@ def test_web_app_configures_authorizes_and_disables_automation_without_calls(
 
     assert configured.status_code == 200
     assert configured.json()["enabled"] is False
+    assert configured.json()["paid_authorized"] is False
+    assert configured.json()["auto_new_favorites_enabled"] is False
+    assert configured.json()["auto_new_favorites_active"] is False
     assert configured.json()["default_output"] == "complete_note"
+    assert configured.json()["check_interval_minutes"] == 5
+    assert "check_interval_seconds" not in configured.json()
     assert authorized.json()["enabled"] is True
+    assert authorized.json()["paid_authorized"] is True
+    assert authorized.json()["auto_new_favorites_enabled"] is False
+    assert authorized.json()["auto_new_favorites_active"] is False
     assert disabled.json()["enabled"] is False
+    assert disabled.json()["paid_authorized"] is False
     assert status is not None
     assert status.policy.writer.settings_sha256 == expected_settings_sha256
     assert status.policy.reviewer.settings_sha256 == expected_settings_sha256
+    assert status.policy.check_interval_minutes == 5
     assert "fake-key" not in configured.text + authorized.text + disabled.text
+
+    legacy_seconds = client.post(
+        "/api/automation/configure",
+        json={
+            "default_output": "complete_note",
+            "auto_organize_new_favorites": False,
+            "check_interval_seconds": 300,
+            "max_items_per_tick": 1,
+        },
+    )
+    assert legacy_seconds.status_code == 422
 
 
 def test_web_storage_exposes_current_root_and_saves_the_next_launcher_root(
@@ -1198,7 +1284,7 @@ def test_web_automation_authorization_requires_explicit_paid_confirmation(
         json={
             "default_output": "complete_note",
             "auto_organize_new_favorites": False,
-            "check_interval_seconds": 300,
+            "check_interval_minutes": 5,
             "max_items_per_tick": 1,
         },
     )
@@ -1220,7 +1306,7 @@ def test_web_automation_authorization_refreshes_unchanged_note_identity_after_au
         json={
             "default_output": "complete_note_with_audio",
             "auto_organize_new_favorites": False,
-            "check_interval_seconds": 300,
+            "check_interval_minutes": 5,
             "max_items_per_tick": 1,
         },
     )
@@ -1294,15 +1380,46 @@ def test_selected_douyin_favorites_use_the_existing_source_job_path(
         encoding="utf-8",
     )
     calls: list[str] = []
+    downloader_marker = object()
 
-    def fake_process_source(source: Any, root: Path, profile: str) -> TaskRecord:
+    class ConnectedLogin:
+        def current_session(self) -> dict[str, Any]:
+            return {"session_id": "connected-session", "status": "connected"}
+
+        def cookie_for(self, session_id: str) -> SecretStr:
+            assert session_id == "connected-session"
+            return SecretStr("sessionid=runtime-only")
+
+        def shutdown(self) -> None:
+            pass
+
+    def fake_process_source(
+        source: Any,
+        root: Path,
+        profile: str,
+        *,
+        downloader: object | None = None,
+    ) -> TaskRecord:
         calls.append(source.input)
         assert root == tmp_path.resolve()
         assert profile == "evidence"
+        assert downloader is downloader_marker
         return task
 
     monkeypatch.setattr(web_app, "process_source", fake_process_source)
-    client = _client(tmp_path)
+    monkeypatch.setattr(
+        web_app,
+        "YtDlpDownloader",
+        lambda *, cookie: (
+            downloader_marker
+            if cookie.get_secret_value() == "sessionid=runtime-only"
+            else None
+        ),
+        raising=False,
+    )
+    client = TestClient(
+        web_app.create_web_app(tmp_path, douyin_login=ConnectedLogin())  # type: ignore[arg-type]
+    )
 
     response = client.post("/api/douyin/favorites/select", json={"aweme_ids": ["123"]})
     job = _wait_for_job(client, response.json()["jobs"][0]["job_id"])
@@ -1504,6 +1621,39 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
     assert '<option value="local-asr">' in page
     assert '<option value="local-ocr">' in page
     assert 'id="confirm-paid"' not in page
+    assert "付费整理许可" in page
+    assert "--workspace-max: 2048px" in stylesheet
+    assert ".app-header-inner { max-width: var(--workspace-max)" in stylesheet
+    assert ".page-header { max-width: var(--workspace-max)" in stylesheet
+    assert ".task-page-header { max-width: var(--workspace-max); }" in stylesheet
+    assert ".task-console { max-width: var(--workspace-max)" in stylesheet
+    assert ".source-workspace { max-width: var(--workspace-max)" in stylesheet
+    assert ".settings-workspace { max-width: var(--workspace-max)" in stylesheet
+    assert 'id="favorite-folders"' in page
+    assert 'class="favorite-browser"' in page
+    assert ".favorite-browser {" in stylesheet
+    assert "grid-template-columns: 210px minmax(0, 1fr)" in stylesheet
+    assert "repeat(auto-fill, minmax(210px, 1fr))" in stylesheet
+    assert "activeFavoriteFolderId" in script
+    assert "data-favorite-folder" in script
+    assert "自动加入新收藏" in page
+    assert "不会自动加入抖音新收藏" in page
+    assert "检查间隔（分钟）" in page
+    assert (
+        'name="check_interval_minutes" type="number" min="1" max="60" value="30"'
+        in page
+    )
+    assert "检查间隔（秒）" not in page
+    assert (
+        "automationForm.elements.check_interval_minutes.value = "
+        "status.check_interval_minutes" in script
+    )
+    assert (
+        'check_interval_minutes: Number(form.get("check_interval_minutes"))' in script
+    )
+    assert "check_interval_seconds" not in script
+    assert "自动执行权限" not in page
+    assert "开启自动整理？" not in page
     assert "mobile-primary-action" not in page
     assert "学习库" not in page
     assert "function showView" in script
@@ -1568,9 +1718,11 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
         "open_note",
         "open_settings",
         "open_automation",
+        "open_sources",
         "open_single_video",
         "start_automation",
         "retry_automation",
+        "resume_task",
     ):
         assert f'action === "{action_kind}"' in script
     assert 'action !== "continue"' in script
@@ -1582,9 +1734,27 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
     assert ".detail-heading > div { min-width: 0; }" in stylesheet
     assert "overflow-wrap: anywhere" in stylesheet
     assert 'data-delete-item-ref="${escapeHtml(item.item_ref)}"' in script
+    assert 'data-pause-item-ref="${escapeHtml(item.item_ref)}"' in script
+    assert 'if (item.manually_paused) return "已暂停"' in script
+    assert 'if (item.failure_reason) return "处理已停止"' in script
+    assert "失败阶段" in script
+    assert "/api/learning/items/${encodeURIComponent(itemRef)}/pause" in script
+    assert "/api/learning/items/${encodeURIComponent(itemRef)}/resume" in script
+    assert "/api/learning/trash" in script
+    assert "/restore" in script
     assert 'method: "DELETE"' in script
     assert "移入回收区" in client.get("/").text
+    assert 'data-filter="paused"' in client.get("/").text
+    assert 'data-filter="trash"' in client.get("/").text
+    assert 'id="trash-list"' in client.get("/").text
+    assert 'if (item.manually_paused) return "paused";' in script
+    assert "counts.paused" in script
+    assert "项已暂停" in script
+    assert 'item.state === "organizing" && !item.manually_paused' in script
     assert "confirmPaid.checked = true" not in script
+    assert "status.paid_authorized" in script
+    assert "付费整理许可已开启" in script
+    assert "自动加入新收藏" in script
     action_block = script.split("async function actOnItem", maxsplit=1)[1].split(
         "uploadForm.addEventListener", maxsplit=1
     )[0]
@@ -1629,7 +1799,8 @@ def test_douyin_webui_keeps_login_and_favorite_vocabulary_human_facing(
 
     for visible_text in (
         "连接抖音",
-        "默认视频收藏",
+        "抖音收藏",
+        "默认收藏夹",
         "手动同步",
         "打开抖音验证窗口",
         "Windows 当前用户加密",

@@ -10,6 +10,7 @@ import pytest
 import learnnest.learning_workspace as learning_workspace
 import learnnest.web_app as web_app
 from learnnest.execution import RecoveryPlan
+from learnnest.execution_models import FailureInfo, TaskAttempt
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.automation_models import (
     AutomationIntake,
@@ -26,7 +27,7 @@ from learnnest.automation_store import (
     save_policy,
     save_task_state,
 )
-from learnnest.locks import LockUnavailable
+from learnnest.locks import LockUnavailable, task_lock
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.provider_profiles import (
     connect,
@@ -35,7 +36,8 @@ from learnnest.provider_profiles import (
     set_role_binding,
     settings_sha256,
 )
-from learnnest.task_store import create_task, write_task_atomic
+from learnnest.task_store import create_task, load_task, write_task_atomic
+from learnnest.task_control import load_task_control
 
 
 def _task(
@@ -120,8 +122,8 @@ def _configured_root(root: Path, *, authorized: bool) -> None:
         (
             "authorization",
             "waiting_authorization",
-            "请确认授权后开始整理。",
-            "确认授权",
+            "请开启付费整理许可后开始整理。",
+            "开启付费许可",
             "open_automation",
         ),
         ("queued", "queued", "等待整理。", None, None),
@@ -257,7 +259,8 @@ def test_snapshot_gives_an_explicit_reprocess_step_for_an_unrecoverable_old_task
     )
     _configured_root(tmp_path, authorized=True)
 
-    item = learning_workspace.LearningWorkspace(tmp_path).snapshot().processing[0]
+    workspace = learning_workspace.LearningWorkspace(tmp_path)
+    item = workspace.snapshot().processing[0]
 
     assert item.state == "needs_action"
     assert item.message == (
@@ -265,6 +268,15 @@ def test_snapshot_gives_an_explicit_reprocess_step_for_an_unrecoverable_old_task
     )
     assert item.action == "重新选择原视频"
     assert item.action_kind == "open_single_video"
+    assert item.can_pause is True
+
+    paused = workspace.pause_item(task.task_id)
+    assert paused.manually_paused is True
+    assert paused.action_kind == "resume_task"
+
+    resumed = workspace.resume_item(task.task_id)
+    assert resumed.manually_paused is False
+    assert resumed.action_kind == "open_single_video"
 
 
 def test_snapshot_explains_and_can_restart_a_legacy_pre_provider_stop(
@@ -321,6 +333,7 @@ def test_snapshot_explains_and_can_restart_a_legacy_pre_provider_stop(
         "生成笔记前的连接校验失败：任务使用的是旧授权记录，缺少当前版本要求的"
         "校验标记。系统没有发起模型调用。"
     )
+    assert item.failure_stage == "生成笔记前的连接校验"
     assert item.action == "重新开始整理"
     assert item.action_kind == "start_automation"
     assert payload["failure_reason"] == item.failure_reason
@@ -400,6 +413,107 @@ def test_snapshot_projects_existing_tasks_and_isolates_corrupt_records(
         .snapshot(snapshot.revision)
         .unchanged
     )
+
+
+def test_snapshot_projects_failed_stage_reason_and_exact_next_step(
+    tmp_path: Path,
+) -> None:
+    task_dir, task = _task(
+        tmp_path,
+        "failed-url",
+        stages={"source": StageStatus.FAILED},
+        error_summary=("URL 下载失败；可手动下载视频后按本地文件处理 (DownloadError)"),
+    )
+    failed_at = datetime.now(UTC)
+    failed = task.model_copy(
+        update={
+            "attempts": [
+                TaskAttempt(
+                    attempt_id="failed-url-1",
+                    ordinal=1,
+                    reason="initial",
+                    from_stage="source",
+                    status="failed",
+                    started_at=failed_at,
+                    finished_at=failed_at,
+                    failed_stage="source",
+                    executed_stages=["source"],
+                    failure=FailureInfo(
+                        code="manual_error",
+                        category="pipeline",
+                        disposition="manual",
+                        safe_summary=(
+                            "URL 下载失败；可手动下载视频后按本地文件处理 "
+                            "(DownloadError)"
+                        ),
+                    ),
+                )
+            ]
+        }
+    )
+    write_task_atomic(task_dir, failed)
+
+    item = learning_workspace.LearningWorkspace(tmp_path).snapshot().processing[0]
+
+    assert item.state == "needs_action"
+    assert item.failure_stage_code == "source"
+    assert item.failure_stage == "获取内容"
+    assert item.failure_reason == "来源链接的视频下载失败。"
+    assert item.message == "来源链接没有成功下载；请选择本地视频重新处理。"
+    assert item.action == "选择本地视频"
+    assert item.action_kind == "open_single_video"
+
+
+def test_snapshot_routes_douyin_login_download_failure_back_to_sources(
+    tmp_path: Path,
+) -> None:
+    task_dir, task = _task(
+        tmp_path,
+        "failed-douyin-login",
+        stages={"source": StageStatus.FAILED},
+        error_summary=("抖音下载需要有效登录状态；请在来源页确认已连接抖音后重试。"),
+    )
+    failed_at = datetime.now(UTC)
+    write_task_atomic(
+        task_dir,
+        task.model_copy(
+            update={
+                "attempts": [
+                    TaskAttempt(
+                        attempt_id="failed-douyin-login-1",
+                        ordinal=1,
+                        reason="initial",
+                        from_stage="source",
+                        status="failed",
+                        started_at=failed_at,
+                        finished_at=failed_at,
+                        failed_stage="source",
+                        executed_stages=["source"],
+                        failure=FailureInfo(
+                            code="manual_error",
+                            category="configuration",
+                            disposition="manual",
+                            safe_summary=(
+                                "抖音下载需要有效登录状态；"
+                                "请在来源页确认已连接抖音后重试。"
+                            ),
+                        ),
+                    )
+                ]
+            }
+        ),
+    )
+
+    item = learning_workspace.LearningWorkspace(tmp_path).snapshot().processing[0]
+
+    assert item.failure_stage == "获取内容"
+    assert (
+        item.failure_reason
+        == "抖音下载需要有效登录状态；请在来源页确认已连接抖音后重试。"
+    )
+    assert item.message == "内容尚未获取；请前往来源页确认抖音连接后重试。"
+    assert item.action == "前往来源"
+    assert item.action_kind == "open_sources"
 
 
 def test_snapshot_builds_revision_and_task_projection_from_one_read(
@@ -614,6 +728,68 @@ def test_continue_item_reports_lock_without_internal_details(
 
     assert "C:/private" not in str(error.value)
     assert "正在处理中" in str(error.value)
+
+
+def test_pause_and_resume_persist_only_the_manual_control_fact(tmp_path: Path) -> None:
+    task_dir, task = _task(
+        tmp_path,
+        "pause-item",
+        stages={"content_pack": StageStatus.COMPLETED},
+        artifacts={"content_pack": ["content_pack.json"]},
+    )
+    create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=task.task_id,
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime.now(UTC),
+        ),
+    )
+    workspace = learning_workspace.LearningWorkspace(tmp_path)
+
+    paused = workspace.pause_item(task.task_id)
+
+    persisted = load_task(task_dir)
+    assert persisted == task
+    assert load_task_control(task_dir, task.task_id).manually_paused is True
+    assert paused.state == "waiting_setup"
+    assert paused.message == "任务已暂停；已经完成的内容会保留。"
+    assert paused.action == "继续任务"
+    assert paused.action_kind == "resume_task"
+    assert paused.manually_paused is True
+    assert paused.can_pause is False
+    assert load_intake(tmp_path, task.task_id).status == "pending"
+
+    resumed = workspace.resume_item(task.task_id)
+
+    assert load_task(task_dir) == task
+    assert load_task_control(task_dir, task.task_id).manually_paused is False
+    assert resumed.state == "waiting_setup"
+    assert resumed.manually_paused is False
+    assert resumed.can_pause is True
+    assert load_intake(tmp_path, task.task_id).status == "pending"
+
+
+def test_terminal_task_cannot_be_paused(tmp_path: Path) -> None:
+    _task_dir, task = _published_task(tmp_path, "terminal-item")
+
+    with pytest.raises(learning_workspace.LearningWorkspaceError, match="已经完成"):
+        learning_workspace.LearningWorkspace(tmp_path).pause_item(task.task_id)
+
+
+def test_pause_can_be_saved_while_the_task_execution_lock_is_held(
+    tmp_path: Path,
+) -> None:
+    task_dir, task = _task(tmp_path, "running-pause-item")
+    workspace = learning_workspace.LearningWorkspace(tmp_path)
+
+    with task_lock(tmp_path, task.task_id, timeout=0):
+        paused = workspace.pause_item(task.task_id)
+
+    assert paused.manually_paused is True
+    assert load_task(task_dir) == task
+    assert load_task_control(task_dir, task.task_id).manually_paused is True
 
 
 def test_note_requires_completed_publish_and_declared_task_internal_markdown(

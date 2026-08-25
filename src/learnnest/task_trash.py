@@ -13,8 +13,9 @@ import uuid
 
 from learnnest.automation_models import AutomationTaskState
 from learnnest.automation_store import find_intake
-from learnnest.locks import LockUnavailable, task_lock
+from learnnest.locks import LockUnavailable, task_control_lock, task_lock
 from learnnest.models import StageStatus
+from learnnest.task_control import load_task_control
 from learnnest.task_store import (
     find_task_by_id,
     find_task_by_identities,
@@ -57,12 +58,21 @@ def trash_task(output_root: str | Path, task_id: str) -> TrashedTask:
     """Move one stopped task and its identity facts into an internal trash bundle."""
     root = Path(output_root).resolve()
     try:
-        with task_lock(root, task_id, timeout=0):
+        with (
+            task_lock(root, task_id, timeout=0),
+            task_control_lock(root, task_id, timeout=0),
+        ):
             found = find_task_by_id(root, task_id)
             if found is None:
                 raise KeyError(task_id)
             task_dir, task = found
-            _require_stopped_task(root, task_id, task)
+            control = load_task_control(task_dir, task_id)
+            _require_stopped_task(
+                root,
+                task_id,
+                task,
+                allow_interrupted_deterministic=control.manually_paused,
+            )
             targets = _trash_targets(root, task_dir, task_id)
             trash_path = _new_trash_path(root, task_id)
             _move_targets(root, trash_path, task_id, targets)
@@ -70,7 +80,7 @@ def trash_task(output_root: str | Path, task_id: str) -> TrashedTask:
     except KeyError:
         raise
     except LockUnavailable as error:
-        raise TaskTrashError("任务正在处理，暂时不能删除。") from error
+        raise TaskTrashError("当前步骤仍在完成，结束后可删除。") from error
     except TaskTrashError:
         raise
     except (OSError, ValueError) as error:
@@ -140,18 +150,25 @@ def purge_trashed_task(output_root: str | Path, bundle_id: str) -> str:
     return task_id
 
 
-def _require_stopped_task(root: Path, task_id: str, task: object) -> None:
+def _require_stopped_task(
+    root: Path,
+    task_id: str,
+    task: object,
+    *,
+    allow_interrupted_deterministic: bool = False,
+) -> None:
     stages = getattr(task, "stages", {})
-    if getattr(task, "active_attempt_id", None) is not None or any(
-        status is StageStatus.RUNNING for status in stages.values()
+    if not allow_interrupted_deterministic and (
+        getattr(task, "active_attempt_id", None) is not None
+        or any(status is StageStatus.RUNNING for status in stages.values())
     ):
-        raise TaskTrashError("任务正在处理，暂时不能删除。")
+        raise TaskTrashError("当前步骤仍在完成，结束后可删除。")
     try:
         intake = find_intake(root, task_id)
     except ValueError:
         intake = None
     if intake is not None and intake.status == "claimed":
-        raise TaskTrashError("任务正在处理，暂时不能删除。")
+        raise TaskTrashError("当前步骤仍在完成，结束后可删除。")
     state_dir = root / ".learnnest" / "automation" / "tasks" / task_id
     if state_dir.is_dir():
         for path in state_dir.glob("*.json"):
@@ -160,7 +177,7 @@ def _require_stopped_task(root: Path, task_id: str, task: object) -> None:
             except (OSError, ValueError):
                 continue
             if any(attempt.status == "running" for attempt in state.attempts):
-                raise TaskTrashError("任务正在处理，暂时不能删除。")
+                raise TaskTrashError("当前步骤仍在完成，结束后可删除。")
 
 
 def _trash_targets(root: Path, task_dir: Path, task_id: str) -> list[tuple[Path, Path]]:

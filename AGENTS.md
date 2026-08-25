@@ -54,7 +54,7 @@ LearnNest（语栖）是 Windows 上本地优先的个人学习产品，目标�
 - 输出根保存默认职责绑定；任务开始时冻结 binding 与 settings SHA，不提供任务级临时覆盖。
 - API Key 只以 Windows CurrentUser DPAPI 密文保存；设置、任务、日志和 API 不得保存或回显明文。
 - 设置更新先校验完整候选，再写 secret 和 settings；不兼容更新必须保持旧状态不变。
-- 自动工作流默认关闭，必须由用户显式开启。
+- 付费整理许可默认关闭，必须由用户显式确认；它与“自动加入新收藏”是两个独立状态。手动任务只要求有效付费许可，不能被自动来源开关阻塞。
 - 可配置重试 0–3 次，默认重试 1 次；只重试明确的临时错误。
 - synthetic、显式命令和 automation 共用付费准入；在构造 Provider 前先持久化 running 事实。
 - 全局及 note/podcast/TTS/ASR/OCR 五组预算都按冻结策略执行；running 和 unknown 继续计数。

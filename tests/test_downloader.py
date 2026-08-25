@@ -111,6 +111,35 @@ def test_ytdlp_downloader_returns_a_safe_local_fallback_error(tmp_path: Path) ->
     assert "private headers" not in message
 
 
+def test_ytdlp_downloader_explains_when_douyin_requires_fresh_cookies(
+    tmp_path: Path,
+) -> None:
+    from learnnest.downloader import DownloaderError, YtDlpDownloader
+
+    class FreshCookieYdl(FakeYdl):
+        def extract_info(self, url: str, *, download: bool) -> dict[str, object]:
+            del url, download
+            raise RuntimeError(
+                "ERROR: [Douyin] Fresh cookies (not necessarily logged in) are needed"
+            )
+
+    source = SourceItem(
+        input="https://www.douyin.com/video/101",
+        input_type="url",
+    )
+
+    with pytest.raises(DownloaderError) as captured:
+        YtDlpDownloader(ydl_factory=FreshCookieYdl).acquire(
+            source,
+            tmp_path,
+            source_fingerprint="a1b2c3d4",
+        )
+
+    assert str(captured.value) == (
+        "抖音下载需要有效登录状态；请在来源页确认已连接抖音后重试。"
+    )
+
+
 def test_ytdlp_downloader_rejects_local_source_items(tmp_path: Path) -> None:
     from learnnest.downloader import YtDlpDownloader
 

@@ -67,6 +67,13 @@ def task_lock(
     return _named_lock(output_root, "tasks", task_id, timeout=timeout)
 
 
+def task_control_lock(
+    output_root: str | Path, task_id: str, *, timeout: float = 0.0
+) -> Iterator[None]:
+    """Serialize manual controls independently from active task execution."""
+    return _named_lock(output_root, "task-controls", task_id, timeout=timeout)
+
+
 def identity_lock(
     output_root: str | Path, identity_key: str, *, timeout: float = 0.0
 ) -> Iterator[None]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 from yt_dlp import YoutubeDL
@@ -72,6 +73,10 @@ class YtDlpDownloader:
             media = _find_downloaded_media(downloads)
             subtitle = _find_downloaded_subtitle(downloads)
         except Exception as error:
+            if _douyin_requires_fresh_cookies(source.input, error):
+                raise DownloaderError(
+                    "抖音下载需要有效登录状态；请在来源页确认已连接抖音后重试。"
+                ) from error
             raise DownloaderError(
                 f"URL 下载失败；可手动下载视频后按本地文件处理 ({type(error).__name__})"
             ) from error
@@ -125,6 +130,13 @@ def _subtitle_priority(name: str) -> int:
 
 def _optional_text(value: object) -> str | None:
     return str(value).strip() if value is not None and str(value).strip() else None
+
+
+def _douyin_requires_fresh_cookies(source: str, error: Exception) -> bool:
+    host = (urlsplit(source).hostname or "").casefold()
+    return (host == "douyin.com" or host.endswith(".douyin.com")) and (
+        "fresh cookies" in str(error).casefold()
+    )
 
 
 class _SilentYtDlpLogger:

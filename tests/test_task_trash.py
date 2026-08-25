@@ -9,6 +9,7 @@ from learnnest.automation_models import AutomationIntake, AutomationTaskState
 from learnnest.automation_store import create_intake, save_task_state
 from learnnest.models import StageStatus
 from learnnest.task_store import create_task, find_task_by_id, write_task_atomic
+from learnnest.task_control import load_task_control, set_manual_pause
 from learnnest.task_trash import (
     TaskTrashError,
     list_trashed_tasks,
@@ -93,7 +94,41 @@ def test_trash_task_refuses_a_task_that_is_still_running(tmp_path: Path) -> None
     task_id = "20260814-running"
     task_dir = _task(tmp_path, task_id, running=True)
 
-    with pytest.raises(TaskTrashError, match="正在处理"):
+    with pytest.raises(TaskTrashError, match="当前步骤仍在完成"):
+        trash_task(tmp_path, task_id)
+
+    assert task_dir.is_dir()
+
+
+def test_paused_interrupted_task_can_move_to_trash(tmp_path: Path) -> None:
+    task_id = "20260814-paused-interrupted"
+    task_dir = _task(tmp_path, task_id, running=True)
+    set_manual_pause(tmp_path, task_dir, task_id, paused=True)
+
+    result = trash_task(tmp_path, task_id)
+
+    assert not task_dir.exists()
+    assert (
+        load_task_control(result.trash_path / "task", task_id).manually_paused is True
+    )
+
+
+def test_paused_claimed_task_still_cannot_move_to_trash(tmp_path: Path) -> None:
+    task_id = "20260814-paused-claimed"
+    task_dir = _task(tmp_path, task_id, running=True)
+    set_manual_pause(tmp_path, task_dir, task_id, paused=True)
+    create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=task_id,
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime.now(UTC),
+            status="claimed",
+        ),
+    )
+
+    with pytest.raises(TaskTrashError, match="当前步骤仍在完成"):
         trash_task(tmp_path, task_id)
 
     assert task_dir.is_dir()
@@ -102,7 +137,9 @@ def test_trash_task_refuses_a_task_that_is_still_running(tmp_path: Path) -> None
 def test_trashed_task_can_be_listed_restored_and_purged(tmp_path: Path) -> None:
     task_id = "20260814-restore1"
     task_dir = _task(tmp_path, task_id)
+    set_manual_pause(tmp_path, task_dir, task_id, paused=True)
     trashed = trash_task(tmp_path, task_id)
+    assert (trashed.trash_path / "task" / "task-control.json").is_file()
 
     listed = list_trashed_tasks(tmp_path)
 
@@ -112,6 +149,7 @@ def test_trashed_task_can_be_listed_restored_and_purged(tmp_path: Path) -> None:
     restored = restore_trashed_task(tmp_path, trashed.trash_path.name)
     assert restored.task_id == task_id
     assert task_dir.is_dir()
+    assert load_task_control(task_dir, task_id).manually_paused is True
     assert list_trashed_tasks(tmp_path) == ()
 
     trashed_again = trash_task(tmp_path, task_id)

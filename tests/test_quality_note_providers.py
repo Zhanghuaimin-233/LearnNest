@@ -106,6 +106,20 @@ def test_assisted_provider_requests_plain_markdown_without_structured_strategy()
     assert provider.endpoint_identity == "https://example.test/v1"
     assert all("response_format" not in request for request in calls.calls)
     assert all("tools" not in request for request in calls.calls)
+    writer_messages = calls.calls[0]["messages"]
+    reviewer_messages = calls.calls[1]["messages"]
+    assert isinstance(writer_messages, list)
+    assert isinstance(reviewer_messages, list)
+    writer_prompt = writer_messages[0]["content"]
+    reviewer_prompt = reviewer_messages[0]["content"]
+    assert "in Simplified Chinese" in writer_prompt
+    assert "title, headings, explanations, and summaries" in writer_prompt
+    assert "preserving code, API names, product names" in writer_prompt
+    assert "in Simplified Chinese only" in reviewer_prompt
+    assert "Rewrite any non-Chinese title, headings, explanations, or summaries" in (
+        reviewer_prompt
+    )
+    assert "preserving code, API names, product names" in reviewer_prompt
 
 
 def test_quality_provider_uses_one_bounded_call_per_explicit_role() -> None:

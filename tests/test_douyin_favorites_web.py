@@ -45,6 +45,44 @@ class FakeTransport:
         return self.pages[len(self.calls) - 1]
 
 
+class FakeFolderTransport(FakeTransport):
+    def __init__(self, pages: list[Mapping[str, Any]]) -> None:
+        super().__init__(pages)
+        self.folder_calls: list[tuple[int, int]] = []
+        self.folder_item_calls: list[tuple[str, int, int]] = []
+
+    def list_folders(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+        self.folder_calls.append((cursor, count))
+        return {
+            "status_code": 0,
+            "collects_list": [
+                {"collects_id_str": "10", "collects_name": "编程", "total_number": 2},
+                {"collects_id_str": "20", "collects_name": "设计", "total_number": 1},
+            ],
+            "cursor": 0,
+            "has_more": False,
+        }
+
+    def list_folder_items(
+        self,
+        folder_id: str,
+        *,
+        cursor: int,
+        count: int,
+    ) -> Mapping[str, Any]:
+        self.folder_item_calls.append((folder_id, cursor, count))
+        items = {
+            "10": [_item("1", "默认与编程"), _item("3", "只在编程")],
+            "20": [_item("3", "同时在设计")],
+        }
+        return {
+            "status_code": 0,
+            "aweme_list": items[folder_id],
+            "cursor": 0,
+            "has_more": False,
+        }
+
+
 class FakeResponse:
     status = 200
 
@@ -124,7 +162,7 @@ def _authorized_service(
         AutomationConfigureRequest(
             default_output="complete_note",
             auto_organize_new_favorites=auto,
-            check_interval_seconds=300,
+            check_interval_minutes=5,
             max_items_per_tick=1,
         )
     )
@@ -289,6 +327,7 @@ def test_syncs_paginated_favorites_dedupes_and_persists_local_thumbnails(
     assert "session-cookie" not in facts
     assert json.loads(facts)["items"][0].keys() == {
         "aweme_id",
+        "folder_ids",
         "title",
         "url",
         "synced_at",
@@ -301,6 +340,47 @@ def test_syncs_paginated_favorites_dedupes_and_persists_local_thumbnails(
             store.thumbnail_file(item.thumbnail_path).read_bytes()
             == expected_images[item.aweme_id]
         )
+
+
+def test_sync_projects_default_and_custom_folders_without_duplicate_cards(
+    tmp_path: Path,
+) -> None:
+    transport = FakeFolderTransport(
+        [
+            {
+                "status_code": 0,
+                "aweme_list": [_item("1", "默认与编程"), _item("2", "只在默认")],
+                "cursor": 0,
+                "has_more": False,
+            }
+        ]
+    )
+    store = _store(tmp_path, transport)
+
+    snapshot = store.sync(SecretStr("session-cookie"))
+
+    assert [
+        (folder.folder_id, folder.name, folder.item_count)
+        for folder in snapshot.folders
+    ] == [
+        ("default", "默认收藏夹", 2),
+        ("10", "编程", 2),
+        ("20", "设计", 1),
+    ]
+    assert [(item.aweme_id, item.folder_ids) for item in snapshot.items] == [
+        ("1", ("default", "10")),
+        ("2", ("default",)),
+        ("3", ("10", "20")),
+    ]
+    assert transport.folder_calls == [(0, 10)]
+    assert transport.folder_item_calls == [("10", 0, 10), ("20", 0, 10)]
+    facts = json.loads(store.facts_path.read_text(encoding="utf-8"))
+    assert [folder["folder_id"] for folder in facts["folders"]] == [
+        "default",
+        "10",
+        "20",
+    ]
+    assert "session-cookie" not in store.facts_path.read_text(encoding="utf-8")
 
 
 def test_thumbnail_failure_keeps_the_favorite_with_placeholder_path(
@@ -412,7 +492,12 @@ def test_official_page_pagination_stall_is_specific_and_keeps_snapshot(
     with pytest.raises(DouyinFavoritesError, match="已返回首批收藏"):
         store.sync(SecretStr("cookie"))
 
-    assert store.read_snapshot().items[0].title == "旧收藏"
+    snapshot = store.read_snapshot()
+    assert snapshot.items[0].title == "旧收藏"
+    assert snapshot.items[0].folder_ids == ("default",)
+    assert [(folder.folder_id, folder.item_count) for folder in snapshot.folders] == [
+        ("default", 1)
+    ]
 
 
 def test_direct_pagination_rejects_a_cursor_that_does_not_advance(

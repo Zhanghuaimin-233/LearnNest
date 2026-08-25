@@ -10,10 +10,13 @@ from pydantic import SecretStr
 from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import DouyinAuthenticationError
 from learnnest.adapters.douyin_official_page import (
+    _RUNTIME_COLLECTIONS_SCRIPT,
     DouyinOfficialPageError,
     DouyinOfficialPageTransport,
+    collect_official_collections,
     collect_official_favorites,
 )
+from playwright.sync_api import sync_playwright
 
 
 def _payload(item_id: str, *, cursor: int, has_more: bool) -> dict[str, Any]:
@@ -125,6 +128,112 @@ def test_official_page_first_page_mode_is_a_bounded_login_smoke() -> None:
 
     assert [item["aweme_id"] for item in result["aweme_list"]] == ["101"]
     assert page.batch_index == 1
+
+
+def test_official_page_collects_only_stable_folder_and_item_fields() -> None:
+    class FolderPage:
+        def evaluate(
+            self, _script: str, argument: Mapping[str, int]
+        ) -> Mapping[str, Any]:
+            assert argument == {"timeoutMs": 120_000, "maxPages": 50}
+            return {
+                "status_code": 0,
+                "folders": [
+                    {
+                        "folder_id": "10",
+                        "name": "编程",
+                        "item_count": 1,
+                        "items": [
+                            {
+                                "aweme_id": "101",
+                                "title": "作品 101",
+                                "cover_url": "https://cdn.example/101.jpg?signature=transient",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+    payload = collect_official_collections(FolderPage())
+
+    assert payload["folders"][0]["folder_id"] == "10"
+    assert payload["folders"][0]["items"][0].keys() == {
+        "aweme_id",
+        "title",
+        "cover_url",
+    }
+
+
+def test_official_page_cold_collection_runtime_uses_action_results_before_react_state() -> (
+    None
+):
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(channel="msedge", headless=True)
+        page = browser.new_page()
+        page.set_content(
+            '<div role="tab">收藏夹</div><div id="collection-context"></div>'
+        )
+        page.evaluate(
+            """() => {
+                const context = {
+                    state: {
+                        collects: [],
+                        collectResRef: {current: {hasMore: false}},
+                        videoResRef: {current: {}},
+                    },
+                    action: {
+                        getCollects: async () => ({
+                            statusCode: 0,
+                            cursor: 1,
+                            hasMore: false,
+                            data: [{
+                                collectionFolderId: "10",
+                                collectionFolderName: "编程",
+                                videoTotal: 1,
+                            }],
+                        }),
+                        getVideoList: async (folderId) => ({
+                            statusCode: 0,
+                            cursor: 1,
+                            hasMore: false,
+                            data: [{
+                                awemeId: "101",
+                                desc: `作品 ${folderId}`,
+                                video: {coverUrlList: ["https://cdn.example/101.jpg"]},
+                            }],
+                        }),
+                    },
+                };
+                document.querySelector("#collection-context").__reactFiber$test = {
+                    memoizedProps: {value: context},
+                    return: null,
+                };
+            }"""
+        )
+
+        result = page.evaluate(
+            _RUNTIME_COLLECTIONS_SCRIPT,
+            {"timeoutMs": 1_000, "maxPages": 5},
+        )
+        browser.close()
+
+    assert result == {
+        "status_code": 0,
+        "folders": [
+            {
+                "folder_id": "10",
+                "name": "编程",
+                "item_count": 1,
+                "items": [
+                    {
+                        "aweme_id": "101",
+                        "title": "作品 10",
+                        "cover_url": "https://cdn.example/101.jpg",
+                    }
+                ],
+            }
+        ],
+    }
 
 
 def test_official_page_retries_scroll_until_the_next_page_responds() -> None:
@@ -299,7 +408,33 @@ class FakeBootstrapPage:
         return self.payload
 
 
-def test_official_transport_uses_isolated_headed_edge_and_closes_everything() -> None:
+class FakeCollectionBootstrapPage(FakeBootstrapPage):
+    def evaluate(self, script: str, argument: Mapping[str, int]) -> Mapping[str, Any]:
+        if "cursor" in argument:
+            return super().evaluate(script, argument)
+        self.evaluate_calls.append(argument)
+        return {
+            "status_code": 0,
+            "folders": [
+                {
+                    "folder_id": "10",
+                    "name": "编程",
+                    "item_count": 1,
+                    "items": [
+                        {
+                            "aweme_id": "101",
+                            "title": "作品 101",
+                            "cover_url": None,
+                        }
+                    ],
+                }
+            ],
+        }
+
+
+def test_official_transport_uses_short_lived_headless_edge_and_closes_everything() -> (
+    None
+):
     page = FakeBootstrapPage(_payload("101", cursor=10, has_more=True))
     runtime = FakeRuntime(page)  # type: ignore[arg-type]
 
@@ -332,7 +467,7 @@ def test_official_transport_uses_isolated_headed_edge_and_closes_everything() ->
 
     assert first["aweme_list"][0]["aweme_id"] == "101"
     assert second["aweme_list"][0]["aweme_id"] == "102"
-    assert runtime.chromium.launches == [{"channel": "msedge", "headless": False}]
+    assert runtime.chromium.launches == [{"channel": "msedge", "headless": True}]
     assert runtime.browser.context_options == [{"locale": "zh-CN"}]
     assert page.goto_calls[0][2] == 120_000
     assert page.evaluate_calls == [{"cursor": 0, "count": 20, "timeoutMs": 120_000}]
@@ -362,6 +497,41 @@ def test_official_transport_uses_isolated_headed_edge_and_closes_everything() ->
     assert request.get_header("Uifid") == "runtime-only"
     assert request.get_header("Content-length") is None
     assert timeout == 20.0
+
+
+def test_official_transport_collects_custom_folders_in_the_same_isolated_page() -> None:
+    page = FakeCollectionBootstrapPage(_payload("101", cursor=0, has_more=False))
+    runtime = FakeRuntime(page)  # type: ignore[arg-type]
+    transport = DouyinOfficialPageTransport(
+        SecretStr("sessionid=secret"),
+        playwright_factory=lambda: runtime,
+        include_custom_folders=True,
+    )
+
+    transport.list_video_favorites(cursor=0, count=20)
+    folders = transport.list_folders(cursor=0, count=20)
+    items = transport.list_folder_items("10", cursor=0, count=20)
+
+    assert folders == {
+        "status_code": 0,
+        "collects_list": [
+            {
+                "collects_id_str": "10",
+                "collects_name": "编程",
+                "total_number": 1,
+            }
+        ],
+        "cursor": 1,
+        "has_more": False,
+    }
+    assert items["aweme_list"] == [
+        {"aweme_id": "101", "desc": "作品 101", "cover_url": None}
+    ]
+    assert page.evaluate_calls == [
+        {"cursor": 0, "count": 20, "timeoutMs": 120_000},
+        {"timeoutMs": 120_000, "maxPages": 50},
+    ]
+    assert runtime.closed == ["context", "browser", "runtime"]
 
 
 def test_official_transport_restores_encrypted_browser_storage_state() -> None:

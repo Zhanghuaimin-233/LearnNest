@@ -7,6 +7,7 @@ from hashlib import sha256
 from ipaddress import ip_address
 import json
 from pathlib import Path
+import re
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -17,6 +18,7 @@ from learnnest.learning_state import (
     automation_budget_blocked,
     automation_budget_restart_is_due,
     automation_failure_reason,
+    automation_failure_stage,
     automation_restart_is_safe,
     automation_readiness,
     automation_retry_is_due,
@@ -27,6 +29,7 @@ from learnnest.models import StageStatus, TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
 from learnnest.publication import note_belongs_to_task, read_audio_ownership_marker
 from learnnest.sources import SourceParseError, collect_sources
+from learnnest.task_control import CONTROL_FILENAME, load_task_control, set_manual_pause
 from learnnest.task_store import find_task_by_id, parse_task_bytes
 from learnnest.tts_generation import probe_audio
 
@@ -36,10 +39,12 @@ LearningActionKind = Literal[
     "open_note",
     "open_settings",
     "open_automation",
+    "open_sources",
     "open_single_video",
     "continue",
     "start_automation",
     "retry_automation",
+    "resume_task",
 ]
 LearningState = Literal[
     "materials_ready",
@@ -81,6 +86,10 @@ class LearningItem:
     action_kind: LearningActionKind | None
     failure_reason: str | None = None
     output_goal: OutputGoal = "complete_note"
+    manually_paused: bool = False
+    can_pause: bool = True
+    failure_stage: str | None = None
+    failure_stage_code: str | None = None
 
     def __post_init__(self) -> None:
         if (self.action is None) != (self.action_kind is None):
@@ -179,6 +188,35 @@ class LearningWorkspace:
         return ContinueResult(
             item=self._item(refreshed_dir, refreshed_task), outcome="continued"
         )
+
+    def pause_item(self, item_ref: str) -> LearningItem:
+        """Persist a control fact that blocks only future task scheduling."""
+        return self._set_manual_pause(item_ref, paused=True)
+
+    def resume_item(self, item_ref: str) -> LearningItem:
+        """Clear only the manual pause control without advancing task facts."""
+        return self._set_manual_pause(item_ref, paused=False)
+
+    def _set_manual_pause(self, item_ref: str, *, paused: bool) -> LearningItem:
+        try:
+            found = find_task_by_id(self.output_root, item_ref)
+            if found is None:
+                raise KeyError(item_ref)
+            task_dir, task = found
+            current = self._item(task_dir, task)
+            if paused and not current.can_pause:
+                raise LearningWorkspaceError("任务已经完成，不需要暂停。")
+            set_manual_pause(
+                self.output_root,
+                task_dir,
+                task.task_id,
+                paused=paused,
+            )
+            return self._item(task_dir, task)
+        except (KeyError, LearningWorkspaceError):
+            raise
+        except (LockUnavailable, OSError, ValueError) as error:
+            raise _safe_workspace_error(error) from error
 
     def snapshot(self, known_revision: str | None = None) -> LearningSnapshot:
         """Read persisted task/intake facts only; this method never starts work."""
@@ -280,6 +318,15 @@ class LearningWorkspace:
                 except OSError:
                     continue
                 _digest_fact(digest, "task", task_json.parent.name, raw)
+                control_path = task_json.parent / CONTROL_FILENAME
+                if control_path.is_file():
+                    try:
+                        control_raw = control_path.read_bytes()
+                    except OSError:
+                        control_raw = b""
+                    _digest_fact(
+                        digest, "task-control", task_json.parent.name, control_raw
+                    )
                 try:
                     entries.append(
                         (
@@ -337,7 +384,22 @@ class LearningWorkspace:
             if "tts" in task.stages
             else "complete_note"
         )
-        return replace(item, output_goal=output_goal)
+        item = replace(item, output_goal=output_goal)
+        can_pause = item.state != "ready"
+        try:
+            manually_paused = load_task_control(task_dir, task.task_id).manually_paused
+        except (OSError, ValueError):
+            manually_paused = True
+        if manually_paused and can_pause:
+            return replace(
+                item,
+                message="任务已暂停；已经完成的内容会保留。",
+                action="继续任务",
+                action_kind="resume_task",
+                manually_paused=True,
+                can_pause=False,
+            )
+        return replace(item, manually_paused=False, can_pause=can_pause)
 
     def _item_state(
         self,
@@ -409,8 +471,8 @@ class LearningWorkspace:
                     task.title,
                     _safe_source_label(task),
                     "waiting_authorization",
-                    "调用额度已调整；重新授权后即可继续。",
-                    "重新授权",
+                    "调用额度已调整；重新开启付费整理许可后即可继续。",
+                    "重新开启付费许可",
                     "open_automation",
                 )
             if automation_budget_restart_is_due(self.output_root, task.task_id):
@@ -443,6 +505,7 @@ class LearningWorkspace:
         if execution_state in {"invalid", "needs_attention", "completed"}:
             retryable = automation_retry_is_due(self.output_root, task.task_id)
             failure_reason = automation_failure_reason(self.output_root, task.task_id)
+            failure_stage = automation_failure_stage(self.output_root, task.task_id)
             if retryable:
                 return LearningItem(
                     task.task_id,
@@ -453,6 +516,7 @@ class LearningWorkspace:
                     "重试整理",
                     "retry_automation",
                     failure_reason,
+                    failure_stage=failure_stage,
                 )
             if execution_state == "needs_attention" and automation_restart_is_safe(
                 self.output_root, task.task_id
@@ -466,6 +530,7 @@ class LearningWorkspace:
                     "重新开始整理",
                     "start_automation",
                     failure_reason,
+                    failure_stage=failure_stage,
                 )
             return LearningItem(
                 task.task_id,
@@ -482,9 +547,13 @@ class LearningWorkspace:
                 "重新选择原视频",
                 "open_single_video",
                 failure_reason,
+                failure_stage=failure_stage,
             )
         if intake is not None and intake.status == "needs_attention":
             if automation_retry_is_due(self.output_root, task.task_id):
+                failure_reason = automation_failure_reason(
+                    self.output_root, task.task_id
+                )
                 return LearningItem(
                     task.task_id,
                     task.title,
@@ -493,7 +562,12 @@ class LearningWorkspace:
                     "上次整理遇到临时问题，现在可以安全重试。",
                     "重试整理",
                     "retry_automation",
-                    automation_failure_reason(self.output_root, task.task_id),
+                    failure_reason,
+                    failure_stage=(
+                        automation_failure_stage(self.output_root, task.task_id)
+                        if failure_reason is not None
+                        else None
+                    ),
                 )
             if automation_restart_is_safe(self.output_root, task.task_id):
                 return LearningItem(
@@ -543,8 +617,8 @@ class LearningWorkspace:
                     task.title,
                     _safe_source_label(task),
                     "waiting_authorization",
-                    "请确认授权后开始整理。",
-                    "确认授权",
+                    "请开启付费整理许可后开始整理。",
+                    "开启付费许可",
                     "open_automation",
                 )
         if intake is not None and intake.status == "pending":
@@ -558,14 +632,25 @@ class LearningWorkspace:
                 None,
             )
         if task.error_summary:
+            (
+                failure_stage_code,
+                failure_stage,
+                failure_reason,
+                message,
+                action,
+                action_kind,
+            ) = _task_failure_projection(task)
             return LearningItem(
                 task.task_id,
                 task.title,
                 _safe_source_label(task),
                 "needs_action",
-                "处理需要继续；已保留完成的内容。",
-                "继续处理",
-                "continue",
+                message,
+                action,
+                action_kind,
+                failure_reason=failure_reason,
+                failure_stage=failure_stage,
+                failure_stage_code=failure_stage_code,
             )
         if task.stages.get("content_pack") is StageStatus.COMPLETED:
             return LearningItem(
@@ -683,17 +768,125 @@ def _item_with_action(
     action: str,
     action_kind: LearningActionKind,
 ) -> LearningItem:
-    return LearningItem(
-        item.item_ref,
-        item.title,
-        item.source,
-        "needs_action",
-        message,
-        action,
-        action_kind,
-        None,
-        item.output_goal,
+    return replace(
+        item,
+        state="needs_action",
+        message=message,
+        action=action,
+        action_kind=action_kind,
+        failure_reason=None,
+        failure_stage=None,
+        failure_stage_code=None,
     )
+
+
+_PUBLIC_TASK_STAGE = {
+    "source": "获取内容",
+    "transcript": "识别语音",
+    "frames": "提取画面",
+    "ocr": "识别画面文字",
+    "evidence": "整理材料",
+    "content_pack": "生成材料包",
+    "note": "生成笔记",
+    "publish": "发布笔记",
+    "podcast_script": "生成播客稿",
+    "tts": "生成音频",
+}
+_UNSAFE_PUBLIC_FAILURE = re.compile(
+    r"(?i)([A-Z]:[\\/]|\\\\|/(?:users|home|tmp|var)/|"
+    r"\b[a-f0-9]{32,64}\b|settings.?sha|provider.?binding|task[_ -]?id|secret)"
+)
+_EXCEPTION_SUFFIX = re.compile(r"\s*\([A-Za-z_][A-Za-z0-9_.]*\)\s*$")
+
+
+def _task_failure_projection(
+    task: TaskRecord,
+) -> tuple[str, str, str, str, str, LearningActionKind]:
+    latest = next(
+        (
+            attempt
+            for attempt in reversed(task.attempts)
+            if attempt.status == "failed" and attempt.failed_stage is not None
+        ),
+        None,
+    )
+    failed_stage = (
+        latest.failed_stage
+        if latest is not None
+        else next(
+            (
+                stage
+                for stage, status in task.stages.items()
+                if status is StageStatus.FAILED
+            ),
+            "source",
+        )
+    )
+    stage = _PUBLIC_TASK_STAGE.get(failed_stage, "处理内容")
+    failure = latest.failure if latest is not None else None
+    summary = failure.safe_summary if failure is not None else task.error_summary or ""
+
+    if failed_stage == "source" and "抖音下载需要有效登录状态" in summary:
+        return (
+            failed_stage,
+            stage,
+            "抖音下载需要有效登录状态；请在来源页确认已连接抖音后重试。",
+            "内容尚未获取；请前往来源页确认抖音连接后重试。",
+            "前往来源",
+            "open_sources",
+        )
+
+    if failed_stage == "source" and (
+        "URL 下载失败" in summary or "DownloadError" in summary
+    ):
+        return (
+            failed_stage,
+            stage,
+            "来源链接的视频下载失败。",
+            "来源链接没有成功下载；请选择本地视频重新处理。",
+            "选择本地视频",
+            "open_single_video",
+        )
+
+    disposition = failure.disposition if failure is not None else "manual"
+    public_reason = _public_task_failure_reason(stage, summary, disposition)
+    if disposition == "retryable":
+        return (
+            failed_stage,
+            stage,
+            public_reason,
+            f"失败发生在“{stage}”；已完成的内容会保留，现在可以重试。",
+            "继续处理",
+            "continue",
+        )
+    if failed_stage == "source":
+        return (
+            failed_stage,
+            stage,
+            public_reason,
+            "内容尚未成功获取；请选择可访问的本地视频重新处理。",
+            "选择本地视频",
+            "open_single_video",
+        )
+    return (
+        failed_stage,
+        stage,
+        public_reason,
+        f"失败发生在“{stage}”；已完成的内容会保留，请修正问题后继续。",
+        "继续处理",
+        "continue",
+    )
+
+
+def _public_task_failure_reason(stage: str, summary: str, disposition: str) -> str:
+    cleaned = _EXCEPTION_SUFFIX.sub("", " ".join(summary.split())).strip(" 。；;")
+    if cleaned and not _UNSAFE_PUBLIC_FAILURE.search(cleaned):
+        return f"{cleaned}。"
+    if disposition == "retryable":
+        return f"{stage}遇到临时错误。"
+    if disposition == "terminal":
+        return f"{stage}遇到无法继续的错误。"
+    return f"{stage}遇到需要人工处理的问题。"
 
 
 def _safe_workspace_error(error: Exception) -> LearningWorkspaceError:

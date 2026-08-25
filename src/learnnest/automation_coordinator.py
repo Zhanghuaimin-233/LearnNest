@@ -30,7 +30,7 @@ from learnnest.learning_state import (
     required_automation_roles,
     task_has_paid_automation_trace,
 )
-from learnnest.locks import LockUnavailable, task_lock
+from learnnest.locks import LockUnavailable, task_control_lock, task_lock
 from learnnest.models import TaskRecord
 from learnnest.provider_profiles import (
     freeze_role_bindings,
@@ -43,6 +43,7 @@ from learnnest.provider_service import (
     tts_provider_from_snapshot,
 )
 from learnnest.task_store import find_task_by_id, load_task, write_task_atomic
+from learnnest.task_control import load_task_control
 
 RunTasks = Callable[..., AutomationRunResult]
 Clock = Callable[[], datetime]
@@ -117,7 +118,7 @@ class AutomationCoordinator:
             try:
                 seen_wake_generation = await asyncio.wait_for(
                     self._wait_for_wake_or_stop(seen_wake_generation),
-                    timeout=self._interval_seconds(),
+                    timeout=self._interval_minutes() * 60,
                 )
             except TimeoutError:
                 continue
@@ -126,7 +127,9 @@ class AutomationCoordinator:
         """Drain an existing backlog without waiting for another wake signal."""
         try:
             return any(
-                intake.status == "pending" for intake in list_intakes(self.output_root)
+                intake.status == "pending"
+                and not _task_is_manually_paused(self.output_root, intake.task_id)
+                for intake in list_intakes(self.output_root)
             )
         except ValueError:
             return False
@@ -166,7 +169,10 @@ class AutomationCoordinator:
                 return None
             intakes = list_intakes(self.output_root)
             selected = tuple(
-                item for item in intakes if item.status in {"pending", "claimed"}
+                item
+                for item in intakes
+                if item.status in {"pending", "claimed"}
+                and not _task_is_manually_paused(self.output_root, item.task_id)
             )[: status.policy.max_items_per_tick]
             if not selected:
                 return AutomationRunResult((), (), ())
@@ -183,7 +189,7 @@ class AutomationCoordinator:
                         # Only the explicit Web retry admission clears this
                         # persisted gate; an intake status alone cannot do so.
                         continue
-                    _freeze_intake_task_binding(self.output_root, intake)
+                    _prepare_intake_task(self.output_root, intake)
                 except _ImmutableTaskIdentity:
                     save_intake(
                         self.output_root,
@@ -194,11 +200,6 @@ class AutomationCoordinator:
                     # A missing role, stale configuration, corrupt task fact, or
                     # failed atomic write stays safely pending for later repair.
                     continue
-                if intake.status == "pending":
-                    save_intake(
-                        self.output_root,
-                        intake.model_copy(update={"status": "claimed"}),
-                    )
                 prepared.append(intake)
             if not prepared:
                 return None
@@ -229,11 +230,11 @@ class AutomationCoordinator:
         finally:
             self._tick_lock.release()
 
-    def _interval_seconds(self) -> int:
+    def _interval_minutes(self) -> float:
         status = load_status(self.output_root)
         if status is None:
-            return 300
-        return status.policy.check_interval_seconds
+            return 30
+        return status.policy.check_interval_minutes
 
     def _run_authorized_tasks(
         self,
@@ -294,42 +295,64 @@ class _ImmutableTaskIdentity(ValueError):
     """A task already has paid/automation facts and cannot be rebound."""
 
 
-def _freeze_intake_task_binding(output_root: Path, intake: AutomationIntake) -> None:
-    """Freeze the authorized roles before changing pending intake ownership."""
+def _prepare_intake_task(output_root: Path, intake: AutomationIntake) -> None:
+    """Freeze identity and claim only while the task remains schedulable."""
     if automation_readiness(output_root, intake) != "ready":
         raise ValueError("automation setup is not ready")
     current = freeze_role_bindings(output_root)
     required = required_automation_roles(intake.default_output)
     if any(role not in current for role in required):
         raise ValueError("automation roles are incomplete")
-    with task_lock(output_root, intake.task_id, timeout=0):
+    with (
+        task_lock(output_root, intake.task_id, timeout=0),
+        task_control_lock(output_root, intake.task_id, timeout=0),
+    ):
         found = find_task_by_id(output_root, intake.task_id)
         if found is None:
             raise ValueError("automation task is missing")
         task_dir, task = found
-        if _task_bindings_match(task, current, required):
-            return
-        has_execution_facts = task_has_execution_facts(output_root, intake.task_id)
-        safe_budget_restart = (
-            has_execution_facts
-            and task_is_zero_attempt_budget_blocked(output_root, intake.task_id)
-            and _task_bindings_match_except_settings_sha(task, current, required)
+        if load_task_control(task_dir, task.task_id).manually_paused:
+            raise ValueError("automation task is manually paused")
+        if not _task_bindings_match(task, current, required):
+            has_execution_facts = task_has_execution_facts(output_root, intake.task_id)
+            safe_budget_restart = (
+                has_execution_facts
+                and task_is_zero_attempt_budget_blocked(output_root, intake.task_id)
+                and _task_bindings_match_except_settings_sha(task, current, required)
+            )
+            if (
+                has_execution_facts and not safe_budget_restart
+            ) or _has_paid_task_trace(task):
+                raise _ImmutableTaskIdentity("automation task binding is immutable")
+            updated = TaskRecord.model_validate(
+                {
+                    **task.model_dump(mode="python"),
+                    "provider_bindings": {
+                        role: binding.model_dump(mode="python")
+                        for role, binding in current.items()
+                    },
+                    "provider_settings_sha256": settings_sha256(
+                        load_settings(output_root)
+                    ),
+                }
+            )
+            write_task_atomic(task_dir, updated)
+        if intake.status == "pending":
+            save_intake(
+                output_root,
+                intake.model_copy(update={"status": "claimed"}),
+            )
+
+
+def _task_is_manually_paused(output_root: Path, task_id: str) -> bool:
+    try:
+        found = find_task_by_id(output_root, task_id)
+        return (
+            found is not None
+            and load_task_control(found[0], found[1].task_id).manually_paused
         )
-        if (has_execution_facts and not safe_budget_restart) or _has_paid_task_trace(
-            task
-        ):
-            raise _ImmutableTaskIdentity("automation task binding is immutable")
-        updated = TaskRecord.model_validate(
-            {
-                **task.model_dump(mode="python"),
-                "provider_bindings": {
-                    role: binding.model_dump(mode="python")
-                    for role, binding in current.items()
-                },
-                "provider_settings_sha256": settings_sha256(load_settings(output_root)),
-            }
-        )
-        write_task_atomic(task_dir, updated)
+    except (OSError, ValueError):
+        return True
 
 
 def _task_bindings_match(

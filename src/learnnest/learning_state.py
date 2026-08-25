@@ -202,6 +202,37 @@ def automation_failure_reason(output_root: str | Path, task_id: str) -> str | No
         return "任务失败记录无法安全读取。"
 
 
+def automation_failure_stage(output_root: str | Path, task_id: str) -> str | None:
+    """Project the failed automation step without exposing internal identities."""
+    root = Path(output_root).resolve()
+    try:
+        status = load_status(root)
+        if status is None:
+            return None
+        state = load_task_state(root, task_id, status.policy_sha256)
+        if state is None or state.blocked_reason is None:
+            return None
+        latest = state.attempts[-1] if state.attempts else None
+        if latest is not None:
+            return _PUBLIC_AUTOMATION_STAGE.get(latest.stage, "自动整理").removesuffix(
+                "时"
+            )
+        if state.failure_summary == (
+            "automation task frozen note bindings do not match authorization"
+        ):
+            return "生成笔记前的连接校验"
+        found = find_task_by_id(root, task_id)
+        if (
+            not state.attempts
+            and found is not None
+            and _uses_legacy_note_authorization(found[1], status.policy)
+        ):
+            return "生成笔记前的连接校验"
+        return "自动整理"
+    except (OSError, ValueError):
+        return "读取失败记录"
+
+
 _PUBLIC_AUTOMATION_STAGE = {
     "writer": "生成笔记初稿时",
     "reviewer": "复核笔记时",
@@ -461,7 +492,7 @@ def public_setup_readiness(
             "message": "设置暂时无法读取，请重新保存需要的连接。",
             "authorization": {
                 "state": "等待设置",
-                "message": "完成连接设置后才能确认自动整理。",
+                "message": "完成连接设置后才能开启付费整理许可。",
             },
         }
     selected = default_output or (
@@ -484,30 +515,36 @@ def public_setup_readiness(
             "message": "先为所选结果补齐需要的连接。",
         }
         state = "等待设置"
-        message = "补齐每一项需要的连接后，再保存自动整理设置。"
+        message = "补齐每一项需要的连接后，再保存整理设置。"
     elif status is None or not _policy_matches_current_note_roles(
         status.policy, freeze_role_bindings(root), current_sha
     ):
         authorization = {
             "state": "等待设置",
-            "message": "连接已就绪，请保存自动整理设置。",
+            "message": "连接已就绪，请保存整理设置。",
         }
         state = "等待设置"
-        message = "连接已就绪，请保存自动整理设置。"
+        message = "连接已就绪，请保存整理设置。"
     elif (
         not status.policy.enabled
         or status.policy.authorized_at is None
         or status.policy.provider_settings_sha256 != current_sha
     ):
         authorization = {
-            "state": "等待授权",
-            "message": "设置已保存，确认可能付费的自动整理后才会开始。",
+            "state": "等待付费许可",
+            "message": (
+                "设置已保存，开启付费整理许可后，手动任务即可继续；"
+                "自动加入新收藏仍由独立开关控制。"
+            ),
         }
-        state = "等待授权"
-        message = "所选结果已准备好，等待你的付费确认。"
+        state = "等待付费许可"
+        message = "所选结果已准备好，等待付费整理许可。"
     else:
-        authorization = {"state": "已授权", "message": "自动整理可以开始。"}
-        state = "可以自动整理"
+        authorization = {
+            "state": "付费许可有效",
+            "message": "手动加入的任务可以继续；自动加入新收藏仍由独立开关控制。",
+        }
+        state = "可以开始整理"
         message = "所选结果已就绪。"
     return {
         "default_output": _OUTPUT_LABELS[selected],

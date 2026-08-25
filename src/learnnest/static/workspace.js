@@ -23,6 +23,8 @@ const lists = {
   library: document.querySelector("#library-list"),
 };
 const favoriteList = document.querySelector("#douyin-favorites-list");
+const favoriteFolders = document.querySelector("#favorite-folders");
+const favoriteFolderTitle = document.querySelector("#favorite-folder-title");
 const favoriteStatus = document.querySelector("#favorites-status");
 const syncFavoritesButton = document.querySelector("#sync-favorites");
 const connectDouyinButton = document.querySelector("#connect-douyin");
@@ -56,6 +58,7 @@ const authorizationInterval = document.querySelector("#authorization-interval");
 const addSelectedFavoritesButton = document.querySelector("#add-selected-favorites");
 const favoriteSelection = document.querySelector("#favorite-selection");
 const taskList = document.querySelector("#task-list");
+const trashList = document.querySelector("#trash-list");
 const taskDetail = document.querySelector("#task-detail");
 const taskWorkbench = document.querySelector("#task-workbench");
 const taskDetailView = document.querySelector("#task-detail-view");
@@ -92,14 +95,14 @@ let pendingDeleteItemRef = null;
 const stateLabel = {
   materials_ready: "材料已准备",
   waiting_setup: "等待设置",
-  waiting_authorization: "等待授权",
+  waiting_authorization: "等待付费许可",
   queued: "等待整理",
   organizing: "正在整理",
   partial_ready: "笔记已就绪，音频待完成",
   needs_action: "需要你处理",
   ready: "可阅读",
 };
-const learningActionKinds = new Set(["open_note", "open_settings", "open_automation", "open_single_video", "continue", "start_automation", "retry_automation"]);
+const learningActionKinds = new Set(["open_note", "open_settings", "open_automation", "open_sources", "open_single_video", "continue", "start_automation", "retry_automation", "resume_task"]);
 const loginLabel = {
   disconnected: "未连接",
   starting: "准备中",
@@ -125,9 +128,12 @@ let loginRefreshInFlight = false;
 let syncFavoritesAfterLogin = false;
 let favoriteStatusProtected = false;
 let selectedFavoriteIdsState = new Set();
+let activeFavoriteFolderId = "all";
+let latestFavoritesSnapshot = { synced_at: null, folders: [], items: [] };
 let suggestedProviderConnectionName = "";
 const dirtySettingsForms = new Set();
 let currentSnapshot = { inbox: [], processing: [], library: [] };
+let currentTrash = [];
 let selectedItemRef = null;
 let activeTaskFilter = "all";
 let noticeTimer = null;
@@ -216,7 +222,7 @@ function showProviderUpdateFailure(error) {
 
 function renderSetupReadiness(readiness) {
   if (!readiness) return;
-  const ready = readiness.state === "可以自动整理";
+  const ready = readiness.state === "可以开始整理";
   settingsReadiness.classList.toggle("is-ready", ready);
   settingsReadinessTitle.textContent = ready ? "当前可以完整产出" : readiness.state;
   settingsReadinessCopy.textContent = readiness.message;
@@ -235,7 +241,7 @@ function renderSetupReadiness(readiness) {
     + `<p>${escapeHtml(readiness.message)}</p>`
     + `<section class="provider-role-group"><div class="role-group-heading"><h4>材料提取</h4><p>ASR 与 OCR 会冻结到新任务；未显式绑定时继续使用内置本地能力。</p></div><div class="provider-role-list">${roleRows(readiness.material_roles || [])}</div></section>`
     + `<section class="provider-role-group"><div class="role-group-heading"><h4>成品生成</h4><p>这些职责由当前默认成品决定。</p></div><div class="provider-role-list">${roleRows(readiness.required_roles)}</div></section>`
-    + `<p>自动处理：${escapeHtml(readiness.authorization.state)}。${escapeHtml(readiness.authorization.message)}</p>`;
+    + `<p>付费许可：${escapeHtml(readiness.authorization.state)}。${escapeHtml(readiness.authorization.message)}</p>`;
   setupReadiness.querySelectorAll("button[data-bind-setup-role]").forEach((button) => button.addEventListener("click", () => bindSetupRole(button)));
   setupReadiness.querySelectorAll("button[data-unbind-setup-role]").forEach((button) => button.addEventListener("click", () => clearSetupRole(button)));
   setupReadiness.querySelectorAll("select[data-setup-role-select]").forEach((select) => select.addEventListener("change", () => dirtySettingsForms.add(setupReadiness)));
@@ -253,7 +259,7 @@ async function bindSetupRole(button) {
     dirtySettingsForms.delete(setupReadiness);
     renderProviderSettings(settings);
     await loadAutomationStatus();
-    providerFeedback.textContent = `已绑定：${label}。自动整理需要重新确认。`;
+    providerFeedback.textContent = `已绑定：${label}。付费整理许可需要重新确认。`;
     say(providerFeedback.textContent);
   } catch (error) {
     showProviderUpdateFailure(error);
@@ -273,7 +279,7 @@ async function clearSetupRole(button) {
     dirtySettingsForms.delete(setupReadiness);
     renderProviderSettings(settings);
     await loadAutomationStatus();
-    providerFeedback.textContent = `已解绑：${label}。自动整理需要重新确认。`;
+    providerFeedback.textContent = `已解绑：${label}。付费整理许可需要重新确认。`;
     say(providerFeedback.textContent);
   } catch (error) { showProviderUpdateFailure(error); } finally { button.disabled = false; button.textContent = buttonLabel; }
 }
@@ -289,7 +295,7 @@ async function deleteProviderConnection(button) {
     const settings = await api(`/api/providers/connections/${encodeURIComponent(name)}`, { method: "DELETE" });
     renderProviderSettings(settings);
     await loadAutomationStatus();
-    providerFeedback.textContent = `已删除连接：${name}。如自动整理此前已授权，请重新确认。`;
+    providerFeedback.textContent = `已删除连接：${name}。如付费整理许可此前有效，请重新确认。`;
     say(providerFeedback.textContent);
   } catch (error) {
     showProviderUpdateFailure(error);
@@ -349,7 +355,7 @@ function renderList(target, items, empty) {
         <h3>${escapeHtml(item.title)}</h3>
         <p>${escapeHtml(item.source)}</p>
       </div>
-      <span class="learning-state">${escapeHtml(stateLabel[item.state] || "需要检查")}</span>
+      <span class="learning-state">${escapeHtml(publicStateLabel(item))}</span>
       <span class="task-progress" aria-hidden="true" style="--task-progress:${taskProgress(item)}%"><i></i></span>
       <span class="row-next">${escapeHtml(item.message)}</span>
       <button class="open-task-detail" type="button" data-open-item-ref="${escapeHtml(item.item_ref)}">查看任务 <span aria-hidden="true">→</span></button>
@@ -367,6 +373,29 @@ function renderList(target, items, empty) {
   updateSelectedTaskRows();
 }
 
+function publicStateLabel(item) {
+  if (item.manually_paused) return "已暂停";
+  if (item.failure_reason) return "处理已停止";
+  return stateLabel[item.state] || "需要检查";
+}
+
+function renderTrash(items) {
+  currentTrash = items;
+  document.querySelector('[data-filter-count="trash"]').textContent = items.length;
+  if (!items.length) {
+    trashList.innerHTML = '<p class="empty">回收站为空。移入这里的任务会保留，直到恢复。</p>';
+    return;
+  }
+  trashList.innerHTML = items.map((item) => `
+    <article class="learning-row trash-row" data-trash-bundle="${escapeHtml(item.bundle_id)}">
+      <div class="learning-copy"><h3>${escapeHtml(item.title)}</h3><p>任务已从当前列表移出</p></div>
+      <span class="learning-state">回收区</span>
+      <span class="row-next">移入时间：${escapeHtml(formatSyncTime(item.trashed_at))}</span>
+      <button class="open-task-detail" type="button" data-restore-bundle="${escapeHtml(item.bundle_id)}">恢复任务</button>
+    </article>`).join("");
+  trashList.querySelectorAll("button[data-restore-bundle]").forEach((button) => button.addEventListener("click", () => restoreTrashItem(button.dataset.restoreBundle)));
+}
+
 function render(snapshot) {
   currentSnapshot = snapshot;
   renderList(lists.library, snapshot.library, "");
@@ -379,20 +408,34 @@ function render(snapshot) {
     all: items.length,
     attention: items.filter((item) => taskFilterFor(item) === "attention").length,
     processing: items.filter((item) => taskFilterFor(item) === "processing").length,
+    paused: items.filter((item) => taskFilterFor(item) === "paused").length,
     queued: items.filter((item) => taskFilterFor(item) === "queued").length,
     completed: items.filter((item) => taskFilterFor(item) === "completed").length,
+    trash: currentTrash.length,
   };
   for (const [name, count] of Object.entries(counts)) document.querySelector(`[data-filter-count="${name}"]`).textContent = count;
   taskCount.textContent = counts.all;
-  taskSummary.innerHTML = `<strong>${counts.processing} 项正在处理</strong>，${counts.attention} 项需要你处理，${counts.completed} 项已完成。`;
-  workbenchNote.hidden = !items.length;
-  renderTaskFocus(items);
+  taskSummary.innerHTML = `<strong>${counts.processing} 项正在处理</strong>，${counts.paused} 项已暂停，${counts.attention} 项需要你处理，${counts.completed} 项已完成。`;
+  renderActiveTaskFocus(items);
   applyTaskFilter();
   if (selectedItemRef) renderTaskDetail(items.find((item) => item.item_ref === selectedItemRef));
 }
 
+function renderActiveTaskFocus(items = allLearningItems()) {
+  if (activeTaskFilter === "trash") {
+    taskFocus.className = `task-focus ${currentTrash.length ? "attention" : "is-empty"}`;
+    taskFocus.innerHTML = currentTrash.length
+      ? `<div class="focus-copy"><p class="panel-kicker">任务生命周期</p><h2>回收站有 ${currentTrash.length} 项任务</h2><p>恢复会把原任务事实和已生成内容放回当前任务列表，不覆盖已有任务。</p></div>`
+      : '<div class="focus-copy"><p class="panel-kicker">任务生命周期</p><h2>回收站为空</h2><p>移入回收区的任务会显示在这里，并可安全恢复。</p></div>';
+    workbenchNote.hidden = true;
+    return;
+  }
+  workbenchNote.hidden = !items.length;
+  renderTaskFocus(items);
+}
+
 function renderTaskFocus(items) {
-  const priority = { attention: 0, processing: 1, queued: 2, completed: 3 };
+  const priority = { attention: 0, paused: 1, processing: 2, queued: 3, completed: 4 };
   const item = [...items].sort((left, right) => priority[taskFilterFor(left)] - priority[taskFilterFor(right)])[0];
   if (!item) {
     taskFocus.className = "task-focus is-empty";
@@ -401,7 +444,7 @@ function renderTaskFocus(items) {
     return;
   }
   const filter = taskFilterFor(item);
-  const heading = filter === "attention" ? "这项任务需要你处理" : filter === "processing" ? "这项任务正在向前推进" : filter === "queued" ? "下一项等待整理的内容" : "最近完成的内容";
+  const heading = filter === "attention" ? "这项任务需要你处理" : filter === "paused" ? "这项任务已暂停" : filter === "processing" ? "这项任务正在向前推进" : filter === "queued" ? "下一项等待整理的内容" : "最近完成的内容";
   taskFocus.className = `task-focus ${filter}`;
   taskFocus.innerHTML = `<div class="focus-signal" aria-hidden="true"><span>${taskProgress(item)}</span><small>%</small></div><div class="focus-copy"><p class="panel-kicker">${heading}</p><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.message)}</p></div><button class="focus-open" type="button">查看任务 <span aria-hidden="true">→</span></button>`;
   taskFocus.querySelector("button").addEventListener("click", () => selectTask(item.item_ref));
@@ -412,6 +455,7 @@ function allLearningItems() {
 }
 
 function taskFilterFor(item) {
+  if (item.manually_paused) return "paused";
   if (["needs_action", "waiting_setup", "waiting_authorization"].includes(item.state)) return "attention";
   if (["organizing", "partial_ready"].includes(item.state)) return "processing";
   if (item.state === "ready") return "completed";
@@ -419,6 +463,19 @@ function taskFilterFor(item) {
 }
 
 function taskProgress(item) {
+  const failureProgress = {
+    source: 0,
+    transcript: 24,
+    frames: 24,
+    ocr: 24,
+    evidence: 24,
+    content_pack: 24,
+    note: 58,
+    publish: 58,
+    podcast_script: 78,
+    tts: 78,
+  };
+  if (item.failure_stage_code && item.failure_stage_code in failureProgress) return failureProgress[item.failure_stage_code];
   if (item.state === "ready") return 100;
   if (item.state === "partial_ready") return 78;
   if (item.state === "organizing") return 58;
@@ -431,11 +488,15 @@ function updateSelectedTaskRows() {
 }
 
 function applyTaskFilter() {
+  const showingTrash = activeTaskFilter === "trash";
+  Object.values(lists).forEach((list) => { list.hidden = showingTrash; });
+  trashList.hidden = !showingTrash;
   taskList.querySelectorAll("article[data-filter]").forEach((row) => {
-    row.hidden = activeTaskFilter !== "all" && row.dataset.filter !== activeTaskFilter;
+    row.hidden = showingTrash || (activeTaskFilter !== "all" && row.dataset.filter !== activeTaskFilter);
   });
   const label = document.querySelector(`[data-filter="${activeTaskFilter}"] span`)?.textContent?.trim() || "全部任务";
   taskListTitle.textContent = label;
+  renderActiveTaskFocus();
 }
 
 function selectTask(itemRef) {
@@ -463,9 +524,24 @@ function trackSteps(item) {
     ? ["获取内容", "准备材料", "生成笔记", "生成音频"]
     : ["获取内容", "准备材料", "生成笔记"];
   let completed = 1;
-  if (["materials_ready", "waiting_setup", "waiting_authorization", "queued", "organizing", "partial_ready", "needs_action", "ready"].includes(item.state)) completed = 2;
-  if (["partial_ready", "ready"].includes(item.state) || item.note_href) completed = 3;
-  if (item.state === "ready") completed = labels.length;
+  const failedCompletedSteps = {
+    source: 0,
+    transcript: 1,
+    frames: 1,
+    ocr: 1,
+    evidence: 1,
+    content_pack: 1,
+    note: 2,
+    publish: 2,
+    podcast_script: 3,
+    tts: 3,
+  };
+  if (item.failure_stage_code && item.failure_stage_code in failedCompletedSteps) completed = failedCompletedSteps[item.failure_stage_code];
+  else {
+    if (["materials_ready", "waiting_setup", "waiting_authorization", "queued", "organizing", "partial_ready", "needs_action", "ready"].includes(item.state)) completed = 2;
+    if (["partial_ready", "ready"].includes(item.state) || item.note_href) completed = 3;
+    if (item.state === "ready") completed = labels.length;
+  }
   return labels.map((label, index) => ({ label, done: index < completed, current: index === completed && completed < labels.length }));
 }
 
@@ -483,20 +559,25 @@ function renderTaskDetail(item) {
   const actionCopy = item.action || needsUserAction
     ? item.message
     : "语栖会根据当前事实更新这里；遇到需要确认的问题时会给出明确操作。";
+  const currentStateLabel = publicStateLabel(item);
+  const pauseControl = item.can_pause
+    ? `<button class="pause-link" type="button" data-pause-item-ref="${escapeHtml(item.item_ref)}" title="只暂停后续调度；已经开始的处理会继续完成">暂停任务</button>`
+    : "";
   const failureExplanation = item.failure_reason
-    ? `<section class="failure-explanation" aria-label="停止原因"><p>停止原因</p><strong>${escapeHtml(item.failure_reason)}</strong></section>`
+    ? `<section class="failure-explanation" aria-label="失败详情"><p>失败阶段</p><strong>${escapeHtml(item.failure_stage || "处理内容")}</strong><p>具体原因</p><strong>${escapeHtml(item.failure_reason)}</strong></section>`
     : "";
   taskDetail.innerHTML = `
     <div class="detail-layout">
       <div class="detail-main">
-        <div class="detail-heading"><div><p class="panel-kicker">当前任务</p><h2>${escapeHtml(item.title)}</h2><p class="detail-source">${escapeHtml(item.source)}</p></div><span class="detail-status ${escapeHtml(item.state)}">${escapeHtml(stateLabel[item.state] || "需要检查")}</span></div>
+        <div class="detail-heading"><div><p class="panel-kicker">当前任务</p><h2>${escapeHtml(item.title)}</h2><p class="detail-source">${escapeHtml(item.source)}</p></div><span class="detail-status ${escapeHtml(item.manually_paused ? "paused" : item.state)}">${escapeHtml(currentStateLabel)}</span></div>
         <p class="detail-message">${escapeHtml(item.message)}</p>
         ${failureExplanation}
         <section class="production-section"><div class="production-heading"><h3>产出轨道</h3><span>${percent}%</span></div><div class="production-track" style="--track-steps:${steps.length}">${steps.map((step) => `<span class="track-step${step.done ? " is-done" : ""}${step.current ? " is-current" : ""}"><i>${step.done ? "✓" : ""}</i><strong>${step.label}</strong></span>`).join("")}</div></section>
       </div>
-      <aside class="detail-action"><p class="panel-kicker">${actionHeading}</p><strong>${escapeHtml(stateLabel[item.state] || "需要检查")}</strong><p>${escapeHtml(actionCopy)}</p><div class="detail-action-controls">${item.action && learningActionKinds.has(item.action_kind) ? `<button class="detail-primary-action" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}<button class="danger-link" type="button" data-delete-item-ref="${escapeHtml(item.item_ref)}"${item.state === "organizing" ? ' disabled title="正在处理，暂时不能删除"' : ""}>删除任务</button></div>${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}</aside>
+      <aside class="detail-action"><p class="panel-kicker">${actionHeading}</p><strong>${escapeHtml(currentStateLabel)}</strong><p>${escapeHtml(actionCopy)}</p><div class="detail-action-controls">${item.action && learningActionKinds.has(item.action_kind) ? `<button class="detail-primary-action" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}${pauseControl}<button class="danger-link" type="button" data-delete-item-ref="${escapeHtml(item.item_ref)}"${item.state === "organizing" && !item.manually_paused ? ' disabled title="当前步骤仍在完成，结束后可删除"' : ""}>删除任务</button></div>${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}</aside>
     </div>`;
   taskDetail.querySelectorAll("button[data-item-ref]").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
+  taskDetail.querySelector("button[data-pause-item-ref]")?.addEventListener("click", () => pauseItem(item.item_ref));
   taskDetail.querySelector("button[data-delete-item-ref]:not(:disabled)")?.addEventListener("click", () => openDeleteTask(item));
 }
 
@@ -522,10 +603,34 @@ function formatSyncTime(value) {
 }
 
 function renderFavorites(snapshot) {
+  latestFavoritesSnapshot = snapshot;
   const availableIds = new Set(snapshot.items.map((item) => item.aweme_id));
   selectedFavoriteIdsState = new Set(
     [...selectedFavoriteIdsState].filter((itemId) => availableIds.has(itemId)),
   );
+  const folders = Array.isArray(snapshot.folders) && snapshot.folders.length
+    ? snapshot.folders
+    : [{ folder_id: "default", name: "默认收藏夹", item_count: snapshot.items.length }];
+  if (activeFavoriteFolderId !== "all" && !folders.some((folder) => folder.folder_id === activeFavoriteFolderId)) {
+    activeFavoriteFolderId = "all";
+  }
+  const folderOptions = [
+    { folder_id: "all", name: "全部收藏", item_count: snapshot.items.length },
+    ...folders,
+  ];
+  favoriteFolders.innerHTML = folderOptions.map((folder) => `
+    <button type="button" data-favorite-folder="${escapeHtml(folder.folder_id)}" class="${folder.folder_id === activeFavoriteFolderId ? "is-active" : ""}">
+      <span>${escapeHtml(folder.name)}</span><small>${escapeHtml(String(folder.item_count))}</small>
+    </button>`).join("");
+  favoriteFolders.querySelectorAll("button[data-favorite-folder]").forEach((button) => button.addEventListener("click", () => {
+    activeFavoriteFolderId = button.dataset.favoriteFolder;
+    renderFavorites(latestFavoritesSnapshot);
+  }));
+  const selectedFolder = folderOptions.find((folder) => folder.folder_id === activeFavoriteFolderId);
+  favoriteFolderTitle.textContent = selectedFolder?.name || "全部收藏";
+  const visibleItems = activeFavoriteFolderId === "all"
+    ? snapshot.items
+    : snapshot.items.filter((item) => (item.folder_ids || ["default"]).includes(activeFavoriteFolderId));
   if (!snapshot.items.length) {
     favoriteList.innerHTML = `<p class="empty">还没有同步的抖音收藏。</p>`;
     if (!favoriteStatusProtected) favoriteStatus.textContent = "连接抖音后，收藏会出现在这里。";
@@ -533,22 +638,29 @@ function renderFavorites(snapshot) {
     return;
   }
   if (!favoriteStatusProtected) favoriteStatus.textContent = `最近同步：${formatSyncTime(snapshot.synced_at)}`;
-  favoriteList.innerHTML = snapshot.items.map((item) => {
+  if (!visibleItems.length) {
+    favoriteList.innerHTML = `<p class="empty">这个收藏夹还没有作品。</p>`;
+    updateFavoriteSelection();
+    return;
+  }
+  favoriteList.innerHTML = visibleItems.map((item) => {
     const thumbnail = item.thumbnail_path
       ? `<img src="${thumbnailHref(item.thumbnail_path)}" alt="" loading="lazy" />`
       : `<div class="thumbnail-placeholder" aria-label="封面暂不可用">封面暂不可用</div>`;
     return `
       <article class="favorite-card">
-        <div class="favorite-media">${thumbnail}</div>
+        <div class="favorite-media">${thumbnail}<label class="favorite-select"><input type="checkbox" value="${escapeHtml(item.aweme_id)}"${selectedFavoriteIdsState.has(item.aweme_id) ? " checked" : ""} /> 选择</label></div>
         <div class="favorite-card-copy">
           <h3 class="favorite-title">${escapeHtml(item.title)}</h3>
-          <p class="favorite-time">同步于 ${escapeHtml(formatSyncTime(item.synced_at))}</p>
-          <label class="favorite-select"><input type="checkbox" value="${escapeHtml(item.aweme_id)}"${selectedFavoriteIdsState.has(item.aweme_id) ? " checked" : ""} /> 加入收件箱</label>
-          <a class="favorite-link" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">打开作品页</a>
+          <div class="favorite-card-meta"><p class="favorite-time">${escapeHtml(formatSyncTime(item.synced_at))}</p><a class="favorite-link" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">打开作品</a></div>
         </div>
       </article>`;
   }).join("");
-  favoriteList.querySelectorAll("input[type=checkbox]").forEach((checkbox) => checkbox.addEventListener("change", updateFavoriteSelection));
+  favoriteList.querySelectorAll("input[type=checkbox]").forEach((checkbox) => checkbox.addEventListener("change", () => {
+    if (checkbox.checked) selectedFavoriteIdsState.add(checkbox.value);
+    else selectedFavoriteIdsState.delete(checkbox.value);
+    updateFavoriteSelection();
+  }));
   updateFavoriteSelection();
 }
 
@@ -579,12 +691,9 @@ async function retrySourceJob(jobId) {
 
 function selectedFavoriteIds() { return [...selectedFavoriteIdsState]; }
 function updateFavoriteSelection() {
-  selectedFavoriteIdsState = new Set(
-    [...favoriteList.querySelectorAll("input[type=checkbox]:checked")].map((item) => item.value),
-  );
   const selected = selectedFavoriteIds();
   addSelectedFavoritesButton.disabled = selected.length === 0;
-  favoriteSelection.textContent = selected.length ? `已选 ${selected.length} 项，加入后会使用当前默认结果。` : "可多选历史收藏；首次同步不会自动处理。";
+  favoriteSelection.textContent = selected.length ? `已选 ${selected.length} 项，切换收藏夹不会丢失选择。` : "可跨收藏夹多选；首次同步不会自动处理。";
 }
 
 async function loadFavorites() {
@@ -597,40 +706,46 @@ async function loadFavorites() {
 
 function renderAutomationStatus(status) {
   lastAutomationStatus = status;
-  const enabled = status.enabled;
-  automationState.textContent = enabled ? "自动整理已开启" : status.needs_authorization ? "需要重新确认" : status.configured ? "等待确认" : "等待设置";
-  automationState.className = `status-pill ${enabled ? "connected" : ""}`;
+  const paidAuthorized = status.paid_authorized ?? status.enabled;
+  const autoNewFavoritesEnabled = Boolean(status.auto_new_favorites_enabled ?? status.auto_organize_new_favorites);
+  const autoNewFavoritesActive = Boolean(status.auto_new_favorites_active);
+  automationState.textContent = paidAuthorized ? "付费许可已开启" : status.needs_authorization ? "需要重新确认付费许可" : status.configured ? "等待付费许可" : "等待设置";
+  automationState.className = `status-pill ${paidAuthorized ? "connected" : ""}`;
   const output = status.default_output || "complete_note_with_audio";
   const outputLabel = output === "complete_note" ? "完整笔记" : "笔记 + 音频";
   defaultOutputLabel.textContent = outputLabel;
   singleVideoOutput.textContent = outputLabel;
-  runtimeState.classList.toggle("is-on", enabled);
-  runtimeTitle.textContent = enabled ? "自动处理已开启" : "自动处理已关闭";
-  runtimeCopy.textContent = enabled ? "仅在语栖运行时工作" : "单个任务仍可加入并等待设置";
-  automationSummary.textContent = enabled
-    ? `会按 ${status.check_interval_seconds} 秒检查收件箱；默认生成${status.default_output === "complete_note" ? "完整笔记" : "完整笔记和播客音频"}。设置未变化时授权会持续有效。`
+  runtimeState.classList.toggle("is-on", paidAuthorized);
+  runtimeTitle.textContent = paidAuthorized ? "付费整理许可已开启" : "付费整理许可未开启";
+  runtimeCopy.textContent = paidAuthorized
+    ? autoNewFavoritesActive ? "手动任务可继续；新收藏也会自动加入" : "手动任务可继续；新收藏不会自动加入"
+    : "任务可以先完成材料，付费阶段会等待许可";
+  automationSummary.textContent = paidAuthorized
+    ? autoNewFavoritesActive
+      ? `手动任务会复用当前付费许可；自动加入新收藏已开启。默认生成${status.default_output === "complete_note" ? "完整笔记" : "完整笔记和播客音频"}。`
+      : `手动任务会复用当前付费许可；自动加入新收藏当前关闭。默认生成${status.default_output === "complete_note" ? "完整笔记" : "完整笔记和播客音频"}。`
     : status.needs_authorization
-      ? "模型、职责、额度或产出设置已经变化。检查后重新确认，自动整理才会继续。"
+      ? "模型、职责、额度或产出设置已经变化。检查后重新确认付费许可，手动任务才会继续。"
       : status.configured
-        ? "设置已保存。自动整理当前关闭，手动开启时会显示本次调用与费用边界。"
-        : "先保存默认产出并完成所需连接，再决定是否开启自动整理。";
-  const accessState = enabled ? "enabled" : status.needs_authorization ? "attention" : status.configured ? "ready" : "setup";
+        ? "设置已保存。开启付费许可后，手动任务可以继续；自动加入新收藏由独立开关控制。"
+        : "先保存默认产出并完成所需连接，再决定是否允许付费整理。";
+  const accessState = paidAuthorized ? "enabled" : status.needs_authorization ? "attention" : status.configured ? "ready" : "setup";
   automationAccess.dataset.state = accessState;
-  automationAccessTitle.textContent = enabled ? "已授权并运行" : status.needs_authorization ? "设置已变化，需要重新确认" : status.configured ? "设置已保存，自动整理未开启" : "先完成设置";
-  automationAccessCopy.textContent = enabled
-    ? "这项授权由语栖持久保存；再次进入页面无需重复确认。实质设置变化时会自动失效。"
+  automationAccessTitle.textContent = paidAuthorized ? "付费整理许可有效" : status.needs_authorization ? "设置已变化，需要重新确认" : status.configured ? "设置已保存，付费许可未开启" : "先完成设置";
+  automationAccessCopy.textContent = paidAuthorized
+    ? `这项许可由语栖持久保存；手动任务无需重复确认。${autoNewFavoritesEnabled ? "自动加入新收藏开关已开启。" : "自动加入新收藏仍是关闭状态。"}实质设置变化时许可会自动失效。`
     : status.needs_authorization
-      ? "已有任务和材料不会丢失。确认当前设置后，可以重新开启自动整理。"
+      ? "已有任务和材料不会丢失。确认当前设置后，可以重新开启付费整理许可。"
       : status.configured
-        ? "只有点击开启并确认调用说明后，语栖才会自动推进需要 Provider 的阶段。"
+        ? "只有明确允许付费整理后，语栖才会推进需要 Provider 的阶段；自动加入新收藏由独立开关控制。"
         : "保存默认产出并完成模型职责绑定后，这里会提供明确的开启操作。";
-  authorizeAutomationButton.hidden = enabled;
-  authorizeAutomationButton.disabled = !status.configured || enabled;
-  authorizeAutomationButton.textContent = status.needs_authorization ? "查看变化并重新确认" : "开启自动整理";
-  disableAutomationButton.hidden = !enabled;
+  authorizeAutomationButton.hidden = paidAuthorized;
+  authorizeAutomationButton.disabled = !status.configured || paidAuthorized;
+  authorizeAutomationButton.textContent = status.needs_authorization ? "查看变化并重新确认" : "允许付费整理";
+  disableAutomationButton.hidden = !paidAuthorized;
   if (status.configured && !settingsFormNeedsProtection(automationForm)) {
     automationForm.elements.default_output.value = status.default_output;
-    automationForm.elements.check_interval_seconds.value = status.check_interval_seconds;
+    automationForm.elements.check_interval_minutes.value = status.check_interval_minutes;
     automationForm.elements.auto_organize_new_favorites.checked = status.auto_organize_new_favorites;
     automationForm.elements.max_items_per_tick.value = status.max_items_per_tick;
   }
@@ -683,10 +798,13 @@ function openConnectionDialog(preset = null) {
 async function loadAutomationStatus() { try { renderAutomationStatus(await api("/api/automation/status")); } catch (error) { automationState.textContent = "无法读取"; } }
 
 function openAutomationAuthorization() {
-  if (!lastAutomationStatus.configured || lastAutomationStatus.enabled) return;
+  const paidAuthorized = lastAutomationStatus.paid_authorized ?? lastAutomationStatus.enabled;
+  if (!lastAutomationStatus.configured || paidAuthorized) return;
   const output = lastAutomationStatus.default_output === "complete_note" ? "完整笔记" : "完整笔记 + 播客音频";
   authorizationOutput.textContent = output;
-  authorizationInterval.textContent = `每 ${lastAutomationStatus.check_interval_seconds} 秒检查一次，每次最多 ${lastAutomationStatus.max_items_per_tick} 项`;
+  authorizationInterval.textContent = lastAutomationStatus.auto_new_favorites_enabled
+    ? "手动加入的任务；并允许自动加入新收藏"
+    : "手动加入的任务；不会自动加入新收藏";
   automationAuthorizationDialog.showModal();
   window.requestAnimationFrame(() => document.querySelector("#cancel-automation-authorization")?.focus({ preventScroll: true }));
 }
@@ -885,11 +1003,15 @@ async function syncFavorites(options = {}) {
 async function refresh(force = false) {
   try {
     const query = !force && revision ? `?revision=${encodeURIComponent(revision)}` : "";
-    const snapshot = await api(`/api/learning/snapshot${query}`);
+    const [snapshot, trash] = await Promise.all([
+      api(`/api/learning/snapshot${query}`),
+      api("/api/learning/trash"),
+    ]);
+    renderTrash(trash.items);
     if (!snapshot.unchanged) {
       revision = snapshot.revision;
       render(snapshot);
-    }
+    } else applyTaskFilter();
     await Promise.all([loadFavorites(), refreshProviderSettingsWhenIdle(), loadStorageStatus(true)]);
     await loadSourceJobs();
     await loadAutomationStatus();
@@ -924,6 +1046,11 @@ async function actOnItem(itemRef, action) {
       window.requestAnimationFrame(() => authorizeAutomationButton?.focus({ preventScroll: true }));
       return;
     }
+    if (action === "open_sources") {
+      showView("sources");
+      document.querySelector("#sources")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
     if (action === "open_single_video") {
       singleVideoDialog.showModal();
       window.requestAnimationFrame(() => document.querySelector("#local-video")?.focus({ preventScroll: true }));
@@ -938,6 +1065,12 @@ async function actOnItem(itemRef, action) {
     if (action === "retry_automation") {
       await api(`/api/learning/items/${encodeURIComponent(itemRef)}/retry-automation`, { method: "POST" });
       say("已重新加入整理队列。");
+      await refresh(true);
+      return;
+    }
+    if (action === "resume_task") {
+      await api(`/api/learning/items/${encodeURIComponent(itemRef)}/resume`, { method: "POST" });
+      say("已恢复后续调度；现有任务事实没有改写。");
       await refresh(true);
       return;
     }
@@ -983,7 +1116,7 @@ deleteTaskForm.addEventListener("submit", async (event) => {
   try {
     await api(`/api/learning/items/${encodeURIComponent(taskId)}`, { method: "DELETE" });
     closeDeleteTask();
-    selectedItemRef = null;
+    showTaskWorkbench();
     say("任务已移入回收区。");
     await Promise.all([refresh(true), loadSourceJobs()]);
   } catch (error) {
@@ -1023,10 +1156,10 @@ automationForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   try {
-    renderAutomationStatus(await api("/api/automation/configure", { method: "POST", body: JSON.stringify({ default_output: form.get("default_output"), auto_organize_new_favorites: form.has("auto_organize_new_favorites"), check_interval_seconds: Number(form.get("check_interval_seconds")), max_items_per_tick: Number(form.get("max_items_per_tick")) }) }));
+    renderAutomationStatus(await api("/api/automation/configure", { method: "POST", body: JSON.stringify({ default_output: form.get("default_output"), auto_organize_new_favorites: form.has("auto_organize_new_favorites"), check_interval_minutes: Number(form.get("check_interval_minutes")), max_items_per_tick: Number(form.get("max_items_per_tick")) }) }));
     dirtySettingsForms.delete(automationForm);
     await loadProviderSettings(String(form.get("default_output")));
-    say("自动整理设置已保存。需要自动执行时，请从权限状态卡明确开启。");
+    say("产出与来源设置已保存。付费整理许可与自动加入新收藏是两个独立状态。");
   } catch (error) { say(error.message); }
 });
 
@@ -1039,7 +1172,7 @@ confirmAutomationAuthorization.addEventListener("click", async () => {
   try {
     renderAutomationStatus(await api("/api/automation/authorize", { method: "POST", body: JSON.stringify({ confirm_paid: true }) }));
     closeAutomationAuthorization();
-    say("自动整理已开启；设置未变化时无需重复确认。");
+    say("付费整理许可已开启；设置未变化时，手动任务无需重复确认。");
   } catch (error) { say(error.message); }
   finally {
     confirmAutomationAuthorization.disabled = false;
@@ -1048,7 +1181,7 @@ confirmAutomationAuthorization.addEventListener("click", async () => {
 });
 
 disableAutomationButton.addEventListener("click", async () => {
-  try { renderAutomationStatus(await api("/api/automation/disable", { method: "POST" })); say("自动整理已关闭。 "); } catch (error) { say(error.message); }
+  try { renderAutomationStatus(await api("/api/automation/disable", { method: "POST" })); say("付费整理许可已关闭。"); } catch (error) { say(error.message); }
 });
 
 storageForm.addEventListener("submit", async (event) => {
@@ -1147,6 +1280,26 @@ for (const form of [providerForm, automationForm, providerLimitsForm, storageFor
   });
 }
 
+async function restoreTrashItem(bundleId) {
+  try {
+    await api(`/api/learning/trash/${encodeURIComponent(bundleId)}/restore`, { method: "POST" });
+    say("任务已恢复到当前任务列表。原有内容和状态均已保留。");
+    await Promise.all([refresh(true), loadSourceJobs()]);
+  } catch (error) {
+    say(error.message);
+  }
+}
+
+async function pauseItem(itemRef) {
+  try {
+    await api(`/api/learning/items/${encodeURIComponent(itemRef)}/pause`, { method: "POST" });
+    say("已暂停后续调度；已经开始的处理会继续完成。");
+    await refresh(true);
+  } catch (error) {
+    say(error.message);
+  }
+}
+
 document.querySelectorAll(".bookmark[data-view]").forEach((link) => link.addEventListener("click", (event) => {
   event.preventDefault();
   showView(link.dataset.view);
@@ -1161,6 +1314,7 @@ window.addEventListener("hashchange", () => {
 document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => {
   activeTaskFilter = button.dataset.filter;
   document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("is-active", item === button));
+  if (activeTaskFilter === "trash") showTaskWorkbench();
   applyTaskFilter();
 }));
 document.querySelectorAll("[data-settings-tab]").forEach((button) => button.addEventListener("click", () => showSettingsPanel(button.dataset.settingsTab)));

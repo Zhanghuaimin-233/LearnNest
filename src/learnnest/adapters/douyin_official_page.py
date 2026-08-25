@@ -140,6 +140,143 @@ async ({cursor, count, timeoutMs}) => {
 }
 """
 
+_RUNTIME_COLLECTIONS_SCRIPT = r"""
+async ({timeoutMs, maxPages}) => {
+  const deadline = Date.now() + timeoutMs;
+  const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const findContext = () => {
+    for (const element of document.querySelectorAll("div")) {
+      const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+      let fiber = fiberKey ? element[fiberKey] : null;
+      for (let depth = 0; fiber && depth < 24; depth += 1, fiber = fiber.return) {
+        const value = fiber.memoizedProps && fiber.memoizedProps.value;
+        if (
+          value && value.action && value.state &&
+          typeof value.action.getCollects === "function" &&
+          typeof value.action.getVideoList === "function" &&
+          value.state.videoResRef && value.state.collectResRef
+        ) return value;
+      }
+    }
+    return null;
+  };
+  const folderTab = [...document.querySelectorAll('[role="tab"]')].find(
+    (element) => (element.textContent || "").trim() === "收藏夹"
+  );
+  if (!folderTab) return {__learnnest_runtime_error__: true};
+  folderTab.click();
+
+  let context = null;
+  while (Date.now() < deadline && !context) {
+    context = findContext();
+    if (!context) await pause(100);
+  }
+  if (!context) return {__learnnest_runtime_error__: true};
+
+  const folderMap = new Map();
+  const mergeFolders = (folders) => {
+    if (!Array.isArray(folders)) return;
+    for (const folder of folders) {
+      const folderId = String(folder?.collectionFolderId || "");
+      if (folderId) folderMap.set(folderId, folder);
+    }
+  };
+  mergeFolders(context.state.collects);
+  let catalogPages = 0;
+  let catalogHasMore = Boolean(context.state.collectResRef.current?.hasMore);
+  while (
+    ((catalogPages === 0 && folderMap.size === 0) || catalogHasMore) &&
+    catalogPages < maxPages
+  ) {
+    const page = await context.action.getCollects();
+    if (page && page.statusCode !== 0) {
+      return {__learnnest_business_error__: page.statusCode};
+    }
+    mergeFolders(page?.data);
+    catalogHasMore = Boolean(page?.hasMore);
+    catalogPages += 1;
+    await pause(50);
+    context = findContext() || context;
+    mergeFolders(context.state.collects);
+    if (!page || typeof page.hasMore !== "boolean") {
+      catalogHasMore = Boolean(context.state.collectResRef.current?.hasMore);
+    }
+  }
+  if (catalogHasMore) {
+    return {__learnnest_pagination_stalled__: true};
+  }
+
+  const folders = [...folderMap.values()];
+  const itemMapByFolder = new Map();
+  for (const folder of folders) {
+    const folderId = String(folder.collectionFolderId || "");
+    if (!folderId) continue;
+    const itemMap = new Map();
+    const mergeItems = (items) => {
+      if (!Array.isArray(items)) return;
+      for (const item of items) {
+        const awemeId = String(item?.awemeId || "");
+        if (awemeId) itemMap.set(awemeId, item);
+      }
+    };
+    let itemPages = 0;
+    let itemState = (findContext() || context).state.videoResRef.current?.[folderId];
+    mergeItems(itemState?.data);
+    let itemHasMore = Boolean(itemState?.hasMore);
+    while (
+      ((itemPages === 0 && itemMap.size === 0) || itemHasMore) &&
+      itemPages < maxPages
+    ) {
+      context = findContext() || context;
+      const page = await context.action.getVideoList(folderId);
+      if (page && page.statusCode !== 0) {
+        return {__learnnest_business_error__: page.statusCode};
+      }
+      mergeItems(page?.data);
+      itemHasMore = Boolean(page?.hasMore);
+      itemPages += 1;
+      await pause(50);
+      itemState = (findContext() || context).state.videoResRef.current?.[folderId];
+      mergeItems(itemState?.data);
+      if (!page || typeof page.hasMore !== "boolean") {
+        itemHasMore = Boolean(itemState?.hasMore);
+      }
+    }
+    if (itemHasMore) return {__learnnest_pagination_stalled__: true};
+    itemMapByFolder.set(folderId, itemMap);
+  }
+
+  const projected = folders.map((folder) => {
+    const folderId = String(folder.collectionFolderId || "");
+    const rawItems = [...(itemMapByFolder.get(folderId)?.values() || [])];
+    const seen = new Set();
+    const items = [];
+    for (const item of rawItems) {
+      const awemeId = String(item?.awemeId || "");
+      if (!/^\d+$/.test(awemeId) || seen.has(awemeId)) continue;
+      seen.add(awemeId);
+      const title = String(item?.desc || item?.itemTitle || `抖音作品 ${awemeId}`).trim();
+      const coverCandidates = [
+        ...(Array.isArray(item?.video?.coverUrlList) ? item.video.coverUrlList : []),
+        item?.video?.cover,
+        item?.video?.originCover,
+      ];
+      const coverUrl = coverCandidates.find(
+        (value) => typeof value === "string" && value.startsWith("https://")
+      ) || null;
+      items.push({aweme_id: awemeId, title, cover_url: coverUrl});
+    }
+    return {
+      folder_id: folderId,
+      name: String(folder.collectionFolderName || folderId).trim(),
+      item_count: Number(folder.videoTotal || items.length),
+      items,
+    };
+  });
+  return {status_code: 0, folders: projected};
+}
+"""
+
 
 class DouyinOfficialPageError(DouyinAdapterError):
     """A safe, structured failure of official-page response collection."""
@@ -175,6 +312,7 @@ class DouyinOfficialPageTransport:
         playwright_factory: Callable[[], Any] | None = None,
         timeout_ms: int = _DEFAULT_SYNC_TIMEOUT_MS,
         http_opener: Callable[..., Any] = urlopen,
+        include_custom_folders: bool = False,
     ) -> None:
         if not cookie.get_secret_value().strip():
             raise ValueError("Douyin cookie must not be empty")
@@ -190,7 +328,9 @@ class DouyinOfficialPageTransport:
         self._playwright_factory = playwright_factory or _default_playwright_factory
         self._timeout_ms = timeout_ms
         self._http_opener = http_opener
+        self._include_custom_folders = include_custom_folders
         self._http_transport: DouyinHttpTransport | None = None
+        self._collections: tuple[dict[str, Any], ...] | None = None
 
     def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
         if cursor < 0:
@@ -223,7 +363,7 @@ class DouyinOfficialPageTransport:
         runtime = browser = context = None
         try:
             runtime = self._playwright_factory()
-            browser = runtime.chromium.launch(channel="msedge", headless=False)
+            browser = runtime.chromium.launch(channel="msedge", headless=True)
             context = (
                 browser.new_context(
                     locale="zh-CN",
@@ -235,20 +375,43 @@ class DouyinOfficialPageTransport:
             if self._storage_state is None:
                 context.add_cookies(_cookie_records(self.cookie))
             page = context.new_page()
-            return bootstrap_official_favorites_request(
+            result = bootstrap_official_favorites_request(
                 page,
                 cursor=cursor,
                 count=count,
                 timeout_ms=self._timeout_ms,
             )
+            if self._include_custom_folders:
+                payload = collect_official_collections(
+                    page,
+                    timeout_ms=self._timeout_ms,
+                )
+                self._collections = tuple(payload["folders"])
+            return result
         finally:
             _close_runtime(context, browser, runtime)
 
     def list_folders(self, *, cursor: int, count: int) -> Mapping[str, Any]:
-        del cursor, count
-        raise DouyinAdapterError(
-            "Douyin custom folders are not verified on the official page transport"
-        )
+        _validate_collection_page(cursor=cursor, count=count)
+        if self._collections is None:
+            raise DouyinAdapterError(
+                "Douyin custom folders require the verified official collection path"
+            )
+        page = self._collections[cursor : cursor + count]
+        next_cursor = cursor + len(page)
+        return {
+            "status_code": 0,
+            "collects_list": [
+                {
+                    "collects_id_str": folder["folder_id"],
+                    "collects_name": folder["name"],
+                    "total_number": folder["item_count"],
+                }
+                for folder in page
+            ],
+            "cursor": next_cursor,
+            "has_more": next_cursor < len(self._collections),
+        }
 
     def list_folder_items(
         self,
@@ -257,10 +420,37 @@ class DouyinOfficialPageTransport:
         cursor: int,
         count: int,
     ) -> Mapping[str, Any]:
-        del folder_id, cursor, count
-        raise DouyinAdapterError(
-            "Douyin custom folders are not verified on the official page transport"
+        _validate_collection_page(cursor=cursor, count=count)
+        if self._collections is None:
+            raise DouyinAdapterError(
+                "Douyin custom folders require the verified official collection path"
+            )
+        selected = next(
+            (
+                folder
+                for folder in self._collections
+                if folder["folder_id"] == folder_id
+            ),
+            None,
         )
+        if selected is None:
+            raise DouyinAdapterError("Douyin custom folder is not present")
+        items = selected["items"]
+        page = items[cursor : cursor + count]
+        next_cursor = cursor + len(page)
+        return {
+            "status_code": 0,
+            "aweme_list": [
+                {
+                    "aweme_id": item["aweme_id"],
+                    "desc": item["title"],
+                    "cover_url": item["cover_url"],
+                }
+                for item in page
+            ],
+            "cursor": next_cursor,
+            "has_more": next_cursor < len(items),
+        }
 
 
 @dataclass(frozen=True)
@@ -388,6 +578,112 @@ def bootstrap_official_favorites_request(
         payload.get("status_code", "unknown"),
     )
     return payload, _CapturedRequestSigner(params=query, headers=headers)
+
+
+def collect_official_collections(
+    page: Any,
+    *,
+    timeout_ms: int = _DEFAULT_SYNC_TIMEOUT_MS,
+    max_pages: int = 50,
+) -> Mapping[str, Any]:
+    """Read custom collection facts from the current official page runtime."""
+    if timeout_ms < 1:
+        raise ValueError("Douyin official page timeout must be positive")
+    if max_pages < 1:
+        raise ValueError("Douyin official collection max pages must be positive")
+    result = page.evaluate(
+        _RUNTIME_COLLECTIONS_SCRIPT,
+        {"timeoutMs": timeout_ms, "maxPages": max_pages},
+    )
+    if not isinstance(result, Mapping):
+        raise DouyinOfficialPageError(
+            "Douyin official collections returned a non-object response",
+            reason="invalid_response",
+        )
+    if result.get("__learnnest_runtime_error__"):
+        raise DouyinOfficialPageError(
+            "Douyin official collection runtime is unavailable",
+            reason="runtime_unavailable",
+        )
+    if result.get("__learnnest_pagination_stalled__"):
+        raise DouyinOfficialPageError(
+            "Douyin official collection pagination did not finish",
+            reason="pagination_stalled",
+        )
+    if "__learnnest_business_error__" in result:
+        raise DouyinOfficialPageError(
+            "Douyin official collection request returned a business error",
+            reason="business_error",
+            status_code=str(result["__learnnest_business_error__"]),
+        )
+    if result.get("status_code") != 0 or not isinstance(result.get("folders"), list):
+        raise DouyinOfficialPageError(
+            "Douyin official collection response is invalid",
+            reason="invalid_response",
+        )
+
+    folders: list[dict[str, Any]] = []
+    seen_folders: set[str] = set()
+    for raw_folder in result["folders"]:
+        if not isinstance(raw_folder, Mapping):
+            continue
+        folder_id = raw_folder.get("folder_id")
+        name = raw_folder.get("name")
+        raw_items = raw_folder.get("items")
+        if (
+            not isinstance(folder_id, str)
+            or not folder_id.isdigit()
+            or folder_id in seen_folders
+            or not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(raw_items, list)
+        ):
+            continue
+        items: list[dict[str, str | None]] = []
+        seen_items: set[str] = set()
+        for raw_item in raw_items:
+            if not isinstance(raw_item, Mapping):
+                continue
+            item_id = raw_item.get("aweme_id")
+            title = raw_item.get("title")
+            cover_url = raw_item.get("cover_url")
+            if (
+                not isinstance(item_id, str)
+                or not item_id.isdigit()
+                or item_id in seen_items
+                or not isinstance(title, str)
+                or not title.strip()
+                or (cover_url is not None and not isinstance(cover_url, str))
+            ):
+                continue
+            items.append(
+                {
+                    "aweme_id": item_id,
+                    "title": title.strip(),
+                    "cover_url": cover_url,
+                }
+            )
+            seen_items.add(item_id)
+        item_count = raw_folder.get("item_count")
+        folders.append(
+            {
+                "folder_id": folder_id,
+                "name": name.strip(),
+                "item_count": (
+                    item_count
+                    if isinstance(item_count, int) and item_count >= len(items)
+                    else len(items)
+                ),
+                "items": items,
+            }
+        )
+        seen_folders.add(folder_id)
+    _LOGGER.info(
+        "douyin official collections status_code=0 folders=%s items=%s",
+        len(folders),
+        sum(len(folder["items"]) for folder in folders),
+    )
+    return {"status_code": 0, "folders": folders}
 
 
 def collect_official_favorites(
@@ -534,6 +830,13 @@ def collect_official_favorites(
         "Douyin official page did not return favorites",
         reason="no_response",
     )
+
+
+def _validate_collection_page(*, cursor: int, count: int) -> None:
+    if cursor < 0:
+        raise ValueError("Douyin cursor must not be negative")
+    if count < 1:
+        raise ValueError("Douyin page count must be positive")
 
 
 def _validate_payload_status(payload: Mapping[str, Any]) -> None:

@@ -29,6 +29,7 @@ from learnnest.adapters.douyin_official_page import (
 _FAVORITES_DIRECTORY = Path(".learnnest") / "douyin"
 _FACTS_FILENAME = "favorites.json"
 _THUMBNAIL_DIRECTORY = "thumbnails"
+DEFAULT_DOUYIN_FOLDER_ID = "default"
 _IMAGE_SUFFIXES = frozenset({".avif", ".gif", ".jpeg", ".jpg", ".png", ".webp"})
 _CONTENT_TYPES = {
     "image/avif": ".avif",
@@ -65,14 +66,30 @@ class DouyinFavorite:
     url: str
     synced_at: str
     thumbnail_path: str | None
+    folder_ids: tuple[str, ...] = (DEFAULT_DOUYIN_FOLDER_ID,)
 
-    def payload(self) -> dict[str, str | None]:
+    def payload(self) -> dict[str, Any]:
         return {
             "aweme_id": self.aweme_id,
             "title": self.title,
             "url": self.url,
             "synced_at": self.synced_at,
             "thumbnail_path": self.thumbnail_path,
+            "folder_ids": list(self.folder_ids),
+        }
+
+
+@dataclass(frozen=True)
+class DouyinFavoritesFolder:
+    folder_id: str
+    name: str
+    item_count: int
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "folder_id": self.folder_id,
+            "name": self.name,
+            "item_count": self.item_count,
         }
 
 
@@ -80,10 +97,12 @@ class DouyinFavorite:
 class DouyinFavoritesSnapshot:
     synced_at: str | None
     items: tuple[DouyinFavorite, ...]
+    folders: tuple[DouyinFavoritesFolder, ...] = ()
 
     def payload(self) -> dict[str, Any]:
         return {
             "synced_at": self.synced_at,
+            "folders": [folder.payload() for folder in self.folders],
             "items": [item.payload() for item in self.items],
         }
 
@@ -139,11 +158,13 @@ class DouyinFavoritesStore:
                 DouyinOfficialPageTransport(
                     cookie,
                     storage_state=browser_storage_state,
+                    include_custom_folders=True,
                 )
                 if self._uses_default_transport
                 else self._transport_factory(cookie)
             )
             raw_items = self._collect_pages(transport)
+            custom_folders = self._collect_custom_folders(transport)
         except DouyinAuthenticationError as error:
             if (
                 error.reason != "request_rejected"
@@ -212,12 +233,53 @@ class DouyinFavoritesStore:
         except (OSError, ValueError, TypeError) as error:
             raise DouyinFavoritesError("抖音收藏同步失败。") from error
 
-        synced_at = _now()
-        items: list[DouyinFavorite] = []
+        ordered_ids: list[str] = []
+        raw_by_id: dict[str, Mapping[str, Any]] = {}
+        folder_ids_by_item: dict[str, list[str]] = {}
+        default_ids: set[str] = set()
         for raw in raw_items:
             item_id = _aweme_id(raw)
-            if item_id is None or any(item.aweme_id == item_id for item in items):
+            if item_id is None:
                 continue
+            if item_id not in raw_by_id:
+                ordered_ids.append(item_id)
+                raw_by_id[item_id] = raw
+            default_ids.add(item_id)
+            folder_ids_by_item.setdefault(item_id, []).append(DEFAULT_DOUYIN_FOLDER_ID)
+        folder_facts: list[DouyinFavoritesFolder] = [
+            DouyinFavoritesFolder(
+                folder_id=DEFAULT_DOUYIN_FOLDER_ID,
+                name="默认收藏夹",
+                item_count=len(default_ids),
+            )
+        ]
+        for folder_id, name, folder_items in custom_folders:
+            contained: set[str] = set()
+            for raw in folder_items:
+                item_id = _aweme_id(raw)
+                if item_id is None or item_id in contained:
+                    continue
+                contained.add(item_id)
+                if item_id not in raw_by_id:
+                    ordered_ids.append(item_id)
+                    raw_by_id[item_id] = raw
+                elif _cover_url(raw_by_id[item_id]) is None and _cover_url(raw):
+                    raw_by_id[item_id] = raw
+                memberships = folder_ids_by_item.setdefault(item_id, [])
+                if folder_id not in memberships:
+                    memberships.append(folder_id)
+            folder_facts.append(
+                DouyinFavoritesFolder(
+                    folder_id=folder_id,
+                    name=name,
+                    item_count=len(contained),
+                )
+            )
+
+        synced_at = _now()
+        items: list[DouyinFavorite] = []
+        for item_id in ordered_ids:
+            raw = raw_by_id[item_id]
             title = _title(raw, item_id)
             thumbnail_path = self._download_thumbnail(
                 item_id,
@@ -231,11 +293,120 @@ class DouyinFavoritesStore:
                     url=f"https://www.douyin.com/video/{item_id}",
                     synced_at=synced_at,
                     thumbnail_path=thumbnail_path,
+                    folder_ids=tuple(folder_ids_by_item[item_id]),
                 )
             )
-        snapshot = DouyinFavoritesSnapshot(synced_at=synced_at, items=tuple(items))
+        snapshot = DouyinFavoritesSnapshot(
+            synced_at=synced_at,
+            items=tuple(items),
+            folders=tuple(folder_facts),
+        )
         _atomic_write_json(self.facts_path, snapshot.payload())
         return snapshot
+
+    def _collect_custom_folders(
+        self,
+        transport: FavoritesTransport,
+    ) -> list[tuple[str, str, list[Mapping[str, Any]]]]:
+        list_folders = getattr(transport, "list_folders", None)
+        list_folder_items = getattr(transport, "list_folder_items", None)
+        if not callable(list_folders) or not callable(list_folder_items):
+            return []
+        cursor = 0
+        folders: list[tuple[str, str, list[Mapping[str, Any]]]] = []
+        seen_folders: set[str] = set()
+        has_more = False
+        for _ in range(self._max_pages):
+            payload = list_folders(cursor=cursor, count=self._page_size)
+            if not isinstance(payload, Mapping):
+                raise DouyinFavoritesError("抖音收藏夹响应格式无效。")
+            _validate_status(payload)
+            raw_folders = payload.get("collects_list", [])
+            if not isinstance(raw_folders, list):
+                raise DouyinFavoritesError("抖音收藏夹响应格式无效。")
+            page_ids: list[str] = []
+            for raw_folder in raw_folders:
+                if not isinstance(raw_folder, Mapping):
+                    continue
+                folder_id = _folder_id(raw_folder)
+                if folder_id is None or folder_id in seen_folders:
+                    continue
+                name = _folder_name(raw_folder, folder_id)
+                page_ids.append(folder_id)
+                seen_folders.add(folder_id)
+                folders.append(
+                    (
+                        folder_id,
+                        name,
+                        self._collect_folder_items(list_folder_items, folder_id),
+                    )
+                )
+            has_more = bool(payload.get("has_more"))
+            if not has_more:
+                break
+            if not page_ids:
+                raise DouyinFavoritesError(
+                    "抖音收藏夹下一页没有返回有效目录；本次收藏未更新。"
+                )
+            next_cursor = _cursor_value(payload.get("cursor"))
+            if next_cursor == cursor:
+                raise DouyinFavoritesError(
+                    "抖音收藏夹下一页游标没有前进；本次收藏未更新。"
+                )
+            cursor = next_cursor
+        if has_more:
+            raise DouyinFavoritesError(
+                f"抖音收藏夹超过安全分页上限（{self._max_pages} 页）；本次收藏未更新。"
+            )
+        return folders
+
+    def _collect_folder_items(
+        self,
+        fetch: Callable[..., Mapping[str, Any]],
+        folder_id: str,
+    ) -> list[Mapping[str, Any]]:
+        cursor = 0
+        items: list[Mapping[str, Any]] = []
+        seen: set[str] = set()
+        has_more = False
+        for _ in range(self._max_pages):
+            payload = fetch(folder_id, cursor=cursor, count=self._page_size)
+            if not isinstance(payload, Mapping):
+                raise DouyinFavoritesError("抖音收藏夹内容响应格式无效。")
+            _validate_status(payload)
+            raw_items = payload.get("aweme_list", [])
+            if not isinstance(raw_items, list):
+                raise DouyinFavoritesError("抖音收藏夹内容响应格式无效。")
+            page_ids: list[str] = []
+            for raw in raw_items:
+                if not isinstance(raw, Mapping):
+                    continue
+                item_id = _aweme_id(raw)
+                if item_id is None:
+                    continue
+                page_ids.append(item_id)
+                if item_id not in seen:
+                    seen.add(item_id)
+                    items.append(raw)
+            has_more = bool(payload.get("has_more"))
+            if not has_more:
+                break
+            if not page_ids:
+                raise DouyinFavoritesError(
+                    "抖音收藏夹内容下一页没有返回有效作品；本次收藏未更新。"
+                )
+            next_cursor = _cursor_value(payload.get("cursor"))
+            if next_cursor == cursor:
+                raise DouyinFavoritesError(
+                    "抖音收藏夹内容下一页游标没有前进；本次收藏未更新。"
+                )
+            cursor = next_cursor
+        if has_more:
+            raise DouyinFavoritesError(
+                f"抖音收藏夹内容超过安全分页上限（{self._max_pages} 页）；"
+                "本次收藏未更新。"
+            )
+        return items
 
     def thumbnail_file(self, relative_path: str) -> Path:
         snapshot = self.read_snapshot()
@@ -360,6 +531,31 @@ def _safe_snapshot(
     raw_items = payload.get("items")
     if not isinstance(raw_items, list):
         return DouyinFavoritesSnapshot(synced_at=safe_synced_at, items=())
+    raw_folders = payload.get("folders")
+    folders_by_id: dict[str, str] = {}
+    folder_order: list[str] = []
+    if isinstance(raw_folders, list):
+        for raw_folder in raw_folders:
+            if not isinstance(raw_folder, Mapping):
+                continue
+            folder_id = raw_folder.get("folder_id")
+            name = raw_folder.get("name")
+            if (
+                not _safe_folder_id(folder_id)
+                or folder_id in folders_by_id
+                or not isinstance(name, str)
+                or not name.strip()
+            ):
+                continue
+            folders_by_id[folder_id] = name.strip()
+            folder_order.append(folder_id)
+    if DEFAULT_DOUYIN_FOLDER_ID not in folders_by_id:
+        folders_by_id = {
+            DEFAULT_DOUYIN_FOLDER_ID: "默认收藏夹",
+            **folders_by_id,
+        }
+        folder_order.insert(0, DEFAULT_DOUYIN_FOLDER_ID)
+
     items: list[DouyinFavorite] = []
     seen: set[str] = set()
     for raw in raw_items:
@@ -387,6 +583,20 @@ def _safe_snapshot(
             .is_relative_to(thumbnail_directory.resolve())
             else None
         )
+        raw_item_folders = raw.get("folder_ids")
+        safe_item_folders = (
+            tuple(
+                dict.fromkeys(
+                    folder_id
+                    for folder_id in raw_item_folders
+                    if isinstance(folder_id, str) and folder_id in folders_by_id
+                )
+            )
+            if isinstance(raw_item_folders, list)
+            else (DEFAULT_DOUYIN_FOLDER_ID,)
+        )
+        if not safe_item_folders:
+            safe_item_folders = (DEFAULT_DOUYIN_FOLDER_ID,)
         items.append(
             DouyinFavorite(
                 aweme_id=item_id,
@@ -394,10 +604,27 @@ def _safe_snapshot(
                 url=f"https://www.douyin.com/video/{item_id}",
                 synced_at=item_synced_at,
                 thumbnail_path=safe_thumbnail,
+                folder_ids=safe_item_folders,
             )
         )
         seen.add(item_id)
-    return DouyinFavoritesSnapshot(synced_at=safe_synced_at, items=tuple(items))
+    counts = {
+        folder_id: sum(folder_id in item.folder_ids for item in items)
+        for folder_id in folder_order
+    }
+    folders = tuple(
+        DouyinFavoritesFolder(
+            folder_id=folder_id,
+            name=folders_by_id[folder_id],
+            item_count=counts[folder_id],
+        )
+        for folder_id in folder_order
+    )
+    return DouyinFavoritesSnapshot(
+        synced_at=safe_synced_at,
+        items=tuple(items),
+        folders=folders,
+    )
 
 
 def _validate_status(payload: Mapping[str, Any]) -> None:
@@ -429,6 +656,28 @@ def _aweme_id(raw: Mapping[str, Any]) -> str | None:
         return None
     value = value.strip()
     return value if value.isdigit() else None
+
+
+def _folder_id(raw: Mapping[str, Any]) -> str | None:
+    value = raw.get("collects_id_str") or raw.get("collects_id")
+    if isinstance(value, int):
+        value = str(value)
+    if not _safe_folder_id(value) or value == DEFAULT_DOUYIN_FOLDER_ID:
+        return None
+    return value
+
+
+def _safe_folder_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and (value == DEFAULT_DOUYIN_FOLDER_ID or value.isdigit())
+    )
+
+
+def _folder_name(raw: Mapping[str, Any], folder_id: str) -> str:
+    value = raw.get("collects_name")
+    return value.strip() if isinstance(value, str) and value.strip() else folder_id
 
 
 def _title(raw: Mapping[str, Any], item_id: str) -> str:

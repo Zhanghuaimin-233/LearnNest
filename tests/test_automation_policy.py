@@ -1,4 +1,6 @@
 from datetime import UTC, datetime
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +9,7 @@ from pydantic import SecretStr
 from typer.testing import CliRunner
 
 from learnnest.automation_models import AutomationBudget, AutomationPolicy
+from learnnest.automation_models import AutomationTaskState
 from learnnest.automation_runner import AutomationRunResult
 from learnnest.automation_store import (
     authorize,
@@ -14,6 +17,7 @@ from learnnest.automation_store import (
     load_status,
     policy_sha256,
     save_policy,
+    save_task_state,
     save_tick_result,
 )
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
@@ -107,6 +111,73 @@ def test_policy_migrates_legacy_schedule_and_freezes_default_output() -> None:
     assert migrated.schedule_id == "douyin-favorites"
     assert migrated.default_output == "complete_note_with_audio"
     assert policy_sha256(note_only) != policy_sha256(note_with_audio)
+
+
+def test_policy_migrates_legacy_seconds_without_revoking_authorization(
+    tmp_path: Path,
+) -> None:
+    authorized_at = datetime(2026, 8, 25, tzinfo=UTC)
+    legacy_policy = _policy().model_dump(mode="json")
+    legacy_policy.update(
+        {
+            "schema_version": "1.2",
+            "enabled": True,
+            "authorized_at": authorized_at.isoformat(),
+            "check_interval_seconds": 300,
+        }
+    )
+    legacy_policy.pop("check_interval_minutes", None)
+    hash_payload = {
+        key: value
+        for key, value in legacy_policy.items()
+        if key not in {"enabled", "authorized_at", "paid_retry_limit"}
+    }
+    legacy_sha = hashlib.sha256(
+        json.dumps(
+            hash_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    status_path = tmp_path / ".learnnest" / "automation" / "status.json"
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.2",
+                "policy": legacy_policy,
+                "policy_sha256": legacy_sha,
+                "last_tick_at": None,
+                "last_tick_summary": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_task_state(
+        tmp_path,
+        AutomationTaskState(task_id="legacy-task", policy_sha256=legacy_sha),
+    )
+
+    migrated = load_status(tmp_path)
+
+    assert migrated is not None
+    assert migrated.schema_version == "1.3"
+    assert migrated.policy.schema_version == "1.3"
+    assert migrated.policy.check_interval_minutes == 5
+    assert migrated.policy.enabled is True
+    assert migrated.policy.authorized_at == authorized_at
+    persisted = json.loads(status_path.read_text(encoding="utf-8"))
+    assert persisted["policy"]["check_interval_minutes"] == 5
+    assert "check_interval_seconds" not in persisted["policy"]
+    assert (
+        tmp_path
+        / ".learnnest"
+        / "automation"
+        / "tasks"
+        / "legacy-task"
+        / f"{migrated.policy_sha256}.json"
+    ).is_file()
 
 
 def test_cli_configures_retry_limit_without_persisting_secret(tmp_path: Path) -> None:

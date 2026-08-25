@@ -40,9 +40,14 @@ from learnnest.adapters.douyin_http import (
     DouyinAuthenticationError,
     douyin_authentication_message,
 )
-from learnnest.douyin_favorites import DouyinFavoritesError, DouyinFavoritesStore
+from learnnest.douyin_favorites import (
+    DEFAULT_DOUYIN_FOLDER_ID,
+    DouyinFavoritesError,
+    DouyinFavoritesStore,
+)
 from learnnest.douyin_cookie_store import DouyinCookieStore
 from learnnest.douyin_login import DouyinLoginError, DouyinLoginSessionManager
+from learnnest.downloader import YtDlpDownloader
 from learnnest.execution import plan_recovery
 from learnnest.learning_workspace import (
     LearningItem,
@@ -84,7 +89,12 @@ from learnnest.tts_providers import (
 from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
 from learnnest.sources import SourceParseError, collect_sources
 from learnnest.task_store import find_task_by_id, load_task
-from learnnest.task_trash import TaskTrashError, trash_task
+from learnnest.task_trash import (
+    TaskTrashError,
+    list_trashed_tasks,
+    restore_trashed_task,
+    trash_task,
+)
 from learnnest.web_jobs import WebJob, WebJobStore
 from learnnest.learning_state import (
     automation_budget_restart_is_due,
@@ -179,7 +189,7 @@ class AutomationConfigureRequest(BaseModel):
 
     default_output: Literal["complete_note", "complete_note_with_audio"]
     auto_organize_new_favorites: bool = False
-    check_interval_seconds: int = Field(ge=30, le=3600)
+    check_interval_minutes: int = Field(ge=1, le=60)
     max_items_per_tick: int = Field(ge=1, le=20)
 
 
@@ -314,6 +324,19 @@ class WebService:
         self._start_job(job, self._process_job_runner(job))
         return job
 
+    def _douyin_runtime_downloader(self) -> YtDlpDownloader:
+        session = self.douyin_login.current_session()
+        session_id = session.get("session_id")
+        if session.get("status") != "connected" or not isinstance(session_id, str):
+            raise ValueError("抖音登录状态不可用，请在来源页重新连接后重试。")
+        try:
+            cookie = self.douyin_login.cookie_for(session_id)
+        except DouyinLoginError as error:
+            raise ValueError(
+                "抖音登录状态不可用，请在来源页重新连接后重试。"
+            ) from error
+        return YtDlpDownloader(cookie=cookie)
+
     def _process_job_runner(self, job: WebJob) -> Callable[[], None]:
         def runner() -> None:
             self.jobs.start(job.job_id)
@@ -331,6 +354,13 @@ class WebService:
             if source_item.input_type == "local_file":
                 task = process_video(
                     Path(source_item.input), self.output_root, "evidence"
+                )
+            elif job.source_kind == "douyin_favorite":
+                task = process_source(
+                    source_item,
+                    self.output_root,
+                    "evidence",
+                    downloader=self._douyin_runtime_downloader(),
                 )
             else:
                 task = process_source(source_item, self.output_root, "evidence")
@@ -475,21 +505,33 @@ class WebService:
     def automation_status(self) -> dict[str, Any]:
         status = load_automation_status(self.output_root)
         if status is None:
-            return {"configured": False, "enabled": False}
+            return {
+                "configured": False,
+                "enabled": False,
+                "paid_authorized": False,
+                "auto_new_favorites_enabled": False,
+                "auto_new_favorites_active": False,
+            }
         authorization_valid = (
             status.policy.enabled
             and status.policy.authorized_at is not None
             and status.policy.provider_settings_sha256
             == settings_sha256(load_settings(self.output_root))
         )
+        auto_new_favorites_enabled = status.policy.auto_organize_new_favorites
         return {
             "configured": True,
             "enabled": authorization_valid,
+            "paid_authorized": authorization_valid,
+            "auto_new_favorites_enabled": auto_new_favorites_enabled,
+            "auto_new_favorites_active": (
+                authorization_valid and auto_new_favorites_enabled
+            ),
             "needs_authorization": status.policy.enabled and not authorization_valid,
             "schedule_id": status.policy.schedule_id,
             "default_output": status.policy.default_output,
-            "auto_organize_new_favorites": status.policy.auto_organize_new_favorites,
-            "check_interval_seconds": status.policy.check_interval_seconds,
+            "auto_organize_new_favorites": auto_new_favorites_enabled,
+            "check_interval_minutes": status.policy.check_interval_minutes,
             "max_items_per_tick": status.policy.max_items_per_tick,
             "authorized_at": _isoformat(status.policy.authorized_at),
             "last_tick_at": _isoformat(status.last_tick_at),
@@ -520,7 +562,7 @@ class WebService:
                     reviewer=reviewer,
                     default_output=request.default_output,
                     auto_organize_new_favorites=request.auto_organize_new_favorites,
-                    check_interval_seconds=request.check_interval_seconds,
+                    check_interval_minutes=request.check_interval_minutes,
                     max_items_per_tick=request.max_items_per_tick,
                     retries_per_stage=settings.retries_per_role,
                     budget=AutomationBudget(
@@ -530,7 +572,7 @@ class WebService:
                 ),
             )
         except (KeyError, ValueError) as error:
-            raise ValueError("自动处理设置无法保存。") from error
+            raise ValueError("整理设置无法保存。") from error
         self.wake_automation()
         return self.automation_status()
 
@@ -541,7 +583,7 @@ class WebService:
         try:
             authorize_automation(self.output_root)
         except ValueError as error:
-            raise ValueError("自动处理尚未完成设置。") from error
+            raise ValueError("付费整理许可尚未完成设置。") from error
         self.wake_automation()
         return self.automation_status()
 
@@ -549,7 +591,7 @@ class WebService:
         try:
             disable_automation(self.output_root)
         except ValueError as error:
-            raise ValueError("自动处理尚未完成设置。") from error
+            raise ValueError("付费整理许可尚未完成设置。") from error
         return self.automation_status()
 
     def storage_status(self) -> dict[str, Any]:
@@ -759,7 +801,10 @@ class WebService:
         if can_organize:
             known = {item.aweme_id for item in previous.items}
             for favorite in snapshot.items:
-                if favorite.aweme_id not in known:
+                if (
+                    favorite.aweme_id not in known
+                    and DEFAULT_DOUYIN_FOLDER_ID in favorite.folder_ids
+                ):
                     self.submit_process(favorite.url, source_kind="douyin_favorite")
         return snapshot.payload()
 
@@ -1048,6 +1093,26 @@ syncInitialHashBookmark();
         except LearningWorkspaceError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
+    @app.post("/api/learning/items/{item_ref}/pause")
+    def pause_learning_item(item_ref: str) -> dict[str, Any]:
+        try:
+            return {"item": _learning_item_payload(workspace.pause_item(item_ref))}
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="内容不存在。") from error
+        except LearningWorkspaceError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/api/learning/items/{item_ref}/resume")
+    def resume_learning_item(item_ref: str) -> dict[str, Any]:
+        try:
+            item = workspace.resume_item(item_ref)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="内容不存在。") from error
+        except LearningWorkspaceError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        service.wake_automation()
+        return {"item": _learning_item_payload(item)}
+
     @app.post("/api/learning/items/{item_ref}/start-automation", status_code=202)
     def start_learning_automation(item_ref: str) -> Response:
         try:
@@ -1067,6 +1132,30 @@ syncInitialHashBookmark();
         except TaskTrashError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {"status": "trashed", "task_id": result.task_id}
+
+    @app.get("/api/learning/trash")
+    def list_learning_trash() -> dict[str, list[dict[str, str]]]:
+        return {
+            "items": [
+                {
+                    "bundle_id": item.bundle_id,
+                    "task_id": item.task_id,
+                    "title": item.title,
+                    "trashed_at": item.trashed_at.isoformat(),
+                }
+                for item in list_trashed_tasks(service.output_root)
+            ]
+        }
+
+    @app.post("/api/learning/trash/{bundle_id}/restore")
+    def restore_learning_trash(bundle_id: str) -> dict[str, str]:
+        try:
+            restored = restore_trashed_task(service.output_root, bundle_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="回收任务不存在。") from error
+        except TaskTrashError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"status": "restored", "task_id": restored.task_id}
 
     @app.post("/api/learning/items/{item_ref}/retry-automation", status_code=202)
     def retry_learning_automation(item_ref: str) -> Response:
@@ -1422,7 +1511,7 @@ def _job_payload(job: WebJob) -> dict[str, str | int | None]:
 
 def _learning_item_payload(
     item: LearningItem, workspace: LearningWorkspace | None = None
-) -> dict[str, str | None]:
+) -> dict[str, str | bool | None]:
     payload = {
         "item_ref": item.item_ref,
         "title": item.title,
@@ -1432,7 +1521,11 @@ def _learning_item_payload(
         "action": item.action,
         "action_kind": item.action_kind,
         "failure_reason": item.failure_reason,
+        "failure_stage": item.failure_stage,
+        "failure_stage_code": item.failure_stage_code,
         "output_goal": item.output_goal,
+        "manually_paused": item.manually_paused,
+        "can_pause": item.can_pause,
     }
     if workspace is not None:
         try:

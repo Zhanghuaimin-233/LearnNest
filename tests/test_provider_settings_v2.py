@@ -873,7 +873,7 @@ def test_webui_projects_only_selected_output_readiness_without_exposing_internal
         json={
             "default_output": default_output,
             "auto_organize_new_favorites": False,
-            "check_interval_seconds": 300,
+            "check_interval_minutes": 5,
             "max_items_per_tick": 1,
         },
     )
@@ -897,7 +897,7 @@ def test_webui_projects_only_selected_output_readiness_without_exposing_internal
         "legacy-asr",
         "legacy-ocr",
     ]
-    assert readiness["authorization"]["state"] == "等待授权"
+    assert readiness["authorization"]["state"] == "等待付费许可"
     assert "settings_sha256" not in response.text
     assert "never-show" not in response.text
 

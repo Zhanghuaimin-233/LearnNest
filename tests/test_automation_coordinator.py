@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
 
+import pytest
+
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.automation_coordinator import AutomationCoordinator
 from learnnest.automation_models import (
@@ -30,6 +32,7 @@ from learnnest.provider_profiles import (
     settings_sha256,
 )
 from learnnest.task_store import create_task, load_task, write_task_atomic
+from learnnest.task_control import set_manual_pause
 
 
 def _snapshot() -> AssistedConnectionSnapshot:
@@ -43,6 +46,12 @@ def _snapshot() -> AssistedConnectionSnapshot:
     )
 
 
+def test_automation_policy_defaults_to_thirty_minute_checks() -> None:
+    policy = AutomationPolicy(writer=_snapshot(), reviewer=_snapshot())
+
+    assert policy.check_interval_minutes == 30
+
+
 def _authorized_root(tmp_path: Path) -> Path:
     connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
     set_role_binding(tmp_path, role="note_writer", connection_name="note")
@@ -53,7 +62,7 @@ def _authorized_root(tmp_path: Path) -> Path:
             writer=_snapshot(),
             reviewer=_snapshot(),
             default_output="complete_note",
-            check_interval_seconds=30,
+            check_interval_minutes=1,
         ),
     )
     authorize(tmp_path, now=datetime(2026, 8, 7, tzinfo=UTC))
@@ -159,6 +168,40 @@ def test_coordinator_ignores_disabled_intake_without_constructing_a_runner(
     assert coordinator.tick_once() is None
     assert calls == []
     assert load_intake(tmp_path, "20260807-disabled").status == "pending"
+
+
+@pytest.mark.parametrize("intake_status", ["pending", "claimed"])
+def test_coordinator_does_not_claim_or_advance_a_manually_paused_task(
+    tmp_path: Path, intake_status: str
+) -> None:
+    root = _authorized_root(tmp_path)
+    task_dir = _material_task(root, "20260807-paused")
+    set_manual_pause(root, task_dir, "20260807-paused", paused=True)
+    create_intake(
+        root,
+        AutomationIntake(
+            task_id="20260807-paused",
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime(2026, 8, 7, tzinfo=UTC),
+            status=intake_status,
+        ),
+    )
+    calls: list[tuple[str, ...]] = []
+    coordinator = AutomationCoordinator(
+        root,
+        run_tasks=lambda _root, task_ids, **_kwargs: (
+            calls.append(task_ids),
+            AutomationRunResult(task_ids, task_ids, ()),
+        )[1],
+    )
+
+    result = coordinator.tick_once()
+
+    assert result == AutomationRunResult((), (), ())
+    assert calls == []
+    assert load_intake(root, "20260807-paused").status == intake_status
+    assert load_task(task_dir).provider_bindings == {}
 
 
 def test_coordinator_serializes_wakeups_and_keeps_claimed_intake_on_restart(
@@ -349,7 +392,7 @@ def test_coordinator_keeps_the_intake_output_after_policy_changes(
             writer=_snapshot(),
             reviewer=_snapshot(),
             default_output="complete_note_with_audio",
-            check_interval_seconds=30,
+            check_interval_minutes=1,
         ),
     )
     authorize(root, now=datetime(2026, 8, 7, tzinfo=UTC))

@@ -1327,7 +1327,11 @@ class OpenAICompatibleAssistedNoteProvider(_OpenAICompatibleChatTransport):
                 {
                     "role": "system",
                     "content": (
-                        "Write one complete, readable CommonMark learning note. "
+                        "Write one complete, readable CommonMark learning note in "
+                        "Simplified Chinese, including the title, headings, "
+                        "explanations, and summaries. Keep necessary technical terms "
+                        "in their original form, preserving code, API names, product "
+                        "names, and technical identifiers. "
                         "Use only the supplied dossier; do not add outside facts, "
                         "citations, JSON, an audit table, or prompt commentary. "
                         "Treat transcript and frame OCR as separate sources: never "
@@ -1352,7 +1356,11 @@ class OpenAICompatibleAssistedNoteProvider(_OpenAICompatibleChatTransport):
                 {
                     "role": "system",
                     "content": (
-                        "Return a complete revised CommonMark learning note only. "
+                        "Return a complete revised CommonMark learning note in "
+                        "Simplified Chinese only. Rewrite any non-Chinese title, "
+                        "headings, explanations, or summaries into Simplified Chinese "
+                        "while preserving code, API names, product names, and technical "
+                        "identifiers in their original form. "
                         "Compare the candidate with the dossier. Remove unsupported "
                         "claims, make uncertainty conditional, correct contradictions, "
                         "and keep useful material. Treat transcript and frame OCR as "

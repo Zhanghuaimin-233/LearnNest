@@ -19,18 +19,27 @@ from playwright.sync_api import Browser, Page, expect, sync_playwright
 from pydantic import SecretStr
 
 from learnnest.automation_coordinator import AutomationCoordinator
+from learnnest.automation_models import AutomationIntake
 from learnnest.automation_runner import AutomationProviders
 from learnnest.automation_runner import run_automation_tasks
-from learnnest.automation_store import load_intake, load_status, load_task_state
+from learnnest.automation_store import (
+    create_intake,
+    load_intake,
+    load_status,
+    load_task_state,
+)
 from learnnest.douyin_favorites import (
     DouyinFavorite,
     DouyinFavoritesError,
+    DouyinFavoritesFolder,
     DouyinFavoritesSnapshot,
 )
+from learnnest.execution_models import FailureInfo, TaskAttempt
 from learnnest.models import ContentPack, Evidence, StageStatus
 from learnnest.pipeline import PipelineError
 from learnnest.provider_profiles import load_settings
 from learnnest.task_store import create_task, find_task_by_id, write_task_atomic
+from learnnest.task_control import load_task_control
 from learnnest.web_app import create_web_app
 
 
@@ -172,6 +181,45 @@ class _HistoricalFavorites:
 
     def thumbnail_file(self, _relative_path: str) -> Path:
         raise FileNotFoundError
+
+
+class _FolderFavorites(_HistoricalFavorites):
+    def read_snapshot(self) -> DouyinFavoritesSnapshot:
+        synced_at = "2026-08-25T00:00:00+00:00"
+        return DouyinFavoritesSnapshot(
+            synced_at=synced_at,
+            folders=(
+                DouyinFavoritesFolder("default", "默认收藏夹", 1),
+                DouyinFavoritesFolder("10", "编程", 2),
+                DouyinFavoritesFolder("20", "设计", 1),
+            ),
+            items=(
+                DouyinFavorite(
+                    aweme_id="1234567890123456781",
+                    title="默认与编程",
+                    url="https://www.douyin.com/video/1234567890123456781",
+                    synced_at=synced_at,
+                    thumbnail_path=None,
+                    folder_ids=("default", "10"),
+                ),
+                DouyinFavorite(
+                    aweme_id="1234567890123456782",
+                    title="只在编程",
+                    url="https://www.douyin.com/video/1234567890123456782",
+                    synced_at=synced_at,
+                    thumbnail_path=None,
+                    folder_ids=("10",),
+                ),
+                DouyinFavorite(
+                    aweme_id="1234567890123456783",
+                    title="只在设计",
+                    url="https://www.douyin.com/video/1234567890123456783",
+                    synced_at=synced_at,
+                    thumbnail_path=None,
+                    folder_ids=("20",),
+                ),
+            ),
+        )
 
 
 class _ObservableFailedLogin:
@@ -381,6 +429,68 @@ def _open_settings_panel(page: Page, panel: str) -> None:
     expect(page.locator(f'[data-settings-panel="{panel}"]')).to_be_visible()
 
 
+def test_douyin_folder_rail_filters_compact_cards_and_keeps_cross_folder_selection(
+    tmp_path: Path,
+) -> None:
+    url, server, thread = _start_loopback_server(
+        tmp_path,
+        lambda *_args, **_kwargs: [],
+        douyin_favorites=_FolderFavorites(),
+    )
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    console_issues: list[str] = []
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(edge), headless=True
+            )
+            page = browser.new_page(viewport={"width": 2492, "height": 1415})
+            page.on(
+                "console",
+                lambda message: (
+                    console_issues.append(message.text)
+                    if message.type in {"error", "warning"}
+                    else None
+                ),
+            )
+            page.goto(url)
+            _open_view(page, "sources")
+            expect(page.locator("#favorite-folders button")).to_have_count(4)
+            expect(page.locator("#douyin-favorites-list article")).to_have_count(3)
+            card_width = page.locator("#douyin-favorites-list article").first.evaluate(
+                "element => element.getBoundingClientRect().width"
+            )
+            assert card_width < 300
+
+            page.locator("button[data-favorite-folder='10']").click()
+            expect(page.locator("#favorite-folder-title")).to_have_text("编程")
+            expect(page.locator("#douyin-favorites-list article")).to_have_count(2)
+            page.locator("#douyin-favorites-list input[type=checkbox]").nth(1).check()
+
+            page.locator("button[data-favorite-folder='20']").click()
+            expect(page.locator("#douyin-favorites-list article")).to_have_count(1)
+            page.locator("#douyin-favorites-list input[type=checkbox]").check()
+            expect(page.locator("#favorite-selection")).to_contain_text("已选 2 项")
+
+            page.locator("button[data-favorite-folder='all']").click()
+            expect(
+                page.locator("#douyin-favorites-list input[type=checkbox]:checked")
+            ).to_have_count(2)
+
+            page.set_viewport_size({"width": 390, "height": 844})
+            mobile = page.locator("#douyin-favorites-list article").evaluate_all(
+                "elements => elements.slice(0, 2).map((element) => element.getBoundingClientRect().x)"
+            )
+            assert len(mobile) == 2 and mobile[0] != mobile[1]
+            assert page.evaluate(
+                "document.documentElement.scrollWidth <= window.innerWidth"
+            )
+            assert console_issues == []
+            browser.close()
+    finally:
+        _stop_loopback_server(server, thread)
+
+
 def test_douyin_login_failure_reason_survives_refresh_in_real_edge(
     tmp_path: Path,
 ) -> None:
@@ -534,17 +644,20 @@ def _enable_note_automation(page: Page, *, key: str) -> None:
     page.locator("#automation-form [name=default_output]").select_option(
         "complete_note"
     )
-    page.locator("#automation-form button[type=submit]").click()
-    expect(page.locator("#automation-state")).to_have_text("\u7b49\u5f85\u786e\u8ba4")
+    expect(
+        page.locator("#automation-form [name=check_interval_minutes]")
+    ).to_have_value("30")
+    with page.expect_response(
+        lambda response: response.url.endswith("/api/automation/configure")
+    ) as configured:
+        page.locator("#automation-form button[type=submit]").click()
+    assert configured.value.json()["check_interval_minutes"] == 30
+    expect(page.locator("#automation-state")).to_have_text("等待付费许可")
     page.locator("#authorize-automation").click()
     expect(page.locator("#automation-authorization-dialog")).to_be_visible()
     page.locator("#confirm-automation-authorization").click()
-    expect(page.locator("#automation-state")).to_have_text(
-        "\u81ea\u52a8\u6574\u7406\u5df2\u5f00\u542f"
-    )
-    expect(page.locator("#automation-access-title")).to_have_text(
-        "\u5df2\u6388\u6743\u5e76\u8fd0\u884c"
-    )
+    expect(page.locator("#automation-state")).to_have_text("付费许可已开启")
+    expect(page.locator("#automation-access-title")).to_have_text("付费整理许可有效")
     expect(page.locator("#authorize-automation")).to_be_hidden()
 
 
@@ -560,7 +673,7 @@ def _enable_audio_automation(page: Page) -> None:
         "complete_note_with_audio"
     )
     page.locator("#automation-form button[type=submit]").click()
-    expect(page.locator("#automation-state")).to_have_text("\u7b49\u5f85\u786e\u8ba4")
+    expect(page.locator("#automation-state")).to_have_text("等待付费许可")
     _open_settings_panel(page, "connections")
     for _ in range(2):
         select = page.locator("select[data-setup-role-select]").first
@@ -580,9 +693,7 @@ def _enable_audio_automation(page: Page) -> None:
     ) as authorized:
         page.locator("#confirm-automation-authorization").click()
     assert authorized.value.status == 200
-    expect(page.locator("#automation-state")).to_have_text(
-        "\u81ea\u52a8\u6574\u7406\u5df2\u5f00\u542f"
-    )
+    expect(page.locator("#automation-state")).to_have_text("付费许可已开启")
 
 
 @pytest.fixture
@@ -613,7 +724,7 @@ def loopback_app(
     monkeypatch.setattr(
         web_app,
         "process_source",
-        lambda source, root, profile: process(source, root, profile),
+        lambda source, root, profile, **_kwargs: process(source, root, profile),
     )
     provider_runs: list[tuple[str, ...]] = []
 
@@ -663,7 +774,14 @@ def loopback_app(
             root, task_ids, default_outputs=default_outputs, now=now
         )
 
-    url, server, thread = _start_loopback_server(tmp_path, run_tasks, lambda: clock[0])
+    douyin_login = _ObservableConnectedLogin()
+    douyin_login.status = "connected"
+    url, server, thread = _start_loopback_server(
+        tmp_path,
+        run_tasks,
+        lambda: clock[0],
+        douyin_login=douyin_login,
+    )
     app = _LoopbackApp(
         url,
         tmp_path,
@@ -706,10 +824,16 @@ def test_goal4_three_sources_reach_a_safe_note_in_real_edge(
         _open_view(page, "sources")
         _open_settings_panel(page, "output")
         expect(page.locator("#automation-access-title")).to_have_text(
-            "\u5df2\u6388\u6743\u5e76\u8fd0\u884c"
+            "付费整理许可有效"
         )
         expect(page.locator("#authorize-automation")).to_be_hidden()
         expect(page.locator("#automation-access input[type=checkbox]")).to_have_count(0)
+        status = page.evaluate(
+            "async () => await (await fetch('/api/automation/status')).json()"
+        )
+        assert status["paid_authorized"] is True
+        assert status["auto_new_favorites_enabled"] is False
+        assert status["auto_new_favorites_active"] is False
         video = tmp_path / "lesson.mp4"
         video.write_bytes(b"offline video")
         _open_view(page, "sources")
@@ -942,13 +1066,11 @@ def test_goal4_substantive_setting_change_revokes_browser_authorization(
             "replacement-note"
         )
         page.locator("button[data-bind-setup-role]").first.click()
-        expect(page.locator("#automation-state")).to_have_text(
-            "\u9700\u8981\u91cd\u65b0\u786e\u8ba4"
-        )
+        expect(page.locator("#automation-state")).to_have_text("需要重新确认付费许可")
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
-        expect(page.locator("#processing-list")).to_contain_text("确认授权")
+        expect(page.locator("#processing-list")).to_contain_text("请开启付费整理许可")
         assert loopback_app.provider_runs == []
         assert "first-test-key" not in page.locator("body").inner_text()
         assert "second-test-key" not in page.locator("body").inner_text()
@@ -996,6 +1118,170 @@ def test_goal4_restarting_webui_keeps_source_job_and_intake_visible(
         restarted.close()
 
 
+def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
+    loopback_app: _LoopbackApp,
+) -> None:
+    task = _task(loopback_app.root, "safe-paused-input", 99)
+    create_intake(
+        loopback_app.root,
+        AutomationIntake(
+            task_id=task.task_id,
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime.now(UTC),
+        ),
+    )
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    console_issues: list[str] = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 2492, "height": 1415})
+        page.on(
+            "console",
+            lambda message: (
+                console_issues.append(message.text)
+                if message.type in {"error", "warning"}
+                else None
+            ),
+        )
+        page.goto(loopback_app.url)
+        wide_layout = page.evaluate(
+            """() => {
+              const consoleRect = document.querySelector('#task-console').getBoundingClientRect();
+              const spineRect = document.querySelector('#task-spine').getBoundingClientRect();
+              return {
+                consoleWidth: consoleRect.width,
+                leftMargin: consoleRect.left,
+                rightMargin: window.innerWidth - consoleRect.right,
+                spineWidth: spineRect.width,
+              };
+            }"""
+        )
+        assert wide_layout["consoleWidth"] >= 2_000
+        assert wide_layout["leftMargin"] <= 250
+        assert wide_layout["rightMargin"] <= 250
+        assert 295 <= wide_layout["spineWidth"] <= 305
+        for view, selector in (
+            ("sources", ".source-workspace"),
+            ("settings", ".settings-workspace"),
+        ):
+            _open_view(page, view)
+            page_layout = page.locator(selector).evaluate(
+                """element => {
+                  const rect = element.getBoundingClientRect();
+                  return {
+                    width: rect.width,
+                    leftMargin: rect.left,
+                    rightMargin: window.innerWidth - rect.right,
+                  };
+                }"""
+            )
+            assert page_layout["width"] >= 2_000
+            assert page_layout["leftMargin"] <= 250
+            assert page_layout["rightMargin"] <= 250
+        _open_view(page, "tasks")
+        expect(page.locator("#processing-list article")).to_have_count(1)
+        _open_first_task(page, "processing-list")
+        expect(page.locator("#task-detail button[data-pause-item-ref]")).to_be_visible()
+
+        with page.expect_response(
+            lambda response: response.url.endswith("/pause")
+        ) as paused:
+            page.locator("#task-detail button[data-pause-item-ref]").click()
+        assert paused.value.status == 200
+        expect(page.locator("#task-detail .detail-action > strong")).to_have_text(
+            "已暂停"
+        )
+        expect(
+            page.locator("#task-detail button[data-action='resume_task']")
+        ).to_be_visible()
+        expect(
+            page.locator("#task-detail button[data-delete-item-ref]")
+        ).to_be_enabled()
+        found = find_task_by_id(loopback_app.root, task.task_id)
+        assert found is not None
+        assert load_task_control(found[0], found[1].task_id).manually_paused is True
+        assert load_intake(loopback_app.root, task.task_id).status == "pending"
+        assert loopback_app.provider_runs == []
+
+        page.locator("#back-to-tasks").click()
+        page.locator("button[data-filter='paused']").click()
+        expect(page.locator('[data-filter-count="paused"]')).to_have_text("1")
+        expect(page.locator('[data-filter-count="processing"]')).to_have_text("0")
+        expect(page.locator("#processing-list article")).to_be_visible()
+        page.reload()
+        _open_first_task(page, "processing-list")
+        expect(page.locator("#task-detail .detail-action > strong")).to_have_text(
+            "已暂停"
+        )
+        browser.close()
+
+        _stop_loopback_server(loopback_app.server, loopback_app.thread)
+        (
+            loopback_app.url,
+            loopback_app.server,
+            loopback_app.thread,
+        ) = _start_loopback_server(
+            loopback_app.root, loopback_app.run_tasks, lambda: loopback_app.clock[0]
+        )
+        restarted = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        restored = restarted.new_page(viewport={"width": 390, "height": 844})
+        restored.on(
+            "console",
+            lambda message: (
+                console_issues.append(message.text)
+                if message.type in {"error", "warning"}
+                else None
+            ),
+        )
+        restored.goto(loopback_app.url)
+        expect(restored.locator('[data-filter-count="paused"]')).to_have_text("1")
+        _open_first_task(restored, "processing-list")
+        expect(restored.locator("#task-detail .detail-action > strong")).to_have_text(
+            "已暂停"
+        )
+
+        _enable_note_automation(restored, key="offline-pause-key")
+        assert loopback_app.provider_runs == []
+        assert load_intake(loopback_app.root, task.task_id).status == "pending"
+        restored.reload()
+        expect(restored.locator("#inbox-list article")).to_have_count(1)
+        _open_view(restored, "tasks")
+        _open_first_task(restored, "inbox-list")
+        with restored.expect_response(
+            lambda response: response.url.endswith("/resume")
+        ) as resumed:
+            restored.locator("#task-detail button[data-action='resume_task']").click()
+        assert resumed.value.status == 200
+        found_after_resume = find_task_by_id(loopback_app.root, task.task_id)
+        assert found_after_resume is not None
+        deadline = time.monotonic() + 15
+        while (
+            load_intake(loopback_app.root, task.task_id).status
+            in {"pending", "claimed"}
+            and time.monotonic() < deadline
+        ):
+            restored.wait_for_timeout(100)
+        assert load_intake(loopback_app.root, task.task_id).status == "completed", {
+            "provider_runs": loopback_app.provider_runs,
+            "manually_paused": load_task_control(
+                found_after_resume[0], task.task_id
+            ).manually_paused,
+        }
+        restored.reload()
+        expect(restored.locator("#library-list article")).to_have_count(1)
+        found = find_task_by_id(loopback_app.root, task.task_id)
+        assert found is not None
+        assert load_task_control(found[0], task.task_id).manually_paused is False
+        assert load_intake(loopback_app.root, task.task_id).status == "completed"
+        assert loopback_app.provider_runs == [(task.task_id,)]
+        assert console_issues == []
+        assert restored.evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth"
+        )
+        restarted.close()
+
+
 def test_goal4_corrupting_an_intake_fact_turns_the_browser_gate_red_then_green(
     loopback_app: _LoopbackApp,
 ) -> None:
@@ -1031,9 +1317,18 @@ def test_goal4_user_can_move_one_stopped_task_to_trash(
     loopback_app: _LoopbackApp,
 ) -> None:
     edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    console_issues: list[str] = []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 720})
+        page.on(
+            "console",
+            lambda message: (
+                console_issues.append(message.text)
+                if message.type in {"error", "warning"}
+                else None
+            ),
+        )
         page.goto(loopback_app.url)
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
@@ -1052,7 +1347,7 @@ def test_goal4_user_can_move_one_stopped_task_to_trash(
         ) as deleted:
             page.locator("#confirm-delete-task").click()
         assert deleted.value.status == 200
-        expect(page.locator("#task-list article")).to_have_count(0)
+        expect(page.locator("#task-list article[data-item-ref]")).to_have_count(0)
         expect(page.locator("#notice")).to_contain_text("已移入回收区")
         assert loopback_app.provider_runs == []
         assert list(
@@ -1060,6 +1355,99 @@ def test_goal4_user_can_move_one_stopped_task_to_trash(
                 "*/task/task.json"
             )
         )
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.locator("button[data-filter='trash']").click()
+        expect(page.locator("#trash-list article")).to_have_count(1)
+        expect(page.locator("#trash-list article")).to_contain_text("恢复任务")
+        with page.expect_response(
+            lambda response: response.url.endswith("/restore")
+        ) as restored:
+            page.locator("#trash-list button[data-restore-bundle]").click()
+        assert restored.value.status == 200
+        expect(page.locator("#trash-list article")).to_have_count(0)
+        page.locator("button[data-filter='all']").click()
+        expect(page.locator("#task-list article[data-item-ref]")).to_have_count(1)
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth"
+        )
+        assert console_issues == []
+        browser.close()
+
+
+def test_w2_failed_source_shows_stage_reason_and_exact_next_step(
+    loopback_app: _LoopbackApp,
+) -> None:
+    task = _task(
+        loopback_app.root,
+        "https://www.bilibili.com/video/BV1xx411c7mD",
+        8800,
+    )
+    failed_at = datetime.now(UTC)
+    failure_summary = "URL 下载失败；可手动下载视频后按本地文件处理 (DownloadError)"
+    failed = task.model_copy(
+        update={
+            "stages": {"source": StageStatus.FAILED},
+            "artifacts": {},
+            "error_summary": failure_summary,
+            "attempts": [
+                TaskAttempt(
+                    attempt_id="failed-source-1",
+                    ordinal=1,
+                    reason="initial",
+                    from_stage="source",
+                    status="failed",
+                    started_at=failed_at,
+                    finished_at=failed_at,
+                    failed_stage="source",
+                    executed_stages=["source"],
+                    failure=FailureInfo(
+                        code="manual_error",
+                        category="pipeline",
+                        disposition="manual",
+                        safe_summary=failure_summary,
+                    ),
+                )
+            ],
+        }
+    )
+    write_task_atomic(
+        loopback_app.root / "视频学习素材" / task.task_id,
+        failed,
+    )
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    console_issues: list[str] = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 720})
+        page.on(
+            "console",
+            lambda message: (
+                console_issues.append(message.text)
+                if message.type in {"error", "warning"}
+                else None
+            ),
+        )
+        page.goto(loopback_app.url)
+        expect(page.locator("#processing-list .learning-state")).to_have_text(
+            "处理已停止"
+        )
+        _open_first_task(page, "processing-list")
+        expect(page.locator("#task-detail .failure-explanation")).to_contain_text(
+            "失败阶段"
+        )
+        expect(page.locator("#task-detail .failure-explanation")).to_contain_text(
+            "获取内容"
+        )
+        expect(page.locator("#task-detail .failure-explanation")).to_contain_text(
+            "来源链接的视频下载失败"
+        )
+        expect(page.locator("#task-detail .production-heading span")).to_have_text("0%")
+        expect(
+            page.locator("#task-detail button[data-action='open_single_video']")
+        ).to_have_text("选择本地视频")
+        page.locator("#task-detail button[data-action='open_single_video']").click()
+        expect(page.locator("#single-video-dialog")).to_be_visible()
+        assert console_issues == []
         browser.close()
 
 
@@ -1178,7 +1566,7 @@ def test_goal4_retryable_writer_failure_retries_the_same_task_record(
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
-        expect(page.locator("#processing-list")).to_contain_text("需要你处理")
+        expect(page.locator("#processing-list")).to_contain_text("处理已停止")
         _open_first_task(page, "processing-list")
         expect(
             page.locator("#task-detail button[data-action='retry_automation']")
@@ -1246,13 +1634,12 @@ def test_goal4_unknown_and_permanent_automation_failures_hide_retry_and_stop_fac
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator("#url-form button").click()
-        expect(page.locator("#processing-list")).to_contain_text(
-            "\u9700\u8981\u4f60\u5904\u7406"
-        )
+        expect(page.locator("#processing-list")).to_contain_text("处理已停止")
         _open_first_task(page, "processing-list")
         reason = page.locator("#task-detail .failure-explanation")
         expect(reason).to_be_visible()
-        expect(reason).to_contain_text("停止原因")
+        expect(reason).to_contain_text("失败阶段")
+        expect(reason).to_contain_text("生成笔记初稿")
         expect(reason).to_contain_text(
             "返回结果无法确认" if failure == "timeout" else "模型服务返回 HTTP 400"
         )

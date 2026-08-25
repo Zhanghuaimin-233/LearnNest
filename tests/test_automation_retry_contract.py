@@ -425,7 +425,8 @@ def test_legacy_policy_and_task_state_are_migrated_without_losing_state(
     )
     status = load_status(root)
     assert status is not None
-    assert status.policy.schema_version == "1.2"
+    assert status.policy.schema_version == "1.3"
+    assert status.policy.check_interval_minutes == 30
     assert status.policy.retries_per_stage == 1
     assert status.policy.budget.provider_calls_per_day == 20
     migrated = load_task_state(root, "old-task", status.policy_sha256)

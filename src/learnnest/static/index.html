@@ -51,8 +51,10 @@
                 <button class="is-active" data-filter="all" type="button"><span>全部任务</span><strong data-filter-count="all">0</strong></button>
                 <button data-filter="attention" type="button"><span><i class="state-dot attention"></i>需要处理</span><strong data-filter-count="attention">0</strong></button>
                 <button data-filter="processing" type="button"><span><i class="state-dot processing"></i>处理中</span><strong data-filter-count="processing">0</strong></button>
+                <button data-filter="paused" type="button"><span><i class="state-dot paused"></i>已暂停</span><strong data-filter-count="paused">0</strong></button>
                 <button data-filter="queued" type="button"><span><i class="state-dot queued"></i>等待中</span><strong data-filter-count="queued">0</strong></button>
                 <button data-filter="completed" type="button"><span><i class="state-dot completed"></i>已完成</span><strong data-filter-count="completed">0</strong></button>
+                <button data-filter="trash" type="button"><span>回收站</span><strong data-filter-count="trash">0</strong></button>
               </nav>
               <section class="task-list-panel" aria-labelledby="task-list-title">
                 <div class="panel-heading"><h3 id="task-list-title">全部任务</h3><span>按最近变化</span></div>
@@ -60,6 +62,7 @@
                   <div id="processing-list" class="task-group"></div>
                   <div id="inbox-list" class="task-group"></div>
                   <div id="library-list" class="task-group"></div>
+                  <div id="trash-list" class="task-group" hidden></div>
                 </div>
               </section>
               <p class="task-default">默认成品：<strong id="default-output-label">读取中</strong><button type="button" data-go-settings>更改</button></p>
@@ -112,7 +115,7 @@
             <section class="source-row source-douyin">
               <div>
                 <p class="source-index">抖音收藏</p>
-                <div class="source-title-line"><h2>默认视频收藏</h2><span id="douyin-connection-state" class="status-pill">未连接</span></div>
+                <div class="source-title-line"><h2>抖音收藏</h2><span id="douyin-connection-state" class="status-pill">未连接</span></div>
                 <p id="favorites-status" aria-live="polite">连接抖音后，收藏会出现在这里。</p>
                 <p>请在同一个抖音官方窗口完成手机号验证码和抖音 App 扫码确认；随后官方页面会验证收藏访问，通过后才显示已连接。同步时会短暂恢复这套隔离页面环境，由抖音生成当次请求校验，后端再直接加载全部分页；登录凭据与页面环境使用 Windows 当前用户加密保存在本机，不需要每次重新登录。</p>
               </div>
@@ -124,8 +127,19 @@
               <div><p id="douyin-login-message" aria-live="polite">正在打开官方短信与扫码验证窗口。</p><p id="douyin-countdown" class="countdown" aria-live="polite" hidden></p><div class="form-actions"><button id="refresh-douyin" type="button" hidden>刷新二维码</button><button id="cancel-douyin" class="text-button" type="button">取消</button></div></div>
             </div>
 
-            <div class="favorite-toolbar"><button id="add-selected-favorites" type="button" disabled>加入任务</button><span id="favorite-selection">可多选历史收藏；首次同步不会自动处理。</span></div>
-            <div id="douyin-favorites-list" class="favorite-grid"></div>
+            <div class="favorite-browser">
+              <aside class="favorite-folder-rail" aria-label="抖音收藏夹">
+                <p class="rail-label">收藏夹</p>
+                <div id="favorite-folders" class="favorite-folders"></div>
+              </aside>
+              <div class="favorite-collection-panel">
+                <div class="favorite-toolbar">
+                  <div><strong id="favorite-folder-title">全部收藏</strong><span id="favorite-selection">可跨收藏夹多选；首次同步不会自动处理。</span></div>
+                  <button id="add-selected-favorites" type="button" disabled>加入任务</button>
+                </div>
+                <div id="douyin-favorites-list" class="favorite-grid"></div>
+              </div>
+            </div>
             <section id="source-jobs" class="source-jobs" hidden></section>
           </div>
         </section>
@@ -154,15 +168,15 @@
                 <div class="settings-panel-header"><div><p class="panel-kicker">默认行为</p><h2>产出与自动处理</h2><p id="automation-summary">先完成模型连接和职责绑定，再保存默认成品。</p></div><span id="automation-state" class="status-pill">等待设置</span></div>
                 <form id="automation-form" class="settings-form">
                   <label>默认成品<select name="default_output"><option value="complete_note">完整笔记</option><option value="complete_note_with_audio" selected>完整笔记 + 播客音频</option></select><small>新任务会冻结提交时的默认成品。</small></label>
-                  <label>检查间隔（秒）<input name="check_interval_seconds" type="number" min="30" max="3600" value="300" /></label>
+                  <label>检查间隔（分钟）<input name="check_interval_minutes" type="number" min="1" max="60" value="30" /></label>
                   <label>每次处理项数<input name="max_items_per_tick" type="number" min="1" max="20" value="1" /></label>
-                  <label class="checkbox-label automation-favorite-option"><input name="auto_organize_new_favorites" type="checkbox" /><span><strong>自动整理新收藏</strong><small>只处理首次同步后出现的新收藏；历史收藏仍由你手动加入。</small></span></label>
-                  <div class="form-actions"><button type="submit">保存自动处理设置</button><button type="reset" class="text-button">取消更改</button></div>
+                  <label class="checkbox-label automation-favorite-option"><input name="auto_organize_new_favorites" type="checkbox" /><span><strong>自动加入新收藏</strong><small>只控制首次同步后出现的新收藏是否自动创建任务；历史收藏和手动勾选不受这个开关限制。</small></span></label>
+                  <div class="form-actions"><button type="submit">保存产出与来源设置</button><button type="reset" class="text-button">取消更改</button></div>
                 </form>
                 <section class="automation-access" id="automation-access" aria-live="polite">
                   <span class="access-mark" aria-hidden="true">◌</span>
-                  <div><p class="panel-kicker">自动执行权限</p><h3 id="automation-access-title">先完成设置</h3><p id="automation-access-copy">保存设置后，可以明确开启自动整理。</p></div>
-                  <div class="automation-access-actions"><button id="authorize-automation" type="button" disabled>开启自动整理</button><button id="disable-automation" class="secondary-button" type="button" hidden>关闭自动整理</button></div>
+                  <div><p class="panel-kicker">付费整理许可</p><h3 id="automation-access-title">先完成设置</h3><p id="automation-access-copy">保存设置后，可以明确允许 Provider 付费调用。</p></div>
+                  <div class="automation-access-actions"><button id="authorize-automation" type="button" disabled>允许付费整理</button><button id="disable-automation" class="secondary-button" type="button" hidden>关闭付费许可</button></div>
                 </section>
               </section>
 
@@ -220,10 +234,10 @@
 
     <dialog id="automation-authorization-dialog" class="app-dialog authorization-dialog" aria-labelledby="automation-authorization-title" aria-describedby="automation-authorization-copy">
       <div class="dialog-shell">
-        <div class="dialog-heading"><div><p class="eyebrow">自动执行权限</p><h2 id="automation-authorization-title">开启自动整理？</h2><p id="automation-authorization-copy">开启后，新加入的任务可按当前设置自动调用已配置的模型与语音服务。</p></div><button class="dialog-close" data-close-automation-authorization type="button" aria-label="关闭">×</button></div>
-        <dl class="authorization-summary"><div><dt>默认成品</dt><dd id="authorization-output">读取中</dd></div><div><dt>检查频率</dt><dd id="authorization-interval">读取中</dd></div><div><dt>费用边界</dt><dd>受调用安全页中的每日上限和重试次数约束</dd></div></dl>
+        <div class="dialog-heading"><div><p class="eyebrow">付费整理许可</p><h2 id="automation-authorization-title">允许付费整理？</h2><p id="automation-authorization-copy">开启后，手动加入的任务可以按当前设置调用已配置的模型与语音服务；不会自动加入抖音新收藏，后者由独立开关控制。</p></div><button class="dialog-close" data-close-automation-authorization type="button" aria-label="关闭">×</button></div>
+        <dl class="authorization-summary"><div><dt>默认成品</dt><dd id="authorization-output">读取中</dd></div><div><dt>适用范围</dt><dd id="authorization-interval">手动加入的任务</dd></div><div><dt>费用边界</dt><dd>受调用安全页中的每日上限和重试次数约束</dd></div></dl>
         <p class="authorization-warning"><strong>可能产生服务费用。</strong>只有已配置的 Provider 会被调用；达到上限、身份不匹配或结果不明时会停止，不会跨服务自动切换。</p>
-        <div class="dialog-actions"><button id="cancel-automation-authorization" class="secondary-button" data-close-automation-authorization type="button">暂不开启</button><button id="confirm-automation-authorization" type="button">确认并开启自动整理</button></div>
+        <div class="dialog-actions"><button id="cancel-automation-authorization" class="secondary-button" data-close-automation-authorization type="button">暂不开启</button><button id="confirm-automation-authorization" type="button">确认并允许付费整理</button></div>
       </div>
     </dialog>
 

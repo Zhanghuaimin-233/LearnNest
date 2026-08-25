@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
+import time
 import uuid
 from contextlib import nullcontext
 from datetime import UTC, datetime
@@ -20,6 +22,10 @@ from learnnest.automation_models import (
     AutomationTaskState,
 )
 from learnnest.locks import automation_lock
+
+
+_WINDOWS_REPLACE_RETRY_DELAYS = (0.02, 0.05, 0.1)
+_IS_WINDOWS = os.name == "nt"
 
 
 class ProviderAdmissionError(ValueError):
@@ -56,7 +62,7 @@ def load_status(output_root: str | Path) -> AutomationStatus | None:
                     Path(output_root).resolve(), stored_sha, current_sha
                 )
             status = status.model_copy(
-                update={"schema_version": "1.2", "policy_sha256": current_sha}
+                update={"schema_version": "1.3", "policy_sha256": current_sha}
             )
             _write_json(path, status.model_dump(mode="json"))
         return status
@@ -69,7 +75,7 @@ def save_policy(output_root: str | Path, policy: AutomationPolicy) -> Automation
     current_sha = policy_sha256(policy)
     same_policy = previous is not None and previous.policy_sha256 == current_sha
     status = AutomationStatus(
-        schema_version="1.2",
+        schema_version="1.3",
         policy=policy,
         policy_sha256=current_sha,
         last_tick_at=previous.last_tick_at if same_policy else None,
@@ -565,13 +571,34 @@ def _migrate_task_states(root: Path, old_sha: str, new_sha: str) -> None:
 
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", delete=False, dir=path.parent
-    ) as stream:
-        json.dump(payload, stream, ensure_ascii=False, sort_keys=True, indent=2)
-        stream.write("\n")
-        temporary = Path(stream.name)
-    temporary.replace(path)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", delete=False, dir=path.parent, suffix=".tmp"
+        ) as stream:
+            json.dump(payload, stream, ensure_ascii=False, sort_keys=True, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+            temporary = Path(stream.name)
+        for delay in (*_WINDOWS_REPLACE_RETRY_DELAYS, None):
+            try:
+                temporary.replace(path)
+                break
+            except OSError as error:
+                error_code = getattr(error, "winerror", None)
+                if error_code is None:
+                    error_code = error.errno
+                if delay is None or not _IS_WINDOWS or error_code not in {5, 32}:
+                    raise
+                time.sleep(delay)
+    except Exception:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 def _require_aware(value: datetime) -> None:

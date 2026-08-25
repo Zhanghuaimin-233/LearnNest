@@ -80,7 +80,7 @@ class AutomationBudget(_Model):
 class AutomationPolicy(_Model):
     """One versioned, explicitly authorized automatic delivery policy."""
 
-    schema_version: Literal["1.1", "1.2"] = "1.2"
+    schema_version: Literal["1.1", "1.2", "1.3"] = "1.3"
     enabled: bool = False
     authorized_at: datetime | None = None
     schedule_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -95,7 +95,7 @@ class AutomationPolicy(_Model):
         "complete_note_with_audio"
     )
     auto_organize_new_favorites: bool = False
-    check_interval_seconds: int = Field(default=300, ge=30, le=3600)
+    check_interval_minutes: float = Field(default=30, ge=0.5, le=60)
     retries_per_stage: int = Field(default=3, ge=0, le=3)
     # Compatibility input/accessor for callers written against policy 1.0.
     # It is never written to new JSON and is kept synchronized by model_copy.
@@ -109,12 +109,24 @@ class AutomationPolicy(_Model):
             return value
         data = dict(value)
         legacy = data.get("schema_version") == "1.1"
+        if "check_interval_minutes" not in data:
+            raw_seconds = data.pop("check_interval_seconds", 1800)
+            if isinstance(raw_seconds, bool):
+                raise ValueError("legacy automation check interval is invalid")
+            try:
+                data["check_interval_minutes"] = float(raw_seconds) / 60
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "legacy automation check interval is invalid"
+                ) from error
+        else:
+            data.pop("check_interval_seconds", None)
         retries = data.get("retries_per_stage", data.get("paid_retry_limit", 3))
         data["retries_per_stage"] = retries
         data["paid_retry_limit"] = retries
         if legacy and "default_output" not in data:
             data["default_output"] = "complete_note_with_audio"
-        data["schema_version"] = "1.2"
+        data["schema_version"] = "1.3"
         return data
 
     def model_copy(
@@ -206,7 +218,7 @@ class AutomationIntake(_Model):
 
 
 class AutomationStatus(_Model):
-    schema_version: Literal["1.1", "1.2"] = "1.2"
+    schema_version: Literal["1.1", "1.2", "1.3"] = "1.3"
     policy: AutomationPolicy
     policy_sha256: str
     last_tick_at: datetime | None = None

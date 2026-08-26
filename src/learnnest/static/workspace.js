@@ -59,6 +59,11 @@ const addSelectedFavoritesButton = document.querySelector("#add-selected-favorit
 const favoriteSelection = document.querySelector("#favorite-selection");
 const taskList = document.querySelector("#task-list");
 const trashList = document.querySelector("#trash-list");
+const taskSearch = document.querySelector("#task-search");
+const taskTableCount = document.querySelector("#task-table-count");
+const taskFilterEmpty = document.querySelector("#task-filter-empty");
+const recentActivity = document.querySelector("#recent-activity");
+const taskSystemStatus = document.querySelector("#task-system-status");
 const taskDetail = document.querySelector("#task-detail");
 const taskWorkbench = document.querySelector("#task-workbench");
 const taskDetailView = document.querySelector("#task-detail-view");
@@ -136,6 +141,7 @@ let currentSnapshot = { inbox: [], processing: [], library: [] };
 let currentTrash = [];
 let selectedItemRef = null;
 let activeTaskFilter = "all";
+let activeTaskQuery = "";
 let noticeTimer = null;
 let lastAutomationStatus = { configured: false, enabled: false };
 const providerConnectionNameDefaults = {
@@ -349,17 +355,25 @@ function renderList(target, items, empty) {
     target.innerHTML = empty ? `<p class="empty">${escapeHtml(empty)}</p>` : "";
     return;
   }
-  target.innerHTML = items.map((item) => `
+  target.innerHTML = items.map((item) => {
+    const progress = taskProgress(item);
+    const output = item.output_goal === "complete_note_with_audio" ? "笔记 + 音频" : "完整笔记";
+    return `
     <article class="learning-row" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}" tabindex="0">
       <div class="learning-copy">
         <h3>${escapeHtml(item.title)}</h3>
         <p>${escapeHtml(item.source)}</p>
+        <small>ID · ${escapeHtml(item.item_ref)}</small>
       </div>
-      <span class="learning-state">${escapeHtml(publicStateLabel(item))}</span>
-      <span class="task-progress" aria-hidden="true" style="--task-progress:${taskProgress(item)}%"><i></i></span>
+      <div class="row-progress">
+        <span class="progress-ring" aria-label="进度 ${progress}%" style="--task-progress:${progress}%"><strong>${progress}</strong><small>%</small></span>
+        <div class="progress-copy"><span class="learning-state">${escapeHtml(publicStateLabel(item))}</span><span class="task-progress" aria-hidden="true" style="--task-progress:${progress}%"><i></i></span></div>
+      </div>
+      <span class="row-output">${output}</span>
       <span class="row-next">${escapeHtml(item.message)}</span>
-      <button class="open-task-detail" type="button" data-open-item-ref="${escapeHtml(item.item_ref)}">查看任务 <span aria-hidden="true">→</span></button>
-    </article>`).join("");
+      <button class="open-task-detail" type="button" data-open-item-ref="${escapeHtml(item.item_ref)}" aria-label="查看 ${escapeHtml(item.title)}">查看 <span aria-hidden="true">→</span></button>
+    </article>`;
+  }).join("");
   target.querySelectorAll("article[data-item-ref]").forEach((row) => {
     row.addEventListener("click", (event) => {
       if (event.target.closest("button")) return;
@@ -379,6 +393,32 @@ function publicStateLabel(item) {
   return stateLabel[item.state] || "需要检查";
 }
 
+function renderRecentActivity(items) {
+  const recent = items.slice(0, 3);
+  recentActivity.innerHTML = recent.length
+    ? recent.map((item) => `
+      <div class="activity-item" data-filter="${taskFilterFor(item)}">
+        <i aria-hidden="true"></i>
+        <div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(publicStateLabel(item))} · ${escapeHtml(item.message)}</span></div>
+      </div>`).join("")
+    : '<p class="empty">还没有任务动态。</p>';
+}
+
+function renderTaskSystemStatus(status) {
+  const paidAuthorized = Boolean(status.paid_authorized ?? status.enabled);
+  const autoFavorites = Boolean(status.auto_new_favorites_active);
+  const interval = Number(status.check_interval_minutes || 30);
+  const output = status.default_output === "complete_note" ? "完整笔记" : "笔记 + 音频";
+  const rows = [
+    ["默认成品", output, Boolean(status.configured)],
+    ["付费整理", paidAuthorized ? "许可有效" : "尚未许可", paidAuthorized],
+    ["新收藏", autoFavorites ? "自动加入" : "仅手动加入", autoFavorites],
+    ["自动检查", `每 ${interval} 分钟`, Boolean(status.configured)],
+  ];
+  taskSystemStatus.innerHTML = rows.map(([title, copy, ready]) => `
+    <div class="system-status-row ${ready ? "is-ready" : ""}"><i aria-hidden="true"></i><div><strong>${title}</strong><span>${copy}</span></div></div>`).join("");
+}
+
 function renderTrash(items) {
   currentTrash = items;
   document.querySelector('[data-filter-count="trash"]').textContent = items.length;
@@ -387,9 +427,10 @@ function renderTrash(items) {
     return;
   }
   trashList.innerHTML = items.map((item) => `
-    <article class="learning-row trash-row" data-trash-bundle="${escapeHtml(item.bundle_id)}">
+    <article class="learning-row trash-row" data-trash-bundle="${escapeHtml(item.bundle_id)}" data-filter="trash">
       <div class="learning-copy"><h3>${escapeHtml(item.title)}</h3><p>任务已从当前列表移出</p></div>
-      <span class="learning-state">回收区</span>
+      <div class="row-progress"><span class="progress-ring" aria-hidden="true" style="--task-progress:0%"><strong>0</strong><small>%</small></span><div class="progress-copy"><span class="learning-state">回收区</span><span class="task-progress" aria-hidden="true"><i></i></span></div></div>
+      <span class="row-output">任务记录</span>
       <span class="row-next">移入时间：${escapeHtml(formatSyncTime(item.trashed_at))}</span>
       <button class="open-task-detail" type="button" data-restore-bundle="${escapeHtml(item.bundle_id)}">恢复任务</button>
     </article>`).join("");
@@ -416,6 +457,8 @@ function render(snapshot) {
   for (const [name, count] of Object.entries(counts)) document.querySelector(`[data-filter-count="${name}"]`).textContent = count;
   taskCount.textContent = counts.all;
   taskSummary.innerHTML = `<strong>${counts.processing} 项正在处理</strong>，${counts.paused} 项已暂停，${counts.attention} 项需要你处理，${counts.completed} 项已完成。`;
+  taskTableCount.textContent = `共 ${counts.all} 项`;
+  renderRecentActivity(items);
   renderActiveTaskFocus(items);
   applyTaskFilter();
   if (selectedItemRef) renderTaskDetail(items.find((item) => item.item_ref === selectedItemRef));
@@ -439,8 +482,11 @@ function renderTaskFocus(items) {
   const item = [...items].sort((left, right) => priority[taskFilterFor(left)] - priority[taskFilterFor(right)])[0];
   if (!item) {
     taskFocus.className = "task-focus is-empty";
-    taskFocus.innerHTML = `<div class="focus-copy"><p class="panel-kicker">工作台已准备好</p><h2>从“来源”添加第一项内容</h2><p>本地视频、公开链接和收藏进入任务后，进度与问题会持续保留在这里。</p></div><button class="focus-open" type="button">打开来源 <span aria-hidden="true">→</span></button>`;
-    taskFocus.querySelector("button").addEventListener("click", () => showView("sources"));
+    const filtering = activeTaskFilter !== "all" || Boolean(activeTaskQuery);
+    taskFocus.innerHTML = filtering
+      ? '<div class="focus-copy"><p class="panel-kicker">当前视图</p><h2>没有匹配的任务</h2><p>清除搜索或切换任务状态，可以查看其他任务。</p></div>'
+      : `<div class="focus-copy"><p class="panel-kicker">工作台已准备好</p><h2>从“来源”添加第一项内容</h2><p>本地视频、公开链接和收藏进入任务后，进度与问题会持续保留在这里。</p></div><button class="focus-open" type="button">打开来源 <span aria-hidden="true">→</span></button>`;
+    taskFocus.querySelector("button")?.addEventListener("click", () => showView("sources"));
     return;
   }
   const filter = taskFilterFor(item);
@@ -491,12 +537,28 @@ function applyTaskFilter() {
   const showingTrash = activeTaskFilter === "trash";
   Object.values(lists).forEach((list) => { list.hidden = showingTrash; });
   trashList.hidden = !showingTrash;
-  taskList.querySelectorAll("article[data-filter]").forEach((row) => {
-    row.hidden = showingTrash || (activeTaskFilter !== "all" && row.dataset.filter !== activeTaskFilter);
+  const rows = [...taskList.querySelectorAll("article[data-filter]")];
+  rows.forEach((row) => {
+    const isTrash = row.dataset.filter === "trash";
+    const filterMatches = showingTrash
+      ? isTrash
+      : !isTrash && (activeTaskFilter === "all" || row.dataset.filter === activeTaskFilter);
+    const queryMatches = !activeTaskQuery || row.textContent.toLocaleLowerCase("zh-CN").includes(activeTaskQuery);
+    row.hidden = !filterMatches || !queryMatches;
   });
   const label = document.querySelector(`[data-filter="${activeTaskFilter}"] span`)?.textContent?.trim() || "全部任务";
   taskListTitle.textContent = label;
-  renderActiveTaskFocus();
+  const visibleCount = rows.filter((row) => !row.hidden).length;
+  const total = showingTrash ? currentTrash.length : allLearningItems().length;
+  taskFilterEmpty.hidden = visibleCount !== 0 || total === 0;
+  taskTableCount.textContent = activeTaskQuery || activeTaskFilter !== "all" ? `显示 ${visibleCount} / ${total} 项` : `共 ${total} 项`;
+  const focusItems = allLearningItems().filter((item) => {
+    if (showingTrash) return false;
+    const filterMatches = activeTaskFilter === "all" || taskFilterFor(item) === activeTaskFilter;
+    const searchable = `${item.title} ${item.source} ${item.message} ${publicStateLabel(item)}`.toLocaleLowerCase("zh-CN");
+    return filterMatches && (!activeTaskQuery || searchable.includes(activeTaskQuery));
+  });
+  renderActiveTaskFocus(focusItems);
 }
 
 function selectTask(itemRef) {
@@ -706,6 +768,7 @@ async function loadFavorites() {
 
 function renderAutomationStatus(status) {
   lastAutomationStatus = status;
+  renderTaskSystemStatus(status);
   const paidAuthorized = status.paid_authorized ?? status.enabled;
   const autoNewFavoritesEnabled = Boolean(status.auto_new_favorites_enabled ?? status.auto_organize_new_favorites);
   const autoNewFavoritesActive = Boolean(status.auto_new_favorites_active);
@@ -1317,6 +1380,10 @@ document.querySelectorAll("[data-filter]").forEach((button) => button.addEventLi
   if (activeTaskFilter === "trash") showTaskWorkbench();
   applyTaskFilter();
 }));
+taskSearch.addEventListener("input", () => {
+  activeTaskQuery = taskSearch.value.trim().toLocaleLowerCase("zh-CN");
+  applyTaskFilter();
+});
 document.querySelectorAll("[data-settings-tab]").forEach((button) => button.addEventListener("click", () => showSettingsPanel(button.dataset.settingsTab)));
 document.querySelectorAll("[data-open-single-video]").forEach((button) => button.addEventListener("click", () => singleVideoDialog.showModal()));
 document.querySelectorAll("[data-close-single-video]").forEach((button) => button.addEventListener("click", () => singleVideoDialog.close()));

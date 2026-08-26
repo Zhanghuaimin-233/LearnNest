@@ -1602,6 +1602,12 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
     for element_id in (
         "task-console",
         "task-spine",
+        "task-search",
+        "task-filter-empty",
+        "task-table-heading",
+        "task-insight-rail",
+        "recent-activity",
+        "task-system-status",
         "task-workbench",
         "task-focus",
         "task-list",
@@ -1625,8 +1631,11 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
     assert "--workspace-max: 2048px" in stylesheet
     assert ".app-header-inner { max-width: var(--workspace-max)" in stylesheet
     assert ".page-header { max-width: var(--workspace-max)" in stylesheet
-    assert ".task-page-header { max-width: var(--workspace-max); }" in stylesheet
+    assert ".task-page-header { max-width: var(--workspace-max);" in stylesheet
     assert ".task-console { max-width: var(--workspace-max)" in stylesheet
+    assert "grid-template-columns: 232px minmax(0, 1fr) 300px" in stylesheet
+    assert ".task-table-heading {" in stylesheet
+    assert ".task-insight-rail {" in stylesheet
     assert ".source-workspace { max-width: var(--workspace-max)" in stylesheet
     assert ".settings-workspace { max-width: var(--workspace-max)" in stylesheet
     assert 'id="favorite-folders"' in page
@@ -1661,6 +1670,10 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
     assert 'api("/api/learning/submit"' in script
     assert 'class="app-header"' in page
     assert "function renderTaskFocus(items)" in script
+    assert "function renderRecentActivity(items)" in script
+    assert "function renderTaskSystemStatus(status)" in script
+    assert "activeTaskQuery" in script
+    assert "没有匹配的任务" in page
     assert "function showTaskWorkbench()" in script
     assert "taskWorkbench.hidden = true;" in script
     assert "taskDetailView.hidden = false;" in script

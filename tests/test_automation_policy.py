@@ -113,7 +113,7 @@ def test_policy_migrates_legacy_schedule_and_freezes_default_output() -> None:
     assert policy_sha256(note_only) != policy_sha256(note_with_audio)
 
 
-def test_policy_migrates_legacy_seconds_without_revoking_authorization(
+def test_policy_migrates_legacy_default_to_thirty_minutes_without_revoking_authorization(
     tmp_path: Path,
 ) -> None:
     authorized_at = datetime(2026, 8, 25, tzinfo=UTC)
@@ -164,11 +164,11 @@ def test_policy_migrates_legacy_seconds_without_revoking_authorization(
     assert migrated is not None
     assert migrated.schema_version == "1.3"
     assert migrated.policy.schema_version == "1.3"
-    assert migrated.policy.check_interval_minutes == 5
+    assert migrated.policy.check_interval_minutes == 30
     assert migrated.policy.enabled is True
     assert migrated.policy.authorized_at == authorized_at
     persisted = json.loads(status_path.read_text(encoding="utf-8"))
-    assert persisted["policy"]["check_interval_minutes"] == 5
+    assert persisted["policy"]["check_interval_minutes"] == 30
     assert "check_interval_seconds" not in persisted["policy"]
     assert (
         tmp_path
@@ -178,6 +178,21 @@ def test_policy_migrates_legacy_seconds_without_revoking_authorization(
         / "legacy-task"
         / f"{migrated.policy_sha256}.json"
     ).is_file()
+
+
+def test_policy_migrates_a_non_default_legacy_interval_without_overwriting_it() -> None:
+    legacy_policy = _policy().model_dump(mode="json")
+    legacy_policy.update(
+        {
+            "schema_version": "1.2",
+            "check_interval_seconds": 600,
+        }
+    )
+    legacy_policy.pop("check_interval_minutes", None)
+
+    migrated = AutomationPolicy.model_validate(legacy_policy)
+
+    assert migrated.check_interval_minutes == 10
 
 
 def test_cli_configures_retry_limit_without_persisting_secret(tmp_path: Path) -> None:

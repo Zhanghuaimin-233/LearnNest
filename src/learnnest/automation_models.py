@@ -114,7 +114,10 @@ class AutomationPolicy(_Model):
             if isinstance(raw_seconds, bool):
                 raise ValueError("legacy automation check interval is invalid")
             try:
-                data["check_interval_minutes"] = float(raw_seconds) / 60
+                legacy_seconds = float(raw_seconds)
+                data["check_interval_minutes"] = (
+                    30 if legacy_seconds == 300 else legacy_seconds / 60
+                )
             except (TypeError, ValueError) as error:
                 raise ValueError(
                     "legacy automation check interval is invalid"

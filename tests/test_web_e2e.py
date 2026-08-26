@@ -1149,18 +1149,21 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
             """() => {
               const consoleRect = document.querySelector('#task-console').getBoundingClientRect();
               const spineRect = document.querySelector('#task-spine').getBoundingClientRect();
+              const insightRect = document.querySelector('#task-insight-rail').getBoundingClientRect();
               return {
                 consoleWidth: consoleRect.width,
                 leftMargin: consoleRect.left,
                 rightMargin: window.innerWidth - consoleRect.right,
                 spineWidth: spineRect.width,
+                insightWidth: insightRect.width,
               };
             }"""
         )
         assert wide_layout["consoleWidth"] >= 2_000
         assert wide_layout["leftMargin"] <= 250
         assert wide_layout["rightMargin"] <= 250
-        assert 295 <= wide_layout["spineWidth"] <= 305
+        assert 227 <= wide_layout["spineWidth"] <= 237
+        assert 295 <= wide_layout["insightWidth"] <= 305
         for view, selector in (
             ("sources", ".source-workspace"),
             ("settings", ".settings-workspace"),
@@ -1181,6 +1184,13 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
             assert page_layout["rightMargin"] <= 250
         _open_view(page, "tasks")
         expect(page.locator("#processing-list article")).to_have_count(1)
+        page.locator("#task-search").fill("does-not-exist")
+        expect(page.locator("#processing-list article")).to_be_hidden()
+        expect(page.locator("#task-filter-empty")).to_be_visible()
+        page.locator("#task-search").fill("safe-paused-input")
+        expect(page.locator("#processing-list article")).to_be_visible()
+        expect(page.locator("#task-filter-empty")).to_be_hidden()
+        expect(page.locator("#recent-activity .activity-item")).to_have_count(1)
         _open_first_task(page, "processing-list")
         expect(page.locator("#task-detail button[data-pause-item-ref]")).to_be_visible()
 

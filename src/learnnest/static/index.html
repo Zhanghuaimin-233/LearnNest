@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light" />
     <title>语栖 · 本地产出控制台</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/workspace.css" />
-    <script src="/static/workspace.js" defer></script>
+    <link rel="stylesheet" href="/static/workspace.css?v=20260827-2" />
+    <script src="/static/workspace.js?v=20260827-2" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -125,49 +125,82 @@
             </div>
           </header>
 
-          <div class="source-workspace">
-            <section class="source-row source-emphasis">
-              <div><p class="source-index">本地</p><h2>处理一个视频</h2><p>选择这台电脑上的视频，使用当前默认成品进入完整处理流程。</p></div>
-              <button class="inline-action" data-open-single-video type="button">选择视频</button>
-            </section>
+          <div class="source-workspace source-console" id="source-console">
+            <aside class="source-type-rail" id="source-type-rail" aria-label="来源类型">
+              <div class="source-rail-heading"><p class="rail-label">来源类型</p><h2>添加内容</h2></div>
+              <nav class="source-type-nav">
+                <button type="button" data-source-target="source-local"><span><i class="source-type-mark local" aria-hidden="true">＋</i><strong>本地视频</strong></span><small>选择文件</small></button>
+                <button type="button" data-source-target="source-url"><span><i class="source-type-mark link" aria-hidden="true">↗</i><strong>公开链接</strong></span><small>粘贴网址</small></button>
+                <button type="button" data-source-target="source-douyin"><span><i class="source-type-mark favorite" aria-hidden="true">◆</i><strong>抖音收藏</strong></span><small>同步并选择</small></button>
+              </nav>
+              <p class="source-rail-note">所有来源进入同一任务体系，进度和问题统一回到任务页。</p>
+            </aside>
 
-            <section class="source-row">
-              <div><p class="source-index">链接</p><h2>添加公开链接</h2><p>公开视频会先准备材料，再进入同一条产出流程。</p></div>
-              <form id="url-form" class="source-inline-form">
-                <label for="public-url">公开网址</label>
-                <div><input id="public-url" name="source" required autocomplete="url" placeholder="https://example.com/video" /><button type="submit">添加并处理</button></div>
-              </form>
-            </section>
+            <div class="source-canvas" id="source-canvas">
+              <section class="source-intake-shell" aria-labelledby="source-intake-title">
+                <header class="source-panel-toolbar">
+                  <div><h2 id="source-intake-title">快速添加</h2><span>使用当前默认成品</span></div>
+                </header>
+                <div class="source-intake-heading" aria-hidden="true"><span>来源</span><span>说明</span><span>输入</span><span>操作</span></div>
+                <article class="source-intake-row" id="source-local">
+                  <div class="source-name"><i class="source-type-mark local" aria-hidden="true">＋</i><div><strong>本地视频</strong><small>这台电脑上的文件</small></div></div>
+                  <p>选择视频后直接进入材料准备与默认产出流程。</p>
+                  <span class="source-format">MP4 · MOV · MKV · AVI</span>
+                  <button class="inline-action" data-open-single-video type="button">选择视频</button>
+                </article>
+                <article class="source-intake-row" id="source-url">
+                  <div class="source-name"><i class="source-type-mark link" aria-hidden="true">↗</i><div><strong>公开链接</strong><small>支持 yt-dlp 的公开页面</small></div></div>
+                  <p>公开内容先准备材料，再进入同一条产出流程。</p>
+                  <form id="url-form" class="source-inline-form"><label class="sr-only" for="public-url">公开网址</label><input id="public-url" name="source" required autocomplete="url" placeholder="粘贴公开视频网址" /><button type="submit">添加并处理</button></form>
+                  <span class="source-row-hint">不会在页面回显下载凭据</span>
+                </article>
+              </section>
 
-            <section class="source-row source-douyin">
-              <div>
-                <p class="source-index">抖音收藏</p>
-                <div class="source-title-line"><h2>抖音收藏</h2><span id="douyin-connection-state" class="status-pill">未连接</span></div>
-                <p id="favorites-status" aria-live="polite">连接抖音后，收藏会出现在这里。</p>
-                <p>请在同一个抖音官方窗口完成手机号验证码和抖音 App 扫码确认；随后官方页面会验证收藏访问，通过后才显示已连接。同步时会短暂恢复这套隔离页面环境，由抖音生成当次请求校验，后端再直接加载全部分页；登录凭据与页面环境使用 Windows 当前用户加密保存在本机，不需要每次重新登录。</p>
-              </div>
-              <div class="source-actions"><button id="connect-douyin" type="button">打开抖音验证窗口</button><button id="sync-favorites" class="text-button" type="button">手动同步</button></div>
-            </section>
+              <section class="source-douyin-panel" id="source-douyin">
+                <header class="source-panel-toolbar source-douyin-toolbar">
+                  <div><p class="panel-kicker">已连接的内容库</p><h2>抖音收藏</h2><span>同步默认与自建收藏夹，再选择要加入任务的内容。</span></div>
+                  <div class="source-actions"><button id="connect-douyin" type="button">打开抖音验证窗口</button><button id="sync-favorites" class="secondary-button" type="button">手动同步</button></div>
+                </header>
 
-            <div id="douyin-login-panel" class="login-panel" hidden>
-              <img id="douyin-qr" class="qr-image" alt="抖音登录二维码" hidden />
-              <div><p id="douyin-login-message" aria-live="polite">正在打开官方短信与扫码验证窗口。</p><p id="douyin-countdown" class="countdown" aria-live="polite" hidden></p><div class="form-actions"><button id="refresh-douyin" type="button" hidden>刷新二维码</button><button id="cancel-douyin" class="text-button" type="button">取消</button></div></div>
-            </div>
-
-            <div class="favorite-browser">
-              <aside class="favorite-folder-rail" aria-label="抖音收藏夹">
-                <p class="rail-label">收藏夹</p>
-                <div id="favorite-folders" class="favorite-folders"></div>
-              </aside>
-              <div class="favorite-collection-panel">
-                <div class="favorite-toolbar">
-                  <div><strong id="favorite-folder-title">全部收藏</strong><span id="favorite-selection">可跨收藏夹多选；首次同步不会自动处理。</span></div>
-                  <button id="add-selected-favorites" type="button" disabled>加入任务</button>
+                <div id="douyin-login-panel" class="login-panel" hidden>
+                  <img id="douyin-qr" class="qr-image" alt="抖音登录二维码" hidden />
+                  <div><p id="douyin-login-message" aria-live="polite">正在打开官方短信与扫码验证窗口。</p><p id="douyin-countdown" class="countdown" aria-live="polite" hidden></p><div class="form-actions"><button id="refresh-douyin" type="button" hidden>刷新二维码</button><button id="cancel-douyin" class="text-button" type="button">取消</button></div></div>
                 </div>
-                <div id="douyin-favorites-list" class="favorite-grid"></div>
-              </div>
+
+                <div class="favorite-browser">
+                  <aside class="favorite-folder-rail" aria-label="抖音收藏夹">
+                    <p class="rail-label">收藏夹</p>
+                    <div id="favorite-folders" class="favorite-folders"></div>
+                  </aside>
+                  <div class="favorite-collection-panel">
+                    <div class="favorite-toolbar">
+                      <div><strong id="favorite-folder-title">全部收藏</strong><span id="favorite-selection">可跨收藏夹多选；首次同步不会自动处理。</span></div>
+                      <button id="add-selected-favorites" type="button" disabled>加入任务</button>
+                    </div>
+                    <div id="douyin-favorites-list" class="favorite-grid"></div>
+                  </div>
+                </div>
+              </section>
+              <section id="source-jobs" class="source-jobs" hidden></section>
             </div>
-            <section id="source-jobs" class="source-jobs" hidden></section>
+
+            <aside class="source-insight-rail" id="source-insight-rail" aria-label="来源状态">
+              <section class="insight-card source-connection-card">
+                <div class="insight-heading"><h2>抖音连接</h2><span id="douyin-connection-state" class="status-pill">未连接</span></div>
+                <p id="favorites-status" aria-live="polite">连接抖音后，收藏会出现在这里。</p>
+                <p>请在同一个抖音官方窗口完成手机号验证码和抖音 App 扫码确认；语栖随后验证收藏访问，通过后才显示已连接。</p>
+                <p class="source-security-note">验证与收藏环境只由当前 Windows 用户加密保存；同步会短暂恢复隔离官方页面，不会突然打开可见窗口。</p>
+              </section>
+              <section class="insight-card source-flow-card">
+                <div class="insight-heading"><h2>加入路径</h2><span>统一任务事实</span></div>
+                <ol class="source-flow"><li><strong>添加内容</strong><span>选择文件、粘贴链接或勾选收藏</span></li><li><strong>准备材料</strong><span>字幕、画面和文字按来源处理</span></li><li><strong>回到任务</strong><span>查看进度、问题和最终成品</span></li></ol>
+              </section>
+              <section class="insight-card source-next-card">
+                <div class="insight-heading"><h2>添加后</h2></div>
+                <p>来源页不复制后续操作。任务创建后，到任务工作台继续查看。</p>
+                <button class="text-button" data-go-tasks type="button">打开任务工作台 <span aria-hidden="true">→</span></button>
+              </section>
+            </aside>
           </div>
         </section>
 
@@ -187,7 +220,6 @@
               <button data-settings-tab="connections" type="button"><span>模型与连接</span><small>服务、连接与职责</small></button>
               <button data-settings-tab="safety" type="button"><span>调用安全</span><small>重试与每日上限</small></button>
               <button data-settings-tab="storage" type="button"><span>本地存储</span><small>输出位置与空间</small></button>
-              <div class="settings-readiness"><i></i><span><strong id="settings-readiness-title">正在检查设置</strong><small id="settings-readiness-copy">根据默认成品检查所需职责</small></span></div>
             </aside>
 
             <div class="settings-content">
@@ -236,6 +268,21 @@
                 <div class="storage-facts"><div><strong>成品与任务</strong><span>笔记、音频、任务事实和来源状态保存在所选文件夹。</span></div><div><strong>连接密钥</strong><span>仍只由当前 Windows 用户加密读取；切换位置不会复制密钥。</span></div></div>
               </section>
             </div>
+
+            <aside class="settings-insight-rail" id="settings-insight-rail" aria-label="设置状态">
+              <section class="insight-card">
+                <div class="insight-heading"><h2>准备情况</h2><span>按默认成品检查</span></div>
+                <div class="settings-readiness"><i></i><span><strong id="settings-readiness-title">正在检查设置</strong><small id="settings-readiness-copy">根据默认成品检查所需职责</small></span></div>
+              </section>
+              <section class="insight-card">
+                <div class="insight-heading"><h2>当前设置</h2><span>真实保存值</span></div>
+                <dl class="settings-summary-list"><div><dt>默认成品</dt><dd id="settings-summary-output">读取中</dd></div><div><dt>付费整理</dt><dd id="settings-summary-license">读取中</dd></div><div><dt>新收藏</dt><dd id="settings-summary-favorites">读取中</dd></div><div><dt>自动检查</dt><dd id="settings-summary-interval">读取中</dd></div></dl>
+              </section>
+              <section class="insight-card settings-sequence-card">
+                <div class="insight-heading"><h2>开始整理</h2><span>按顺序完成</span></div>
+                <ol class="settings-sequence"><li><strong>保存设置</strong><span>确定默认成品、连接与限制</span></li><li><strong>确认许可</strong><span>需要付费服务时由你明确开启</span></li><li><strong>添加内容</strong><span>新任务使用保存后的设置</span></li></ol>
+              </section>
+            </aside>
           </div>
         </section>
       </main>

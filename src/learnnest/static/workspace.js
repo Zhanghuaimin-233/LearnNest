@@ -95,6 +95,10 @@ const runtimeCopy = document.querySelector("#runtime-copy");
 const settingsReadiness = document.querySelector(".settings-readiness");
 const settingsReadinessTitle = document.querySelector("#settings-readiness-title");
 const settingsReadinessCopy = document.querySelector("#settings-readiness-copy");
+const settingsSummaryOutput = document.querySelector("#settings-summary-output");
+const settingsSummaryLicense = document.querySelector("#settings-summary-license");
+const settingsSummaryFavorites = document.querySelector("#settings-summary-favorites");
+const settingsSummaryInterval = document.querySelector("#settings-summary-interval");
 let windowsVoicesLoaded = false;
 let pendingDeleteItemRef = null;
 const stateLabel = {
@@ -778,6 +782,10 @@ function renderAutomationStatus(status) {
   const outputLabel = output === "complete_note" ? "完整笔记" : "笔记 + 音频";
   defaultOutputLabel.textContent = outputLabel;
   singleVideoOutput.textContent = outputLabel;
+  settingsSummaryOutput.textContent = outputLabel;
+  settingsSummaryLicense.textContent = paidAuthorized ? "许可有效" : status.needs_authorization ? "需要重新确认" : "尚未许可";
+  settingsSummaryFavorites.textContent = autoNewFavoritesEnabled ? "自动加入" : "仅手动加入";
+  settingsSummaryInterval.textContent = `每 ${Number(status.check_interval_minutes || 30)} 分钟`;
   runtimeState.classList.toggle("is-on", paidAuthorized);
   runtimeTitle.textContent = paidAuthorized ? "付费整理许可已开启" : "付费整理许可未开启";
   runtimeCopy.textContent = paidAuthorized
@@ -1396,6 +1404,10 @@ document.querySelectorAll("[data-go-settings]").forEach((button) => button.addEv
   showSettingsPanel("output");
 }));
 document.querySelectorAll("[data-go-sources]").forEach((button) => button.addEventListener("click", () => showView("sources")));
+document.querySelectorAll("[data-go-tasks]").forEach((button) => button.addEventListener("click", () => showView("tasks")));
+document.querySelectorAll("[data-source-target]").forEach((button) => button.addEventListener("click", () => {
+  document.querySelector(`#${CSS.escape(button.dataset.sourceTarget)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}));
 document.querySelector("#open-connection-dialog").addEventListener("click", () => openConnectionDialog());
 document.querySelectorAll("[data-close-connection]").forEach((button) => button.addEventListener("click", () => connectionDialog.close()));
 document.querySelector("#local-video").addEventListener("change", (event) => {

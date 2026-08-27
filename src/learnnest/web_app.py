@@ -873,6 +873,16 @@ def create_web_app(
     app.state.web_service = service
     app.state.learning_workspace = workspace
     app.state.automation_coordinator = coordinator
+
+    @app.middleware("http")
+    async def revalidate_loopback_ui(
+        request: Request, call_next: Callable[[Request], Any]
+    ) -> Response:
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     app.mount("/static", StaticFiles(directory=_STATIC_DIRECTORY), name="static")
 
     @app.get("/", include_in_schema=False)
@@ -1599,14 +1609,21 @@ def _learning_note_page(note: Any, fragment: str, audio_href: str | None) -> str
         if audio_href is not None
         else ""
     )
+    audio_status = "可播放" if audio_href is not None else "未生成"
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>{title} · 语栖</title><link rel="icon" href="data:," />
-<link rel="stylesheet" href="/static/workspace.css" />
-</head><body class="note-page"><main class="note-shell">
-<a class="note-back" href="/#library">返回学习库</a><header><p class="eyebrow">语栖学习笔记</p><h1>{title}</h1></header>
-{audio}<article class="note-content">{fragment}</article>
+<link rel="stylesheet" href="/static/workspace.css?v=20260827-2" />
+</head><body class="note-page">
+<header class="note-app-header"><div class="note-app-header-inner">
+<a class="note-brand" href="/#tasks"><span class="brand-mark" aria-hidden="true">语</span><span><strong>语栖</strong><small>LEARNNEST</small></span></a>
+<a class="note-return" href="/#tasks">返回任务工作台 →</a>
+</div></header>
+<main class="note-shell">
+<aside class="note-rail"><p class="rail-label">学习成品</p><h2>完整笔记</h2><p>这是当前任务已经验证并发布的阅读版本。</p><dl class="note-rail-list"><div><dt>笔记状态</dt><dd>可阅读</dd></div><div><dt>配套音频</dt><dd>{audio_status}</dd></div></dl><a class="note-back" href="/#tasks">← 返回任务工作台</a></aside>
+<section class="note-reading"><header class="note-reading-header"><p class="eyebrow">语栖学习笔记</p><h1>{title}</h1></header>
+{audio}<article class="note-content">{fragment}</article></section>
 </main></body></html>"""
 
 

@@ -37,10 +37,11 @@ const refreshDouyinButton = document.querySelector("#refresh-douyin");
 const cancelDouyinButton = document.querySelector("#cancel-douyin");
 const providerForm = document.querySelector("#provider-connection-form");
 const providerKeyField = document.querySelector("#provider-key-field");
-const providerList = document.querySelector("#provider-connection-list");
+const providerCapabilityList = document.querySelector("#provider-capability-list");
 const providerState = document.querySelector("#provider-settings-state");
 const providerFeedback = document.querySelector("#provider-feedback");
-const setupReadiness = document.querySelector("#setup-readiness");
+const providerReadyCount = document.querySelector("#provider-ready-count");
+const providerReadyBadges = document.querySelector("#provider-ready-badges");
 const windowsVoiceField = document.querySelector("#windows-voice-field");
 const windowsVoice = document.querySelector("#windows-voice");
 const automationForm = document.querySelector("#automation-form");
@@ -82,7 +83,12 @@ const deleteTaskForm = document.querySelector("#delete-task-form");
 const deleteTaskTitle = document.querySelector("#delete-task-title");
 const selectedVideoName = document.querySelector("#selected-video-name");
 const connectionDialog = document.querySelector("#connection-dialog");
-const providerAdapterList = document.querySelector("#provider-adapter-list");
+const connectionDialogTitle = document.querySelector("#connection-dialog-title");
+const connectionDialogCopy = document.querySelector("#connection-dialog-copy");
+const providerServiceHint = document.querySelector("#provider-service-hint");
+const deleteConnectionDialog = document.querySelector("#delete-connection-dialog");
+const deleteConnectionForm = document.querySelector("#delete-connection-form");
+const deleteConnectionName = document.querySelector("#delete-connection-name");
 const providerLimitsForm = document.querySelector("#provider-limits-form");
 const providerLimitsFeedback = document.querySelector("#provider-limits-feedback");
 const storageForm = document.querySelector("#storage-form");
@@ -140,6 +146,9 @@ let selectedFavoriteIdsState = new Set();
 let activeFavoriteFolderId = "all";
 let latestFavoritesSnapshot = { synced_at: null, folders: [], items: [] };
 let suggestedProviderConnectionName = "";
+let latestProviderSettings = { connections: [], adapters: [], roles: {}, readiness: null };
+let pendingDeleteConnection = null;
+let providerSettingsMutationRevision = 0;
 const dirtySettingsForms = new Set();
 let currentSnapshot = { inbox: [], processing: [], library: [] };
 let currentTrash = [];
@@ -153,6 +162,17 @@ const providerConnectionNameDefaults = {
   "local-asr": "local-asr",
   "local-ocr": "local-ocr",
 };
+const providerCapabilityDefinitions = {
+  asr: { icon: "ASR", title: "ASR · 语音识别", copy: "从视频中提取语音内容，新任务只使用一个当前连接。", empty: "当前使用内置 faster-whisper large-v3；添加服务后可以显式绑定。" },
+  ocr: { icon: "OCR", title: "OCR · 画面文字", copy: "识别视频画面中的文字内容，新任务只使用一个当前连接。", empty: "当前使用内置 PaddleOCR；添加服务后可以显式绑定。" },
+  llm: { icon: "LLM", title: "LLM · 内容生成", copy: "连接是通用资源；Writer、Reviewer、Podcast 可以分别选择兼容连接。", empty: "还没有 LLM 连接。添加 MiMo 或 DeepSeek 后再分配职责。" },
+  tts: { icon: "TTS", title: "TTS · 语音合成", copy: "将播客稿转换为音频，新任务只使用一个当前语音连接。", empty: "还没有语音连接。可以添加 Windows 系统语音或 MiMo TTS。" },
+};
+const providerRoleCopy = {
+  "笔记 Writer": "生成完整笔记初稿",
+  "笔记 Reviewer": "复核内容和证据约束",
+  "播客": "生成播客稿与 speech.txt",
+};
 
 function say(message) {
   window.clearTimeout(noticeTimer);
@@ -163,15 +183,20 @@ function say(message) {
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value ?? ""; return node.innerHTML; }
 
 function renderProviderSettings(settings) {
+  latestProviderSettings = settings;
   const configured = settings.connections.length;
-  providerState.textContent = configured ? `已配置 ${configured} 个` : "未配置";
-  providerState.className = `status-pill ${configured ? "connected" : ""}`;
-  providerList.innerHTML = settings.connections.length
-    ? settings.connections.map((item) => {
-      return `<div class="provider-row"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.provider)} · ${escapeHtml(item.state)}</span><div class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查连接</button><button type="button" data-delete-connection="${escapeHtml(item.name)}">删除</button></div></div>`;
-    }).join("")
-    : '<p class="empty">还没有学习连接。点击“添加连接”选择一个当前支持的服务。</p>';
-  providerList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", async () => {
+  const capabilities = Object.keys(providerCapabilityDefinitions);
+  const readyCapabilities = capabilities.filter((capability) => providerCapabilityIsReady(capability, settings.roles?.[capability] || []));
+  providerState.textContent = readyCapabilities.length === capabilities.length ? "全部已准备" : `已配置 ${configured} 个连接`;
+  providerState.className = `status-pill ${readyCapabilities.length === capabilities.length ? "connected" : ""}`;
+  providerReadyCount.textContent = `${readyCapabilities.length} / ${capabilities.length}`;
+  document.querySelector(".capability-overview").classList.toggle("is-ready", readyCapabilities.length === capabilities.length);
+  providerReadyBadges.innerHTML = capabilities.map((capability) => {
+    const ready = readyCapabilities.includes(capability);
+    return `<span>${capability.toUpperCase()} ${ready ? "已配置" : "待配置"}</span>`;
+  }).join("");
+  providerCapabilityList.innerHTML = capabilities.map((capability) => renderProviderCapabilityCard(capability, settings)).join("");
+  providerCapabilityList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", async () => {
     const label = button.textContent;
     button.disabled = true;
     button.textContent = "检查中…";
@@ -181,17 +206,70 @@ function renderProviderSettings(settings) {
       say(result.message);
     } catch (error) { providerFeedback.textContent = error.message; say(error.message); } finally { button.disabled = false; button.textContent = label; }
   }));
-  providerList.querySelectorAll("button[data-delete-connection]").forEach((button) => button.addEventListener("click", () => deleteProviderConnection(button)));
-  renderProviderAdapters(settings.adapters || []);
+  providerCapabilityList.querySelectorAll("button[data-delete-connection]:not(:disabled)").forEach((button) => button.addEventListener("click", () => openDeleteProviderConnection(button)));
+  providerCapabilityList.querySelectorAll("button[data-use-connection]").forEach((button) => button.addEventListener("click", () => setCurrentProviderConnection(button)));
+  providerCapabilityList.querySelectorAll("button[data-add-capability]").forEach((button) => button.addEventListener("click", () => openConnectionDialog(button.dataset.addCapability)));
+  providerCapabilityList.querySelectorAll("select[data-setup-role-select]").forEach((select) => select.addEventListener("change", () => saveProviderRoleSelection(select)));
   renderProviderLimits(settings.limits);
   renderSetupReadiness(settings.readiness);
 }
 
-function renderProviderAdapters(adapters) {
-  providerAdapterList.innerHTML = adapters.length
-    ? adapters.map((adapter) => `<article class="adapter-card"><span>${escapeHtml(adapter.capability)}${adapter.local ? " · 本地" : ""}</span><strong>${escapeHtml(adapter.name)}</strong><button type="button" data-add-adapter="${escapeHtml(adapter.preset)}">添加连接</button></article>`).join("")
-    : '<p class="empty">当前没有可添加的模型或语音服务。</p>';
-  providerAdapterList.querySelectorAll("button[data-add-adapter]").forEach((button) => button.addEventListener("click", () => openConnectionDialog(button.dataset.addAdapter)));
+function providerCapabilityIsReady(capability, roles) {
+  if (capability === "llm") return roles.length === 3 && roles.every((role) => role.connection && ["连接配置可读取", "本地配置可读取"].includes(role.state));
+  const role = roles[0];
+  if (!role) return false;
+  return ["连接配置可读取", "本地配置可读取"].includes(role.state)
+    || (["asr", "ocr"].includes(capability) && role.state === "使用内置本地能力");
+}
+
+function providerLogo(item) {
+  if (item.provider === "MiMo" || item.provider === "MiMo TTS") return "MiMo";
+  if (item.provider === "DeepSeek") return "DS";
+  if (item.provider === "Windows 系统语音") return "WIN";
+  if (item.capability === "asr") return "FW";
+  if (item.capability === "ocr") return "OCR";
+  return item.capability.toUpperCase();
+}
+
+function renderProviderConnectionRow(item, capability, role) {
+  const current = item.bound_roles.length > 0;
+  const model = item.voice || item.model || item.provider;
+  const roleBadges = item.bound_roles.map((label) => `<span class="provider-badge is-role">${escapeHtml(label.replace("笔记 ", ""))}</span>`).join("");
+  const localBadge = item.local ? '<span class="provider-badge is-local">本地</span>' : "";
+  const useButton = capability === "llm"
+    ? ""
+    : `<button class="provider-use-button" type="button" data-use-connection="${escapeHtml(item.name)}" data-use-role="${escapeHtml(role?.name || "")}"${current ? " disabled" : ""}>${current ? "使用中" : "设为当前"}</button>`;
+  const deleteTitle = item.deletable ? `删除连接 ${item.name}` : item.delete_reason;
+  return `<section class="provider-row${current ? " is-current" : ""}" data-connection="${escapeHtml(item.name)}">
+    <span class="provider-logo">${escapeHtml(providerLogo(item))}</span>
+    <span class="provider-copy"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.provider)} · ${escapeHtml(item.state)}</span></span>
+    <span class="provider-model"><strong>${escapeHtml(model)}</strong><span class="provider-badges">${roleBadges}${localBadge}</span></span>
+    <span class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查连接</button>${useButton}<button class="provider-delete-button" type="button" data-delete-connection="${escapeHtml(item.name)}" aria-label="${escapeHtml(deleteTitle)}" title="${escapeHtml(deleteTitle)}"${item.deletable ? "" : " disabled"}>删除</button></span>
+  </section>`;
+}
+
+function renderLlmRoleAssignment(roles) {
+  const bound = roles.filter((role) => role.connection).length;
+  const rows = roles.map((role) => {
+    const options = role.options.map((item) => `<option value="${escapeHtml(item.name)}"${item.name === role.connection ? " selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.provider)}</option>`).join("");
+    const attention = !role.connection || !["连接配置可读取", "本地配置可读取"].includes(role.state);
+    return `<label class="llm-role-row"><span class="llm-role-copy"><strong>${escapeHtml(role.name)}</strong><small>${escapeHtml(providerRoleCopy[role.name] || "选择新任务使用的连接")}</small></span><select data-setup-role-select="${escapeHtml(role.name)}" data-current-connection="${escapeHtml(role.connection || "")}" aria-label="为${escapeHtml(role.name)}选择连接"><option value="">暂不绑定</option>${options}</select><span class="llm-role-state${attention ? " is-attention" : ""}"><strong>${attention ? "等待绑定" : "已绑定"}</strong>${escapeHtml(role.hint || role.state)}</span></label>`;
+  }).join("");
+  return `<section class="llm-role-assignment" id="setup-readiness" aria-label="LLM 职责分配"><div class="llm-role-heading"><div><h4>职责分配</h4><p>这是 LLM 独有的子项；保存后只影响尚未开始的新任务。</p></div><span>${bound} / ${roles.length} 已绑定</span></div>${rows}</section>`;
+}
+
+function renderProviderCapabilityCard(capability, settings) {
+  const definition = providerCapabilityDefinitions[capability];
+  const roles = settings.roles?.[capability] || [];
+  const connections = settings.connections.filter((item) => item.capability === capability);
+  const ready = providerCapabilityIsReady(capability, roles);
+  const state = capability === "llm" ? `${roles.filter((role) => role.connection).length} 个职责已绑定` : ready ? "已就绪" : "等待选择";
+  const rows = connections.length
+    ? connections.map((item) => renderProviderConnectionRow(item, capability, roles[0])).join("")
+    : `<p class="provider-capability-empty">${escapeHtml(definition.empty)}</p>`;
+  const assignment = capability === "llm" ? renderLlmRoleAssignment(roles) : "";
+  const footer = capability === "llm" ? `${connections.length} 个 LLM 连接` : roles[0]?.connection ? `当前：${roles[0].connection}` : roles[0]?.state || "尚未选择连接";
+  return `<article class="provider-capability-card" data-capability="${capability}"><header class="provider-capability-header"><div class="provider-capability-identity"><span class="provider-capability-icon">${definition.icon}</span><div><div class="provider-capability-title"><h3>${definition.title}</h3><span class="provider-card-state${ready ? "" : " is-attention"}">${escapeHtml(state)}</span></div><p class="provider-capability-copy">${definition.copy}</p></div></div><button class="add-capability-button" type="button" data-add-capability="${capability}" aria-label="添加 ${capability.toUpperCase()} 服务"><strong aria-hidden="true">＋</strong><span>添加服务</span></button></header><p class="provider-list-label">服务连接</p><div class="provider-connection-list">${rows}</div>${assignment}<footer class="capability-card-footer">${escapeHtml(footer)}</footer></article>`;
 }
 
 function renderProviderLimits(limits) {
@@ -237,76 +315,73 @@ function renderSetupReadiness(readiness) {
   settingsReadinessTitle.textContent = ready ? "当前可以完整产出" : readiness.state;
   settingsReadinessCopy.textContent = readiness.message;
   singleVideoReadiness.textContent = readiness.message;
-  const roleRows = (roles) => roles.map((role) => {
-    const options = role.options.map((item) => `<option value="${escapeHtml(item.name)}"${item.name === role.connection ? " selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.provider)}</option>`).join("");
-    const control = role.connection
-      ? `<button type="button" data-unbind-setup-role="${escapeHtml(role.name)}">解绑</button>`
-      : role.options.length
-        ? `<select aria-label="为${escapeHtml(role.name)}选择连接" data-setup-role-select="${escapeHtml(role.name)}"><option value="">选择连接</option>${options}</select><button type="button" data-bind-setup-role="${escapeHtml(role.name)}">绑定</button>`
-        : `<span class="field-hint">${escapeHtml(role.hint || "请先添加兼容连接。")}</span>`;
-    const connection = role.connection || (role.state === "使用内置本地能力" ? "未显式绑定" : "等待选择");
-    return `<div class="provider-role-summary"><span>${escapeHtml(role.name)}</span><span>${escapeHtml(connection)}</span><div class="provider-role-actions"><strong>${escapeHtml(role.state)}</strong>${control}</div></div>`;
-  }).join("");
-  setupReadiness.innerHTML = `<p class="panel-kicker">所选结果：${escapeHtml(readiness.default_output)}</p>`
-    + `<p>${escapeHtml(readiness.message)}</p>`
-    + `<section class="provider-role-group"><div class="role-group-heading"><h4>材料提取</h4><p>ASR 与 OCR 会冻结到新任务；未显式绑定时继续使用内置本地能力。</p></div><div class="provider-role-list">${roleRows(readiness.material_roles || [])}</div></section>`
-    + `<section class="provider-role-group"><div class="role-group-heading"><h4>成品生成</h4><p>这些职责由当前默认成品决定。</p></div><div class="provider-role-list">${roleRows(readiness.required_roles)}</div></section>`
-    + `<p>付费许可：${escapeHtml(readiness.authorization.state)}。${escapeHtml(readiness.authorization.message)}</p>`;
-  setupReadiness.querySelectorAll("button[data-bind-setup-role]").forEach((button) => button.addEventListener("click", () => bindSetupRole(button)));
-  setupReadiness.querySelectorAll("button[data-unbind-setup-role]").forEach((button) => button.addEventListener("click", () => clearSetupRole(button)));
-  setupReadiness.querySelectorAll("select[data-setup-role-select]").forEach((select) => select.addEventListener("change", () => dirtySettingsForms.add(setupReadiness)));
 }
 
-async function bindSetupRole(button) {
-  const label = button.dataset.bindSetupRole;
-  const select = button.previousElementSibling;
-  if (!select?.value) { providerFeedback.textContent = `请先为${label}选择连接。`; return; }
-  const buttonLabel = button.textContent;
-  button.disabled = true;
-  button.textContent = "保存中…";
+async function saveProviderRoleSelection(select) {
+  const label = select.dataset.setupRoleSelect;
+  const previous = select.dataset.currentConnection || "";
+  const next = select.value;
+  dirtySettingsForms.add(providerCapabilityList);
+  select.disabled = true;
   try {
-    const settings = await api(`/api/providers/setup-roles/${encodeURIComponent(label)}`, { method: "POST", body: JSON.stringify({ connection_name: select.value }) });
-    dirtySettingsForms.delete(setupReadiness);
+    const settings = next
+      ? await api(`/api/providers/setup-roles/${encodeURIComponent(label)}`, { method: "POST", body: JSON.stringify({ connection_name: next }) })
+      : await api(`/api/providers/setup-roles/${encodeURIComponent(label)}`, { method: "DELETE" });
+    dirtySettingsForms.delete(providerCapabilityList);
+    providerSettingsMutationRevision += 1;
     renderProviderSettings(settings);
     await loadAutomationStatus();
-    providerFeedback.textContent = `已绑定：${label}。付费整理许可需要重新确认。`;
+    providerFeedback.textContent = next ? `已更新${label}使用的连接；付费整理许可需要重新确认。` : `已解除${label}的连接；补齐职责后才能完整产出。`;
     say(providerFeedback.textContent);
   } catch (error) {
+    select.value = previous;
+    dirtySettingsForms.delete(providerCapabilityList);
     showProviderUpdateFailure(error);
   } finally {
-    button.disabled = false;
-    button.textContent = buttonLabel;
+    select.disabled = false;
   }
 }
 
-async function clearSetupRole(button) {
-  const label = button.dataset.unbindSetupRole;
+async function setCurrentProviderConnection(button) {
+  const label = button.dataset.useRole;
+  const connectionName = button.dataset.useConnection;
   const buttonLabel = button.textContent;
   button.disabled = true;
-  button.textContent = "解绑中…";
+  button.textContent = "切换中…";
   try {
-    const settings = await api(`/api/providers/setup-roles/${encodeURIComponent(label)}`, { method: "DELETE" });
-    dirtySettingsForms.delete(setupReadiness);
+    const settings = await api(`/api/providers/setup-roles/${encodeURIComponent(label)}`, { method: "POST", body: JSON.stringify({ connection_name: connectionName }) });
+    providerSettingsMutationRevision += 1;
     renderProviderSettings(settings);
     await loadAutomationStatus();
-    providerFeedback.textContent = `已解绑：${label}。付费整理许可需要重新确认。`;
+    providerFeedback.textContent = `已将${connectionName}设为${label}的当前连接；付费整理许可需要重新确认。`;
     say(providerFeedback.textContent);
   } catch (error) { showProviderUpdateFailure(error); } finally { button.disabled = false; button.textContent = buttonLabel; }
 }
 
-async function deleteProviderConnection(button) {
-  const name = button.dataset.deleteConnection;
-  if (!window.confirm(`确定删除连接“${name}”吗？此操作无法恢复。`)) return;
+function openDeleteProviderConnection(button) {
+  pendingDeleteConnection = button.dataset.deleteConnection;
+  deleteConnectionName.textContent = pendingDeleteConnection;
+  deleteConnectionDialog.showModal();
+  window.requestAnimationFrame(() => document.querySelector("[data-close-delete-connection]")?.focus({ preventScroll: true }));
+}
+
+async function deleteProviderConnection(event) {
+  event.preventDefault();
+  if (!pendingDeleteConnection) return;
+  const name = pendingDeleteConnection;
+  const button = event.submitter || document.querySelector("#confirm-delete-connection");
   const label = button.textContent;
   button.disabled = true;
   button.textContent = "删除中…";
   providerState.textContent = "删除中";
   try {
     const settings = await api(`/api/providers/connections/${encodeURIComponent(name)}`, { method: "DELETE" });
+    providerSettingsMutationRevision += 1;
     renderProviderSettings(settings);
     await loadAutomationStatus();
     providerFeedback.textContent = `已删除连接：${name}。如付费整理许可此前有效，请重新确认。`;
     say(providerFeedback.textContent);
+    deleteConnectionDialog.close();
   } catch (error) {
     showProviderUpdateFailure(error);
   } finally {
@@ -337,8 +412,10 @@ async function refreshProviderConnectionFields() {
 
 async function loadProviderSettings(defaultOutput = null, protectDirty = false) {
   try {
+    const mutationRevision = providerSettingsMutationRevision;
     const settings = await api(`/api/providers/settings${defaultOutput ? `?default_output=${encodeURIComponent(defaultOutput)}` : ""}`);
-    if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(setupReadiness))) return;
+    if (protectDirty && mutationRevision !== providerSettingsMutationRevision) return;
+    if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(providerCapabilityList))) return;
     if (protectDirty && settingsFormNeedsProtection(providerLimitsForm)) return;
     renderProviderSettings(settings);
     await refreshProviderConnectionFields();
@@ -351,7 +428,7 @@ function settingsFormNeedsProtection(form) {
 }
 
 async function refreshProviderSettingsWhenIdle() {
-  if (!settingsFormNeedsProtection(providerForm) && !settingsFormNeedsProtection(setupReadiness) && !settingsFormNeedsProtection(providerLimitsForm)) await loadProviderSettings(automationForm.elements.default_output.value, true);
+  if (!settingsFormNeedsProtection(providerForm) && !settingsFormNeedsProtection(providerCapabilityList) && !settingsFormNeedsProtection(providerLimitsForm)) await loadProviderSettings(automationForm.elements.default_output.value, true);
 }
 
 function renderList(target, items, empty) {
@@ -858,9 +935,29 @@ function showSettingsPanel(panelName) {
   document.querySelectorAll("[data-settings-tab]").forEach((button) => button.classList.toggle("is-active", button.dataset.settingsTab === panelName));
 }
 
-function openConnectionDialog(preset = null) {
-  if (preset) providerForm.elements.preset.value = preset;
+function populateProviderPresetOptions(capability, preset = null) {
+  const adapters = (latestProviderSettings.adapters || []).filter((adapter) => adapter.capability_key === capability);
+  const existingPresets = new Set((latestProviderSettings.connections || []).filter((item) => item.capability === capability).map((item) => item.preset));
+  const options = adapters.map((adapter) => {
+    const alreadyAdded = capability !== "llm" && existingPresets.has(adapter.preset);
+    return `<option value="${escapeHtml(adapter.preset)}"${alreadyAdded ? " disabled" : ""}>${escapeHtml(adapter.name)}${adapter.local ? "（本地）" : ""}${alreadyAdded ? " · 已添加" : ""}</option>`;
+  });
+  providerForm.elements.preset.innerHTML = options.length ? options.join("") : '<option value="">当前没有可添加的服务</option>';
+  const selectable = adapters.find((adapter) => capability === "llm" || !existingPresets.has(adapter.preset));
+  const requested = adapters.find((adapter) => adapter.preset === preset && (capability === "llm" || !existingPresets.has(adapter.preset)));
+  providerForm.elements.preset.value = (requested || selectable)?.preset || "";
+  providerForm.querySelector('button[type="submit"]').disabled = !providerForm.elements.preset.value;
+  providerServiceHint.textContent = selectable ? "保存后，这个连接会出现在当前能力卡中。" : "当前支持的服务都已添加；请先使用现有连接。";
+}
+
+function openConnectionDialog(capability = "llm", preset = null) {
+  providerForm.reset();
+  suggestedProviderConnectionName = "";
+  connectionDialogTitle.textContent = `添加 ${capability.toUpperCase()} 服务`;
+  connectionDialogCopy.textContent = capability === "llm" ? "创建连接后，再把它分配给 Writer、Reviewer 或 Podcast。" : "这里只显示当前能力真正支持的服务。";
+  populateProviderPresetOptions(capability, preset);
   suggestProviderConnectionName();
+  windowsVoicesLoaded = false;
   refreshProviderConnectionFields().catch((error) => say(error.message));
   connectionDialog.showModal();
   window.requestAnimationFrame(() => providerForm.elements.name.focus());
@@ -1294,6 +1391,7 @@ providerForm.addEventListener("submit", async (event) => {
     submittedForm.reset();
     dirtySettingsForms.delete(providerForm);
     suggestProviderConnectionName();
+    providerSettingsMutationRevision += 1;
     renderProviderSettings(settings);
     providerFeedback.textContent = "连接已保存；密钥不会显示在页面中。";
     say(providerFeedback.textContent);
@@ -1324,6 +1422,7 @@ providerLimitsForm.addEventListener("submit", async (event) => {
       }),
     });
     dirtySettingsForms.delete(providerLimitsForm);
+    providerSettingsMutationRevision += 1;
     renderProviderSettings(settings);
     await loadAutomationStatus();
     providerLimitsFeedback.textContent = "调用限制已保存；自动处理需要重新确认。";
@@ -1398,6 +1497,9 @@ document.querySelectorAll("[data-close-single-video]").forEach((button) => butto
 document.querySelectorAll("[data-close-automation-authorization]").forEach((button) => button.addEventListener("click", closeAutomationAuthorization));
 document.querySelectorAll("[data-close-delete-task]").forEach((button) => button.addEventListener("click", closeDeleteTask));
 deleteTaskDialog.addEventListener("close", () => { pendingDeleteItemRef = null; });
+deleteConnectionForm.addEventListener("submit", deleteProviderConnection);
+document.querySelectorAll("[data-close-delete-connection]").forEach((button) => button.addEventListener("click", () => deleteConnectionDialog.close()));
+deleteConnectionDialog.addEventListener("close", () => { pendingDeleteConnection = null; });
 document.querySelectorAll("[data-go-settings]").forEach((button) => button.addEventListener("click", () => {
   if (singleVideoDialog.open) singleVideoDialog.close();
   showView("settings");
@@ -1408,7 +1510,6 @@ document.querySelectorAll("[data-go-tasks]").forEach((button) => button.addEvent
 document.querySelectorAll("[data-source-target]").forEach((button) => button.addEventListener("click", () => {
   document.querySelector(`#${CSS.escape(button.dataset.sourceTarget)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }));
-document.querySelector("#open-connection-dialog").addEventListener("click", () => openConnectionDialog());
 document.querySelectorAll("[data-close-connection]").forEach((button) => button.addEventListener("click", () => connectionDialog.close()));
 document.querySelector("#local-video").addEventListener("change", (event) => {
   selectedVideoName.textContent = event.currentTarget.files[0]?.name || "MP4、MOV、MKV、AVI、MPEG 或 WebM";

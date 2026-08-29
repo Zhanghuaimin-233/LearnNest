@@ -1572,7 +1572,7 @@ def test_learning_note_has_a_readable_shell_and_only_shows_verified_audio(
     assert 'href="/#library"' not in with_audio.text
     for shell_class in ("note-app-header", "note-rail", "note-reading"):
         assert f'class="{shell_class}"' in with_audio.text
-    assert "/static/workspace.css?v=20260827-2" in with_audio.text
+    assert "/static/workspace.css?v=20260829-1" in with_audio.text
     assert 'aria-label="播放本篇笔记的音频"' in with_audio.text
     assert f"/api/learning/items/{task.task_id}/audio" in with_audio.text
     assert f"/api/learning/items/{task.task_id}/images/cover.png" in with_audio.text
@@ -1627,8 +1627,8 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
     ):
         assert f'id="{element_id}"' in page
     assert page.count("data-open-single-video") == 1
-    assert '<option value="local-asr">' in page
-    assert '<option value="local-ocr">' in page
+    assert '"local-asr": "local-asr"' in script
+    assert '"local-ocr": "local-ocr"' in script
     assert 'id="confirm-paid"' not in page
     assert "付费整理许可" in page
     assert "--workspace-max: 2048px" in stylesheet
@@ -1695,8 +1695,8 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
         "settings-summary-interval",
     ):
         assert f'id="{element_id}"' in page
-    assert "/static/workspace.css?v=20260827-2" in page
-    assert "/static/workspace.js?v=20260827-2" in page
+    assert "/static/workspace.css?v=20260829-1" in page
+    assert "/static/workspace.js?v=20260829-1" in page
     assert ".source-console {" in stylesheet
     assert "grid-template-columns: 232px minmax(0, 1fr) 300px" in stylesheet
     assert ".source-insight-rail {" in stylesheet
@@ -1728,21 +1728,25 @@ def test_workspace_settings_polling_preserves_dirty_forms_and_uses_inline_feedba
     assert "const dirtySettingsForms = new Set();" in script
     assert "function settingsFormNeedsProtection(form)" in script
     assert "!settingsFormNeedsProtection(providerForm)" in script
-    assert "!settingsFormNeedsProtection(setupReadiness)" in script
+    assert "!settingsFormNeedsProtection(providerCapabilityList)" in script
     assert (
         "loadProviderSettings(automationForm.elements.default_output.value, true)"
         in script
     )
     assert (
-        "if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(setupReadiness))) return;"
+        "if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(providerCapabilityList))) return;"
+        in script
+    )
+    assert "const mutationRevision = providerSettingsMutationRevision;" in script
+    assert (
+        "if (protectDirty && mutationRevision !== providerSettingsMutationRevision) return;"
         in script
     )
     assert "providerFeedback.textContent" in script
-    assert "const select = button.previousElementSibling;" in script
-    assert "role.options.length" in script
-    assert "role.hint" in script
-    assert "readiness.material_roles || []" in script
-    assert 'role.state === "使用内置本地能力" ? "未显式绑定"' in script
+    assert "const options = role.options.map" in script
+    assert "role.hint || role.state" in script
+    assert "settings.roles?.[capability] || []" in script
+    assert "function renderProviderCapabilityCard" in script
     assert "window.setTimeout(() => refresh(), document.hidden ? 5000 : 2000)" in script
 
 
@@ -1853,7 +1857,7 @@ def test_douyin_webui_keeps_login_and_favorite_vocabulary_human_facing(
         "默认收藏夹",
         "手动同步",
         "打开抖音验证窗口",
-        "Windows 当前用户加密",
+        "当前 Windows 用户加密",
         "手机号验证码",
         "抖音 App 扫码确认",
         "通过后才显示已连接",

@@ -605,7 +605,15 @@ def test_douyin_login_auto_sync_keeps_the_specific_failure_visible_in_real_edge(
 
 def _add_connection(page: Page, *, name: str, preset: str, key: str) -> None:
     _open_settings_panel(page, "connections")
-    page.locator("#open-connection-dialog").click()
+    capability = {
+        "local-asr": "asr",
+        "local-ocr": "ocr",
+        "mimo": "llm",
+        "deepseek": "llm",
+        "mimo-tts": "tts",
+        "windows-tts": "tts",
+    }[preset]
+    page.locator(f'button[data-add-capability="{capability}"]').click()
     expect(page.locator("#connection-dialog")).to_be_visible()
     page.locator("#provider-connection-form [name=name]").fill(name)
     page.locator("#provider-connection-form [name=preset]").select_option(preset)
@@ -617,21 +625,12 @@ def _add_connection(page: Page, *, name: str, preset: str, key: str) -> None:
 
 
 def _add_and_bind_local_material_model(page: Page, *, preset: str, role: str) -> None:
-    page.locator(f'button[data-add-adapter="{preset}"]').click()
-    expect(page.locator("#connection-dialog")).to_be_visible()
-    expect(page.locator("#provider-connection-form [name=preset]")).to_have_value(
-        preset
-    )
-    expect(page.locator("#provider-connection-form [name=name]")).to_have_value(preset)
-    expect(page.locator("#provider-key-field")).to_be_hidden()
-    expect(page.locator("#windows-voice-field")).to_be_hidden()
-    page.locator("#provider-connection-form button[type=submit]").click()
-    expect(page.locator("#connection-dialog")).not_to_be_visible()
-    select = page.locator(f'select[data-setup-role-select="{role}"]')
-    expect(select).to_be_visible()
-    select.select_option(preset)
-    page.locator(f'button[data-bind-setup-role="{role}"]').click()
-    expect(page.locator(f'button[data-unbind-setup-role="{role}"]')).to_be_visible()
+    _add_connection(page, name=preset, preset=preset, key="")
+    use_button = page.locator(f'button[data-use-connection="{preset}"]')
+    expect(use_button).to_be_visible()
+    use_button.click()
+    expect(use_button).to_be_disabled()
+    expect(page.locator("#provider-feedback")).to_contain_text(role)
 
 
 def _enable_note_automation(page: Page, *, key: str) -> None:
@@ -641,8 +640,7 @@ def _enable_note_automation(page: Page, *, key: str) -> None:
         page.locator(f'select[data-setup-role-select="{role}"]').select_option(
             "offline-note"
         )
-        page.locator(f'button[data-bind-setup-role="{role}"]').click()
-        expect(page.locator("#provider-feedback")).to_contain_text("\u5df2\u7ed1\u5b9a")
+        expect(page.locator("#provider-feedback")).to_contain_text(role)
     _open_settings_panel(page, "output")
     page.locator("#automation-form [name=default_output]").select_option(
         "complete_note"
@@ -678,16 +676,13 @@ def _enable_audio_automation(page: Page) -> None:
     page.locator("#automation-form button[type=submit]").click()
     expect(page.locator("#automation-state")).to_have_text("等待付费许可")
     _open_settings_panel(page, "connections")
-    for _ in range(2):
-        select = page.locator("select[data-setup-role-select]").first
-        label = select.get_attribute("data-setup-role-select")
-        assert label is not None
-        select.select_option(
-            "offline-podcast" if label == "\u64ad\u5ba2" else "offline-tts"
-        )
-        page.locator(f'button[data-bind-setup-role="{label}"]').click()
-        expect(page.locator("#provider-feedback")).to_contain_text("\u5df2\u7ed1\u5b9a")
-    expect(page.locator("button[data-unbind-setup-role]")).to_have_count(4)
+    page.locator('select[data-setup-role-select="播客"]').select_option(
+        "offline-podcast"
+    )
+    expect(page.locator("#provider-feedback")).to_contain_text("播客")
+    tts_button = page.locator('button[data-use-connection="offline-tts"]')
+    tts_button.click()
+    expect(tts_button).to_be_disabled()
     _open_settings_panel(page, "output")
     page.locator("#authorize-automation").click()
     expect(page.locator("#automation-authorization-dialog")).to_be_visible()
@@ -953,11 +948,13 @@ def test_local_asr_and_ocr_are_visible_bindable_and_persist_in_real_edge(
         page.goto(loopback_app.url)
         _open_settings_panel(page, "connections")
 
-        expect(page.locator("#provider-adapter-list")).to_contain_text(
+        expect(page.locator('[data-capability="asr"]')).to_contain_text(
             "faster-whisper large-v3"
         )
-        expect(page.locator("#provider-adapter-list")).to_contain_text("PaddleOCR")
-        expect(page.locator("#setup-readiness")).to_contain_text("使用内置本地能力")
+        expect(page.locator('[data-capability="ocr"]')).to_contain_text("PaddleOCR")
+        expect(page.locator('[data-capability="asr"]')).to_contain_text(
+            "使用内置本地能力"
+        )
         _add_and_bind_local_material_model(
             page, preset="local-asr", role="语音识别（ASR）"
         )
@@ -968,11 +965,11 @@ def test_local_asr_and_ocr_are_visible_bindable_and_persist_in_real_edge(
         page.reload()
         _open_settings_panel(page, "connections")
         expect(
-            page.locator('button[data-unbind-setup-role="语音识别（ASR）"]')
-        ).to_be_visible()
+            page.locator('button[data-delete-connection="local-asr"]')
+        ).to_be_disabled()
         expect(
-            page.locator('button[data-unbind-setup-role="画面文字（OCR）"]')
-        ).to_be_visible()
+            page.locator('button[data-delete-connection="local-ocr"]')
+        ).to_be_disabled()
         settings = load_settings(loopback_app.root)
         assert settings.role_bindings["asr"].connection_id == "local-asr"
         assert settings.role_bindings["ocr"].connection_id == "local-ocr"
@@ -981,6 +978,67 @@ def test_local_asr_and_ocr_are_visible_bindable_and_persist_in_real_edge(
         assert page.evaluate(
             "document.documentElement.scrollWidth <= window.innerWidth"
         )
+        browser.close()
+
+
+def test_provider_card_protects_bound_connection_and_deletes_idle_connection(
+    loopback_app: _LoopbackApp,
+) -> None:
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        console_issues: list[str] = []
+        page.on(
+            "console",
+            lambda message: (
+                console_issues.append(message.text)
+                if message.type in {"error", "warning"}
+                else None
+            ),
+        )
+        page.goto(loopback_app.url)
+        _add_connection(page, name="mimo-note", preset="mimo", key="note-key")
+        writer_select = page.locator('select[data-setup-role-select="笔记 Writer"]')
+        writer_select.select_option("mimo-note")
+        expect(page.locator("#provider-feedback")).to_contain_text("笔记 Writer")
+        _add_connection(
+            page,
+            name="deepseek-spare",
+            preset="deepseek",
+            key="spare-key",
+        )
+
+        bound_delete = page.locator('button[data-delete-connection="mimo-note"]')
+        idle_delete = page.locator('button[data-delete-connection="deepseek-spare"]')
+        expect(bound_delete).to_be_disabled()
+        expect(bound_delete).to_have_css("color", "rgb(167, 177, 191)")
+        expect(bound_delete).to_have_css("background-color", "rgb(242, 244, 247)")
+        expect(idle_delete).to_be_enabled()
+
+        idle_delete.click()
+        expect(page.locator("#delete-connection-dialog")).to_be_visible()
+        expect(page.locator("#delete-connection-name")).to_have_text("deepseek-spare")
+        with page.expect_response(
+            lambda response: (
+                response.url.endswith("/api/providers/connections/deepseek-spare")
+                and response.request.method == "DELETE"
+            )
+        ) as deleted:
+            page.locator("#confirm-delete-connection").click()
+        assert deleted.value.status == 200
+        expect(page.locator("#delete-connection-dialog")).not_to_be_visible()
+        expect(page.locator('[data-connection="deepseek-spare"]')).to_have_count(0)
+        expect(page.locator('[data-connection="mimo-note"]')).to_have_count(1)
+
+        page.reload()
+        _open_settings_panel(page, "connections")
+        expect(page.locator('[data-connection="deepseek-spare"]')).to_have_count(0)
+        settings = load_settings(loopback_app.root)
+        assert "deepseek-spare" not in settings.connections
+        assert settings.role_bindings["note_writer"].connection_id == "mimo-note"
+        assert loopback_app.provider_runs == []
+        assert console_issues == []
         browser.close()
 
 
@@ -997,16 +1055,17 @@ def test_goal4_podcast_role_only_offers_an_isolated_llm_connection(
             page.locator(f'select[data-setup-role-select="{role}"]').select_option(
                 "mimo-note"
             )
-            page.locator(f'button[data-bind-setup-role="{role}"]').click()
-            expect(page.locator("#provider-feedback")).to_contain_text("已绑定")
+            expect(page.locator("#provider-feedback")).to_contain_text(role)
 
-        expect(page.locator('select[data-setup-role-select="播客"]')).to_have_count(0)
+        podcast_select = page.locator('select[data-setup-role-select="播客"]')
+        expect(podcast_select).to_be_visible()
+        expect(podcast_select.locator('option[value="mimo-note"]')).to_have_count(0)
+        expect(podcast_select.locator("option")).to_have_count(1)
         expect(page.locator("#setup-readiness")).to_contain_text(
             "播客需要单独的 MiMo/DeepSeek 连接，不能复用笔记连接。"
         )
 
         _add_connection(page, name="mimo-podcast", preset="mimo", key="same-key")
-        podcast_select = page.locator('select[data-setup-role-select="播客"]')
         expect(podcast_select).to_be_visible()
         expect(podcast_select.locator('option[value="mimo-note"]')).to_have_count(0)
         expect(podcast_select.locator('option[value="mimo-podcast"]')).to_have_count(1)
@@ -1042,6 +1101,7 @@ def test_goal4_late_provider_poll_does_not_replace_a_new_role_selection(
             """
         )
         select.select_option("offline-note")
+        expect(page.locator("#provider-feedback")).to_contain_text("笔记 Writer")
         page.evaluate("window.__releaseProviderPoll()")
         page.evaluate("window.__providerPoll")
 
@@ -1063,12 +1123,9 @@ def test_goal4_substantive_setting_change_revokes_browser_authorization(
         _add_connection(
             page, name="replacement-note", preset="mimo", key="second-test-key"
         )
-        page.locator("button[data-unbind-setup-role]").first.click()
-        expect(page.locator("select[data-setup-role-select]").first).to_be_visible()
         page.locator("select[data-setup-role-select]").first.select_option(
             "replacement-note"
         )
-        page.locator("button[data-bind-setup-role]").first.click()
         expect(page.locator("#automation-state")).to_have_text("需要重新确认付费许可")
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")

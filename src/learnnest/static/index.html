@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light" />
     <title>语栖 · 本地产出控制台</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/workspace.css?v=20260827-2" />
-    <script src="/static/workspace.js?v=20260827-2" defer></script>
+    <link rel="stylesheet" href="/static/workspace.css?v=20260829-1" />
+    <script src="/static/workspace.js?v=20260829-1" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -209,7 +209,7 @@
             <div>
               <p class="eyebrow">产出能力与本地边界</p>
               <h1>设置</h1>
-              <p class="page-summary">设置默认成品、模型连接、调用安全和本地存储。更改不会改写正在运行的任务。</p>
+              <p class="page-summary">设置默认成品、模型服务、调用安全和本地存储。更改不会改写正在运行的任务。</p>
             </div>
           </header>
 
@@ -217,7 +217,7 @@
             <aside class="settings-nav" aria-label="设置分类">
               <p class="rail-label">设置分类</p>
               <button class="is-active" data-settings-tab="output" type="button"><span>产出与自动处理</span><small>默认成品与来源范围</small></button>
-              <button data-settings-tab="connections" type="button"><span>模型与连接</span><small>服务、连接与职责</small></button>
+              <button data-settings-tab="connections" type="button"><span>模型与服务</span><small>能力、连接与职责</small></button>
               <button data-settings-tab="safety" type="button"><span>调用安全</span><small>重试与每日上限</small></button>
               <button data-settings-tab="storage" type="button"><span>本地存储</span><small>输出位置与空间</small></button>
             </aside>
@@ -240,10 +240,15 @@
               </section>
 
               <section class="settings-panel" data-settings-panel="connections" hidden>
-                <div class="settings-panel-header"><div><p class="panel-kicker">已注册服务</p><h2>模型与连接</h2><p>查看材料提取、笔记与音频实际使用的模型和职责连接。</p></div><button class="primary-action compact-action" id="open-connection-dialog" type="button"><span aria-hidden="true">＋</span> 添加连接</button></div>
-                <section class="settings-block"><div class="block-heading"><div><h3>处理职责</h3><p>材料提取始终可见；笔记和音频职责随默认成品变化。</p></div><span id="provider-settings-state" class="status-pill">未配置</span></div><section id="setup-readiness" class="setup-readiness" aria-live="polite" aria-label="模型与职责准备情况"></section></section>
-                <section class="settings-block"><div class="block-heading"><div><h3>连接库</h3><p>密钥使用 Windows 当前用户加密保存，页面不会再次显示。</p></div></div><p id="provider-feedback" class="inline-feedback" aria-live="polite">保存、检查、绑定或删除后会在这里显示结果。</p><div id="provider-connection-list" class="provider-list"></div></section>
-                <section class="settings-block"><div class="block-heading"><div><h3>可添加的服务</h3><p>这里只显示当前版本真正支持的连接能力。</p></div></div><div id="provider-adapter-list" class="adapter-grid"><p class="empty">正在读取可用服务。</p></div></section>
+                <div class="settings-panel-header"><div><p class="panel-kicker">产出能力与服务连接</p><h2>模型与服务</h2><p>每类能力在自己的卡片中维护服务；只有 LLM 需要额外分配多个职责。</p></div></div>
+                <section class="capability-overview" aria-live="polite" aria-label="能力准备情况">
+                  <span class="capability-overview-mark" aria-hidden="true">✓</span>
+                  <div class="capability-overview-copy"><strong id="provider-ready-count">0 / 4</strong><span>项能力已经准备</span></div>
+                  <div id="provider-ready-badges" class="capability-overview-badges"></div>
+                  <span id="provider-settings-state" class="status-pill">正在读取</span>
+                </section>
+                <p id="provider-feedback" class="inline-feedback provider-feedback" aria-live="polite">所有连接都在对应能力卡片中管理；检查不会调用真实 Provider。</p>
+                <div id="provider-capability-list" class="provider-capability-list"><p class="empty">正在读取模型与服务。</p></div>
               </section>
 
               <section class="settings-panel" data-settings-panel="safety" hidden>
@@ -325,12 +330,20 @@
 
     <dialog id="connection-dialog" class="app-dialog">
       <form id="provider-connection-form" class="dialog-shell provider-form">
-        <div class="dialog-heading"><div><p class="eyebrow">模型与连接</p><h2>添加连接</h2><p>选择当前版本支持的服务，保存后再绑定到对应的处理职责。</p></div><button class="dialog-close" data-close-connection type="button" aria-label="关闭">×</button></div>
+        <div class="dialog-heading"><div><p class="eyebrow">添加服务连接</p><h2 id="connection-dialog-title">添加服务</h2><p id="connection-dialog-copy">只显示当前能力真正支持的服务。</p></div><button class="dialog-close" data-close-connection type="button" aria-label="关闭">×</button></div>
         <label>连接名称<input name="name" required autocomplete="off" placeholder="例如 mimo-note" /><small>本地服务会自动填写名称；可以按需修改。</small></label>
-        <label>服务<select name="preset"><option value="windows-tts">Windows 系统语音（本地）</option><option value="local-asr">本地 ASR（faster-whisper large-v3）</option><option value="local-ocr">本地 OCR（PaddleOCR）</option><option value="mimo">MiMo（文本）</option><option value="deepseek">DeepSeek（文本）</option><option value="mimo-tts">MiMo TTS</option></select></label>
+        <label>服务<select name="preset"><option value="">正在读取支持的服务</option></select><small id="provider-service-hint">选择服务后填写连接名称。</small></label>
         <label id="windows-voice-field">Windows 语音<select name="voice" id="windows-voice"></select></label>
         <label id="provider-key-field" hidden>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="仅云端服务需要填写" /><small>本地 ASR、OCR 和 Windows 语音不需要密钥。</small></label>
         <div class="dialog-actions"><button class="secondary-button" data-close-connection type="button">取消</button><button type="submit">保存连接</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="delete-connection-dialog" class="app-dialog danger-dialog">
+      <form id="delete-connection-form" class="dialog-shell compact-dialog">
+        <div class="dialog-heading"><div><p class="eyebrow">删除服务连接</p><h2>删除这个连接？</h2><p><strong id="delete-connection-name">当前连接</strong>会从这台设备移除；已加密保存的密钥也会一并删除。</p></div><button class="dialog-close" data-close-delete-connection type="button" aria-label="关闭">×</button></div>
+        <p class="dialog-note">当前正在承担职责的连接不能删除。请先在对应能力卡中切换或解除职责。</p>
+        <div class="dialog-actions"><button class="secondary-button" data-close-delete-connection type="button">取消</button><button id="confirm-delete-connection" class="danger-button" type="submit">删除连接</button></div>
       </form>
     </dialog>
   </body>

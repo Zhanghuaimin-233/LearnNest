@@ -119,7 +119,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .primary-action:hover, button[type="submit"]:hover, #authorize-automation:hover, #confirm-automation-authorization:hover, #connect-douyin:hover, #add-selected-favorites:hover, .inline-action:hover { background: var(--blue-deep); }
 .primary-action { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .compact-action { min-height: 38px; padding-inline: 14px; font-size: 13px; }
-.secondary-button, .text-button, .icon-button, .provider-actions button, .provider-role-actions button, #sync-favorites, #refresh-douyin {
+.secondary-button, .text-button, .icon-button, .provider-actions button, #sync-favorites, #refresh-douyin {
   border: 1px solid var(--line-strong);
   border-radius: 9px;
   min-height: 36px;
@@ -472,22 +472,64 @@ input:focus, select:focus { border-color: var(--blue); outline: 3px solid rgba(5
 .automation-access h3 { margin: 0 0 5px; font-size: 15px; }
 .automation-access p:last-child { margin: 0; color: var(--slate); font-size: 11px; line-height: 1.65; }
 .automation-access-actions { display: flex; gap: 8px; }
-.setup-readiness { margin-top: 20px; }
-.setup-readiness > p { margin: 5px 0; color: var(--slate); font-size: 12px; }
-.provider-role-group { margin-top: 22px; }
-.role-group-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; }
-.role-group-heading h4 { margin: 0; font-size: 13px; }
-.role-group-heading p { margin: 0; color: var(--slate); font-size: 10px; line-height: 1.6; text-align: right; }
-.provider-role-list, .provider-list { margin-top: 14px; border-top: 1px solid var(--line); }
-.provider-role-summary, .provider-row { min-height: 58px; display: grid; grid-template-columns: minmax(120px, 1fr) minmax(150px, 1.4fr) auto; align-items: center; gap: 14px; border-bottom: 1px solid var(--line); font-size: 12px; }
-.provider-role-actions, .provider-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-.provider-role-actions strong { color: var(--slate); font-size: 10px; }
-.provider-role-actions select { width: 190px; min-height: 34px; font-size: 11px; }
-.adapter-grid { margin-top: 16px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-.adapter-card { min-height: 118px; padding: 15px; display: grid; align-content: space-between; border: 1px solid var(--line); border-radius: 10px; background: rgba(255, 255, 255, 0.55); }
-.adapter-card strong { font-size: 13px; }
-.adapter-card span { color: var(--slate); font-size: 10px; }
-.adapter-card button { justify-self: start; padding: 0; border: 0; color: var(--blue-deep); background: transparent; font-size: 11px; font-weight: 650; }
+.capability-overview { margin-top: 20px; min-height: 66px; padding: 14px 16px; display: flex; align-items: center; gap: 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--fog); }
+.capability-overview-mark { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border: 2px solid var(--muted); border-radius: 50%; color: var(--muted); font-weight: 750; }
+.capability-overview.is-ready .capability-overview-mark { border-color: var(--pine); color: var(--pine); }
+.capability-overview-copy { min-width: 150px; display: flex; align-items: baseline; gap: 7px; }
+.capability-overview-copy strong { font-family: var(--data-font); font-size: 18px; }
+.capability-overview-copy span { color: var(--slate); font-size: 10px; }
+.capability-overview-badges { min-width: 0; flex: 1; display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.capability-overview-badges span { min-height: 24px; padding: 0 8px; display: inline-flex; align-items: center; border: 1px solid #cce8d9; border-radius: 999px; color: var(--pine); background: var(--pine-soft); font-size: 9px; font-weight: 650; }
+.provider-feedback { margin: 14px 0 0; }
+.provider-capability-list { margin-top: 16px; display: grid; gap: 16px; }
+.provider-capability-card { padding: 16px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255, 255, 255, 0.62); }
+.provider-capability-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.provider-capability-identity { min-width: 0; display: flex; align-items: flex-start; gap: 12px; }
+.provider-capability-icon { width: 38px; height: 38px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid #cfe8dc; border-radius: 11px; color: var(--pine); background: #eff9f4; font-family: var(--data-font); font-size: 9px; font-weight: 750; }
+.provider-capability-card[data-capability="llm"] .provider-capability-icon { border-color: #ddd3ff; color: #6a48d7; background: #f4f0ff; }
+.provider-capability-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.provider-capability-title h3 { margin: 0; font-size: 16px; }
+.provider-capability-copy { margin: 5px 0 0; color: var(--slate); font-size: 10px; line-height: 1.55; }
+.provider-card-state { color: var(--pine); font-size: 9px; font-weight: 650; }
+.provider-card-state::before { content: ""; width: 7px; height: 7px; margin-right: 5px; display: inline-block; border-radius: 50%; background: currentColor; }
+.provider-card-state.is-attention { color: var(--amber); }
+.add-capability-button { min-height: 36px; padding: 0 11px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid #a9c9ff; border-radius: 9px; color: var(--blue-deep); background: var(--paper); box-shadow: none; font-size: 10px; font-weight: 650; white-space: nowrap; }
+.add-capability-button strong { font-size: 18px; font-weight: 400; line-height: 1; }
+.provider-list-label { margin: 16px 0 8px; color: var(--slate); font-size: 9px; font-weight: 650; }
+.provider-connection-list { display: grid; gap: 8px; }
+.provider-row { min-height: 66px; padding: 10px 11px; display: grid; grid-template-columns: 38px minmax(150px, 1fr) minmax(130px, 0.7fr) auto; align-items: center; gap: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); font-size: 11px; }
+.provider-row.is-current { border-color: #9fc2ff; background: #f6f9ff; box-shadow: inset 3px 0 0 var(--blue); }
+.provider-logo { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 10px; color: var(--blue-deep); background: var(--fog); font-family: var(--data-font); font-size: 8px; font-weight: 750; }
+.provider-copy, .provider-model { min-width: 0; display: grid; gap: 4px; }
+.provider-copy strong, .provider-model strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-copy span, .provider-model span { color: var(--slate); font-size: 9px; line-height: 1.45; }
+.provider-model strong { font-family: var(--data-font); font-size: 9px; }
+.provider-badges { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.provider-badge { min-height: 20px; padding: 0 6px; display: inline-flex; align-items: center; border-radius: 999px; color: var(--blue-deep); background: var(--ice); font-size: 8px; font-weight: 650; }
+.provider-badge.is-role { color: #6a48d7; background: #f0ebff; }
+.provider-badge.is-local { color: var(--pine); background: var(--pine-soft); }
+.provider-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.provider-actions button { min-height: 34px; padding-inline: 10px; font-size: 10px; }
+.provider-actions .provider-use-button:not(:disabled) { border-color: var(--blue); color: #fff; background: var(--blue); }
+.provider-actions .provider-use-button:disabled { color: var(--blue-deep); background: var(--ice); opacity: 1; }
+.provider-actions .provider-delete-button { color: var(--ember); }
+.provider-actions .provider-delete-button:disabled { border-color: var(--line); color: #a7b1bf; background: #f2f4f7; opacity: 1; }
+.provider-capability-empty { margin: 0; padding: 14px; border: 1px dashed var(--line-strong); border-radius: 9px; color: var(--slate); background: var(--fog); font-size: 10px; line-height: 1.6; }
+.llm-role-assignment { margin-top: 12px; padding: 13px 14px 4px; border: 1px solid #dcd1ff; border-radius: 11px; background: #fbfaff; }
+.llm-role-heading { padding-bottom: 10px; display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; border-bottom: 1px solid #e7e1f8; }
+.llm-role-heading h4 { margin: 0 0 4px; font-size: 13px; }
+.llm-role-heading p { margin: 0; color: var(--slate); font-size: 9px; line-height: 1.5; }
+.llm-role-heading span { color: #6a48d7; font-size: 9px; font-weight: 650; white-space: nowrap; }
+.llm-role-row { min-height: 57px; display: grid; grid-template-columns: minmax(115px, 0.75fr) minmax(220px, 1.35fr) minmax(115px, 0.65fr); align-items: center; gap: 12px; border-bottom: 1px solid #e7e1f8; }
+.llm-role-row:last-child { border-bottom: 0; }
+.llm-role-copy { display: grid; gap: 3px; }
+.llm-role-copy strong { font-size: 11px; }
+.llm-role-copy small { color: var(--slate); font-size: 8px; line-height: 1.45; }
+.llm-role-row select { width: 100%; min-height: 34px; font-size: 10px; }
+.llm-role-state { color: var(--slate); font-size: 9px; line-height: 1.45; }
+.llm-role-state strong { display: block; color: var(--pine); font-size: 9px; }
+.llm-role-state.is-attention strong { color: var(--amber); }
+.capability-card-footer { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); color: var(--slate); font-size: 9px; }
 .limits-form fieldset { grid-column: 1 / -1; padding: 18px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; border: 1px solid var(--line); border-radius: 10px; }
 .limits-form legend { padding: 0 6px; font-size: 12px; font-weight: 650; }
 .limits-form fieldset label { display: grid; gap: 6px; color: var(--slate); font-size: 11px; }
@@ -593,7 +635,8 @@ input:focus, select:focus { border-color: var(--blue); outline: 3px solid rgba(5
   .source-insight-rail, .settings-insight-rail { position: static; grid-column: 2; grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .source-intake-heading, .source-intake-row { grid-template-columns: 150px minmax(150px, 0.8fr) minmax(220px, 1.25fr) 100px; gap: 12px; }
   .settings-content { padding: 22px; }
-  .adapter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-row { grid-template-columns: 38px minmax(140px, 1fr) minmax(120px, 0.65fr); }
+  .provider-actions { grid-column: 2 / -1; justify-content: flex-end; }
   .limits-form fieldset { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
@@ -708,12 +751,19 @@ input:focus, select:focus { border-color: var(--blue); outline: 3px solid rgba(5
   .automation-favorite-option, .form-actions, .provider-form .dialog-heading, .provider-form .dialog-actions { grid-column: 1; }
   .automation-access { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
   .automation-access-actions { grid-column: 1 / -1; flex-wrap: wrap; }
-  .provider-role-summary, .provider-row { padding: 12px 0; grid-template-columns: 1fr; gap: 7px; }
-  .role-group-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
-  .role-group-heading p { text-align: left; }
-  .provider-role-actions, .provider-actions { justify-content: flex-start; flex-wrap: wrap; }
-  .provider-role-actions select { width: min(100%, 260px); }
-  .adapter-grid { grid-template-columns: 1fr 1fr; }
+  .capability-overview { align-items: flex-start; flex-wrap: wrap; }
+  .capability-overview-copy { flex: 1; }
+  .capability-overview-badges { order: 3; width: 100%; flex: 0 0 100%; justify-content: flex-start; }
+  .provider-capability-card { padding: 14px; }
+  .provider-capability-header { gap: 10px; }
+  .provider-capability-title h3 { font-size: 15px; }
+  .add-capability-button { width: 38px; padding: 0; justify-content: center; }
+  .add-capability-button span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .provider-row { padding: 11px; grid-template-columns: 38px minmax(0, 1fr); gap: 8px 10px; }
+  .provider-model { grid-column: 2; }
+  .provider-actions { grid-column: 1 / -1; justify-content: flex-start; flex-wrap: wrap; }
+  .llm-role-heading { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .llm-role-row { padding: 11px 0; grid-template-columns: 1fr; gap: 7px; }
   .limits-form fieldset { grid-column: 1; grid-template-columns: 1fr 1fr; }
   .storage-form .form-actions { grid-column: auto; }
   .storage-facts div { grid-template-columns: 1fr; gap: 7px; }

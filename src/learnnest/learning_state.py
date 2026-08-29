@@ -470,6 +470,27 @@ def _public_role_settings(
     return projected
 
 
+def public_provider_roles(
+    output_root: str | Path,
+) -> dict[str, list[dict[str, object]]]:
+    """Project every configurable role by capability for the settings workspace.
+
+    Unlike delivery readiness, this projection is not filtered by the selected
+    output.  The settings page can therefore keep all three LLM responsibilities
+    visible without constructing a Provider or changing a binding.
+    """
+    root = Path(output_root).resolve()
+    settings = load_settings(root)
+    return {
+        "asr": _public_role_settings(root, settings, ("asr",), implicit_local=True),
+        "ocr": _public_role_settings(root, settings, ("ocr",), implicit_local=True),
+        "llm": _public_role_settings(
+            root, settings, ("note_writer", "note_reviewer", "podcast")
+        ),
+        "tts": _public_role_settings(root, settings, ("tts",)),
+    }
+
+
 def public_setup_readiness(
     output_root: str | Path, default_output: str | None = None
 ) -> dict[str, object]:

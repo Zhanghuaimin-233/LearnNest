@@ -85,35 +85,46 @@ def test_provider_settings_projects_the_real_webui_catalog_and_editable_limits(
     assert response.status_code == 200
     payload = response.json()
     assert payload["adapters"] == [
-        {"preset": "mimo", "name": "MiMo", "capability": "文本模型", "local": False},
+        {
+            "preset": "mimo",
+            "name": "MiMo",
+            "capability": "文本模型",
+            "capability_key": "llm",
+            "local": False,
+        },
         {
             "preset": "deepseek",
             "name": "DeepSeek",
             "capability": "文本模型",
+            "capability_key": "llm",
             "local": False,
         },
         {
             "preset": "mimo-tts",
             "name": "MiMo TTS",
             "capability": "语音服务",
+            "capability_key": "tts",
             "local": False,
         },
         {
             "preset": "local-asr",
             "name": "faster-whisper large-v3",
             "capability": "语音识别",
+            "capability_key": "asr",
             "local": True,
         },
         {
             "preset": "local-ocr",
             "name": "PaddleOCR",
             "capability": "画面文字识别",
+            "capability_key": "ocr",
             "local": True,
         },
         {
             "preset": "windows-tts",
             "name": "Windows 系统语音",
             "capability": "语音服务",
+            "capability_key": "tts",
             "local": True,
         },
     ]
@@ -154,17 +165,77 @@ def test_webui_provider_settings_labels_persistent_provider_ids(
     response = TestClient(create_web_app(tmp_path)).get("/api/providers/settings")
 
     assert response.status_code == 200
-    assert response.json()["connections"] == [
-        {
-            "name": name,
-            "provider": expected_provider,
-            "state": (
-                "本地配置可读取"
-                if preset in {"windows-tts", "local-asr", "local-ocr"}
-                else "连接配置可读取"
-            ),
-        }
+    projected = response.json()["connections"]
+    assert len(projected) == 1
+    assert projected[0]["name"] == name
+    assert projected[0]["provider"] == expected_provider
+    assert projected[0]["state"] == (
+        "本地配置可读取"
+        if preset in {"windows-tts", "local-asr", "local-ocr"}
+        else "连接配置可读取"
+    )
+    assert projected[0]["preset"] == preset
+    assert projected[0]["bound_roles"] == []
+    assert projected[0]["deletable"] is True
+    assert projected[0]["delete_reason"] is None
+    assert "secret_id" not in response.text
+
+
+def test_webui_projects_capability_cards_and_bound_delete_state(tmp_path: Path) -> None:
+    current = connect(
+        tmp_path,
+        name="mimo-note",
+        preset="mimo",
+        secret_value="never-show-current",
+    )
+    connect(
+        tmp_path,
+        name="deepseek-spare",
+        preset="deepseek",
+        secret_value="never-show-spare",
+    )
+    set_role_binding(
+        tmp_path, role="note_writer", connection_name=current.connection_id
+    )
+
+    response = TestClient(create_web_app(tmp_path)).get("/api/providers/settings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    by_name = {item["name"]: item for item in payload["connections"]}
+    assert by_name["mimo-note"] == {
+        "name": "mimo-note",
+        "provider": "MiMo",
+        "state": "连接配置可读取",
+        "capability": "llm",
+        "model": "mimo-v2.5",
+        "preset": "mimo",
+        "local": False,
+        "bound_roles": ["笔记 Writer"],
+        "deletable": False,
+        "delete_reason": "当前用于笔记 Writer，请先切换职责连接。",
+        "voice": None,
+    }
+    assert by_name["deepseek-spare"]["bound_roles"] == []
+    assert by_name["deepseek-spare"]["deletable"] is True
+    assert by_name["deepseek-spare"]["delete_reason"] is None
+    assert [role["name"] for role in payload["roles"]["llm"]] == [
+        "笔记 Writer",
+        "笔记 Reviewer",
+        "播客",
     ]
+    assert payload["roles"]["asr"][0]["state"] == "使用内置本地能力"
+    assert payload["roles"]["ocr"][0]["state"] == "使用内置本地能力"
+    assert (
+        next(
+            adapter
+            for adapter in payload["adapters"]
+            if adapter["preset"] == "deepseek"
+        )["capability_key"]
+        == "llm"
+    )
+    assert "never-show-current" not in response.text
+    assert "never-show-spare" not in response.text
 
 
 def test_webui_provider_settings_projects_a_corrupt_dpapi_secret_as_unavailable(
@@ -798,7 +869,8 @@ def test_webui_settings_page_and_api_expose_selected_readiness_but_never_a_key(
     settings = client.get("/api/providers/settings")
 
     assert page.status_code == 200
-    assert "模型与职责准备情况" in page.text
+    assert 'id="provider-capability-list"' in page.text
+    assert "能力准备情况" in page.text
     assert "never-show-this" not in page.text
     assert settings.status_code == 200
     assert settings.json()["readiness"]["state"] == "等待设置"
@@ -911,10 +983,15 @@ def test_webui_exposes_supported_local_material_controls_and_keeps_existing_sett
     client = TestClient(create_web_app(tmp_path))
 
     page = client.get("/")
+    settings_response = client.get("/api/providers/settings")
 
     assert page.status_code == 200
-    assert '<option value="local-asr">' in page.text
-    assert '<option value="local-ocr">' in page.text
+    assert settings_response.status_code == 200
+    assert {adapter["preset"] for adapter in settings_response.json()["adapters"]} >= {
+        "local-asr",
+        "local-ocr",
+    }
+    assert 'id="provider-capability-list"' in page.text
     assert "每日调用上限" not in page.text
     assert 'id="provider-role-form"' not in page.text
     assert load_settings(tmp_path).model_dump(mode="json") == before
@@ -1036,7 +1113,7 @@ def test_webui_unbinds_a_role_without_deleting_its_connection(tmp_path: Path) ->
     assert secret not in cleared.text + missing.text
 
 
-def test_webui_renders_only_selected_role_readiness_with_inline_feedback(
+def test_webui_renders_capability_cards_with_inline_feedback(
     tmp_path: Path,
 ) -> None:
     connect(tmp_path, name="mimo", preset="mimo", secret_value="never-show-this")
@@ -1049,19 +1126,22 @@ def test_webui_renders_only_selected_role_readiness_with_inline_feedback(
     assert load_settings(tmp_path).role_bindings == {
         "note_writer": load_settings(tmp_path).role_bindings["note_writer"]
     }
-    assert 'id="setup-readiness"' in page
+    assert 'id="provider-capability-list"' in page
     assert 'id="provider-feedback"' in page
-    assert "provider-role-summary" in script
-    assert "已绑定" in script
+    assert "provider-capability-card" in script
+    assert "llm-role-assignment" in script
+    assert "连接库" not in page
     assert '"windows-tts": "windows-tts"' in script
     assert "function startProviderSave(event)" in script
     assert script.count("const finishSaving = startProviderSave(event);") == 1
     assert 'const current = await api("/api/providers/settings");' not in script
     assert 'data-delete-connection="${escapeHtml(item.name)}"' in script
-    assert "window.confirm" in script
+    assert 'item.deletable ? "" : " disabled"' in script
+    assert 'id="delete-connection-dialog"' in page
+    assert "window.confirm" not in script
     assert "await loadAutomationStatus();" in script
-    assert 'data-unbind-setup-role="${escapeHtml(role.name)}"' in script
-    assert "async function clearSetupRole(button)" in script
+    assert 'data-setup-role-select="${escapeHtml(role.name)}"' in script
+    assert "async function saveProviderRoleSelection(select)" in script
     assert "const submittedForm = event.currentTarget;" in script
     assert "submittedForm.reset();" in script
     assert "event.currentTarget.reset();" not in script

@@ -101,6 +101,7 @@ from learnnest.learning_state import (
     automation_restart_is_safe,
     automation_retry_admission,
     public_connection_readability,
+    public_provider_roles,
     public_provider_label,
     public_setup_readiness,
 )
@@ -124,6 +125,8 @@ _CAPABILITY_LABELS = {
     "asr": "语音识别",
     "ocr": "画面文字识别",
 }
+_PROVIDER_ROLE_ORDER = tuple(_SETUP_ROLE_NAMES.values())
+_PROVIDER_ROLE_LABELS = {role: label for label, role in _SETUP_ROLE_NAMES.items()}
 
 
 class ProcessRequest(BaseModel):
@@ -628,23 +631,43 @@ class WebService:
         settings = public_provider_settings(self.output_root)
         current = load_settings(self.output_root)
         adapters = connection_presets()
-        return {
-            "connections": [
+        projected_connections: list[dict[str, object]] = []
+        for item in settings["connections"]:
+            name = str(item["name"])
+            stored = current.connections[name]
+            bound_roles = [
+                _PROVIDER_ROLE_LABELS[role]
+                for role in _PROVIDER_ROLE_ORDER
+                if current.role_bindings.get(role) is not None
+                and current.role_bindings[role].connection_id == name
+            ]
+            projected_connections.append(
                 {
-                    "name": item["name"],
+                    "name": name,
                     "provider": public_provider_label(str(item["provider"])),
-                    "state": public_connection_readability(
-                        self.output_root,
-                        current.connections.get(str(item["name"])),
+                    "state": public_connection_readability(self.output_root, stored),
+                    "capability": item["capability"],
+                    "model": item["model"],
+                    "preset": stored.preset,
+                    "local": stored.api_family == "local",
+                    "bound_roles": bound_roles,
+                    "deletable": not bound_roles,
+                    "delete_reason": (
+                        None
+                        if not bound_roles
+                        else f"当前用于{'、'.join(bound_roles)}，请先切换职责连接。"
                     ),
+                    "voice": item["voice"],
                 }
-                for item in settings["connections"]
-            ],
+            )
+        return {
+            "connections": projected_connections,
             "adapters": [
                 {
                     "preset": preset,
                     "name": public_provider_label(adapter.provider),
                     "capability": _CAPABILITY_LABELS[adapter.capability],
+                    "capability_key": adapter.capability,
                     "local": not adapter.requires_secret,
                 }
                 for preset, adapter in adapters.items()
@@ -654,6 +677,7 @@ class WebService:
                 "global_calls_per_day": settings["global_calls_per_day"],
                 "budget_group_calls_per_day": settings["budget_group_calls_per_day"],
             },
+            "roles": public_provider_roles(self.output_root),
             "readiness": public_setup_readiness(self.output_root, default_output),
         }
 
@@ -1614,7 +1638,7 @@ def _learning_note_page(note: Any, fragment: str, audio_href: str | None) -> str
 <html lang="zh-CN"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>{title} · 语栖</title><link rel="icon" href="data:," />
-<link rel="stylesheet" href="/static/workspace.css?v=20260827-2" />
+<link rel="stylesheet" href="/static/workspace.css?v=20260829-1" />
 </head><body class="note-page">
 <header class="note-app-header"><div class="note-app-header-inner">
 <a class="note-brand" href="/#tasks"><span class="brand-mark" aria-hidden="true">语</span><span><strong>语栖</strong><small>LEARNNEST</small></span></a>

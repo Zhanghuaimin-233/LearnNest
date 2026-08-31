@@ -481,6 +481,8 @@ input:focus, select:focus { border-color: var(--blue); outline: 3px solid rgba(5
 .capability-overview-copy span { color: var(--slate); font-size: 10px; }
 .capability-overview-badges { min-width: 0; flex: 1; display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
 .capability-overview-badges span { min-height: 24px; padding: 0 8px; display: inline-flex; align-items: center; border: 1px solid #cce8d9; border-radius: 999px; color: var(--pine); background: var(--pine-soft); font-size: 9px; font-weight: 650; }
+.capability-overview-badges span.is-pending { color: var(--amber); background: var(--amber-soft); border-color: #ecd9ae; }
+.capability-overview.is-partial .capability-overview-mark { color: var(--amber); background: var(--amber-soft); border-color: #ecd9ae; }
 .provider-feedback { margin: 14px 0 0; }
 .provider-capability-list { margin-top: 16px; display: grid; gap: 16px; }
 .provider-capability-card { padding: 16px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255, 255, 255, 0.62); }

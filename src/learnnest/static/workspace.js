@@ -198,13 +198,17 @@ function renderProviderSettings(settings) {
   const configured = settings.connections.length;
   const capabilities = Object.keys(providerCapabilityDefinitions);
   const readyCapabilities = capabilities.filter((capability) => providerCapabilityIsReady(capability, settings.roles?.[capability] || []));
-  providerState.textContent = readyCapabilities.length === capabilities.length ? "全部已准备" : `已配置 ${configured} 个连接`;
-  providerState.className = `status-pill ${readyCapabilities.length === capabilities.length ? "connected" : ""}`;
+  const allReady = readyCapabilities.length === capabilities.length;
+  providerState.textContent = allReady ? "全部已准备" : configured ? `已配置 ${configured} 个连接` : "尚未配置连接";
+  providerState.className = `status-pill ${allReady ? "connected" : ""}`;
   providerReadyCount.textContent = `${readyCapabilities.length} / ${capabilities.length}`;
-  document.querySelector(".capability-overview").classList.toggle("is-ready", readyCapabilities.length === capabilities.length);
+  const overview = document.querySelector(".capability-overview");
+  overview.classList.toggle("is-ready", allReady);
+  overview.classList.toggle("is-partial", !allReady);
+  overview.querySelector(".capability-overview-mark").textContent = allReady ? "✓" : "!";
   providerReadyBadges.innerHTML = capabilities.map((capability) => {
     const ready = readyCapabilities.includes(capability);
-    return `<span>${capability.toUpperCase()} ${ready ? "已配置" : "待配置"}</span>`;
+    return `<span class="${ready ? "is-ready" : "is-pending"}">${capability.toUpperCase()} ${ready ? "已配置" : "待配置"}</span>`;
   }).join("");
   providerCapabilityList.innerHTML = capabilities.map((capability) => renderProviderCapabilityCard(capability, settings)).join("");
   providerCapabilityList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", () => requestProviderConnectionCheck(button)));

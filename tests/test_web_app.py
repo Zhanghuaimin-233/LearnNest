@@ -1622,6 +1622,8 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
         "storage-form",
         "output-root",
         "provider-key-field",
+        "check-connection-dialog",
+        "confirm-check-connection",
         "automation-access",
         "automation-authorization-dialog",
     ):
@@ -1630,6 +1632,13 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
     assert '"local-asr": "local-asr"' in script
     assert '"local-ocr": "local-ocr"' in script
     assert 'id="confirm-paid"' not in page
+    assert "每次确认只发送一次，不自动重试" in page
+    assert "不计入任务每日调用限额" in page
+    assert "云端连接确认后发送 1 次真实请求" in page
+    assert "检查不会调用真实 Provider" not in page
+    assert "runProviderConnectionCheck" in script
+    assert "JSON.stringify({ confirm_paid: true })" in script
+    assert "可能产生少量费用" in page
     assert "付费整理许可" in page
     assert "--workspace-max: 2048px" in stylesheet
     assert ".app-header-inner { max-width: var(--workspace-max)" in stylesheet

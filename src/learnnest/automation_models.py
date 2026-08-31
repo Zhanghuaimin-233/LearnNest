@@ -151,6 +151,7 @@ class AutomationAttempt(_Model):
 
     call_id: str | None = Field(default=None, min_length=1)
     billing: Literal["paid", "local"] = "paid"
+    counts_toward_limit: bool = True
     stage: Literal["writer", "reviewer", "podcast", "tts"]
     attempt: int = Field(ge=1, le=4)
     status: Literal["running", "completed", "failed", "unknown"]

@@ -305,21 +305,18 @@ def admit_provider_call(
     retries_per_stage: int,
     global_calls_per_day: int,
     budget_group_calls_per_day: dict[str, int],
+    counts_toward_limit: bool = True,
     lock_held: bool = False,
 ) -> tuple[AutomationTaskState, AutomationAttempt]:
     """Persist one unique running paid-call fact before construction or invocation.
 
-    Every caller uses the same UTC ledger.  ``running`` is deliberately charged
-    so a process loss cannot reopen a paid opportunity.
+    Every caller uses the same UTC ledger. Counted ``running`` facts are
+    deliberately charged so a process loss cannot reopen a paid opportunity.
+    Diagnostic calls remain auditable but explicitly opt out of task limits.
     """
     if stage not in {"writer", "reviewer", "podcast", "tts"}:
         raise ProviderAdmissionError("unknown paid provider stage")
     _require_aware(now)
-    group = "note" if stage in {"writer", "reviewer"} else stage
-    try:
-        group_cap = int(budget_group_calls_per_day[group])
-    except (KeyError, TypeError, ValueError) as error:
-        raise ProviderAdmissionError("provider budget policy is invalid") from error
     context = nullcontext() if lock_held else automation_lock(output_root, timeout=1)
     with context:
         current = load_task_state(output_root, state.task_id, state.policy_sha256)
@@ -329,21 +326,30 @@ def admit_provider_call(
             raise ProviderAdmissionError("prior provider result is not recoverable")
         if len(history) >= retries_per_stage + 1:
             raise ProviderAdmissionError("provider retry limit is exhausted")
-        used, _limit, _remaining = provider_call_usage(
-            output_root,
-            current.policy_sha256,
-            now=now,
-            limit=global_calls_per_day,
-        )
-        group_used = provider_budget_group_call_usage(output_root, group, now=now)
-        if used >= global_calls_per_day or group_used >= group_cap:
-            raise ProviderAdmissionError("provider call limit is exhausted")
+        if counts_toward_limit:
+            group = "note" if stage in {"writer", "reviewer"} else stage
+            try:
+                group_cap = int(budget_group_calls_per_day[group])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ProviderAdmissionError(
+                    "provider budget policy is invalid"
+                ) from error
+            used, _limit, _remaining = provider_call_usage(
+                output_root,
+                current.policy_sha256,
+                now=now,
+                limit=global_calls_per_day,
+            )
+            group_used = provider_budget_group_call_usage(output_root, group, now=now)
+            if used >= global_calls_per_day or group_used >= group_cap:
+                raise ProviderAdmissionError("provider call limit is exhausted")
         attempt = AutomationAttempt(
             call_id=uuid.uuid4().hex,
             stage=stage,
             attempt=len(history) + 1,
             status="running",
             started_at=now,
+            counts_toward_limit=counts_toward_limit,
         )
         updated = current.model_copy(
             update={"blocked_reason": None, "attempts": [*current.attempts, attempt]}
@@ -445,6 +451,7 @@ def provider_call_usage(
                 for position, attempt in enumerate(state.attempts)
                 if attempt.stage in {"writer", "reviewer", "podcast", "tts"}
                 and attempt.billing == "paid"
+                and attempt.counts_toward_limit
                 and attempt.started_at.astimezone(UTC).date()
                 == now.astimezone(UTC).date()
             )
@@ -483,6 +490,7 @@ def provider_role_call_usage(
                 for position, attempt in enumerate(state.attempts)
                 if attempt.stage == stage
                 and attempt.billing == "paid"
+                and attempt.counts_toward_limit
                 and attempt.started_at.astimezone(UTC).date()
                 == now.astimezone(UTC).date()
             )
@@ -528,6 +536,7 @@ def provider_budget_group_call_usage(
                 for position, attempt in enumerate(state.attempts)
                 if attempt.stage in stages
                 and attempt.billing == "paid"
+                and attempt.counts_toward_limit
                 and attempt.started_at.astimezone(UTC).date()
                 == now.astimezone(UTC).date()
             )

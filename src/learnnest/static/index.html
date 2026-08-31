@@ -247,7 +247,7 @@
                   <div id="provider-ready-badges" class="capability-overview-badges"></div>
                   <span id="provider-settings-state" class="status-pill">正在读取</span>
                 </section>
-                <p id="provider-feedback" class="inline-feedback provider-feedback" aria-live="polite">所有连接都在对应能力卡片中管理；检查不会调用真实 Provider。</p>
+                <p id="provider-feedback" class="inline-feedback provider-feedback" aria-live="polite">本地连接在本机检查；云端连接确认后发送 1 次真实请求，可能产生费用，但不占任务每日调用限额。</p>
                 <div id="provider-capability-list" class="provider-capability-list"><p class="empty">正在读取模型与服务。</p></div>
               </section>
 
@@ -337,6 +337,14 @@
         <label id="provider-key-field" hidden>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="仅云端服务需要填写" /><small>本地 ASR、OCR 和 Windows 语音不需要密钥。</small></label>
         <div class="dialog-actions"><button class="secondary-button" data-close-connection type="button">取消</button><button type="submit">保存连接</button></div>
       </form>
+    </dialog>
+
+    <dialog id="check-connection-dialog" class="app-dialog" aria-labelledby="check-connection-title" aria-describedby="check-connection-copy">
+      <div class="dialog-shell compact-dialog">
+        <div class="dialog-heading"><div><p class="eyebrow">真实连接检测</p><h2 id="check-connection-title">发送一次测试请求？</h2><p id="check-connection-copy">语栖将向 <strong id="check-connection-name">当前服务</strong> 发送一个最小请求，可能产生少量费用。</p></div><button class="dialog-close" data-close-check-connection type="button" aria-label="关闭">×</button></div>
+          <p class="dialog-note">每次确认只发送一次，不自动重试；可能产生少量 Provider 费用，但不计入任务每日调用限额；Provider 返回的测试内容不会保存。</p>
+        <div class="dialog-actions"><button class="secondary-button" data-close-check-connection type="button">取消</button><button id="confirm-check-connection" type="button">确认并发送 1 次</button></div>
+      </div>
     </dialog>
 
     <dialog id="delete-connection-dialog" class="app-dialog danger-dialog">

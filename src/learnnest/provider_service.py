@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from openai import OpenAI
+from pydantic import SecretStr
 
+from learnnest import providers
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.automation_models import AutomationAttempt, AutomationTaskState
 from learnnest.automation_store import (
     ProviderAdmissionError,
     admit_provider_call,
     finish_provider_call,
-    load_task_state,
     save_task_state,
 )
 from learnnest.models import ProviderBindingSnapshot
@@ -25,8 +29,9 @@ from learnnest.note_providers import (
 )
 from learnnest.podcast_providers import OpenAICompatiblePodcastProvider
 from learnnest.provider_profiles import (
+    Capability,
+    ProviderConnection,
     ProviderRoleSnapshot,
-    get_connection,
     load_settings,
     settings_sha256,
 )
@@ -36,10 +41,20 @@ from learnnest.tts_providers import (
     WindowsTtsProvider,
     windows_tts_voice_from_endpoint,
 )
+from learnnest.tts_generation import validate_wav_bytes
 
 
 class ProviderConnectionCheckError(ValueError):
     """Safe error for a check that did not invoke or confirm a Provider."""
+
+
+@dataclass(frozen=True)
+class ProviderConnectionCheckResult:
+    """Secret-free outcome of one user-confirmed functional check."""
+
+    status: Literal["completed", "failed", "unknown"]
+    capability: Capability
+    billable: bool
 
 
 FrozenBinding = ProviderRoleSnapshot | ProviderBindingSnapshot
@@ -262,24 +277,33 @@ def _read_secret(output_root: str, secret_id: str | None):
         raise ValueError("provider secret is unavailable") from error
 
 
-def run_synthetic_llm_check(
+def run_provider_connection_check(
     output_root: str,
     connection_name: str,
     *,
     now: datetime | None = None,
     client_factory: Callable[..., Any] = OpenAI,
-) -> Literal["completed", "failed", "unknown"]:
-    """Run exactly one explicit, response-free LLM connection check.
+) -> ProviderConnectionCheckResult:
+    """Run one real, response-free functional check for the selected connection.
 
-    A connection/settings identity may receive only one recorded check. The
-    marker is written before invocation, so a process loss is an ``unknown``
-    paid opportunity rather than an invitation to retry.
+    Local adapters execute their existing isolated smoke probe. Cloud adapters
+    persist a running paid-call fact before constructing a client, send exactly
+    one minimal request with transport retries disabled, and never save the
+    response body. The diagnostic fact does not consume or depend on task daily
+    call limits. A later explicit user confirmation may start another check.
     """
     selected_now = (now or datetime.now(UTC)).astimezone(UTC)
     settings = load_settings(output_root)
-    connection = get_connection(output_root, connection_name)
-    if connection.capability != "llm" or connection.api_family != "openai_chat":
-        raise ProviderConnectionCheckError("connection cannot perform an LLM check")
+    connection = settings.connections.get(connection_name)
+    if connection is None:
+        raise ProviderConnectionCheckError("provider connection does not exist")
+    if connection.api_family == "local":
+        return _run_local_connection_check(connection)
+    if connection.api_family != "openai_chat" or connection.capability not in {
+        "llm",
+        "tts",
+    }:
+        raise ProviderConnectionCheckError("connection cannot perform a real check")
     if connection.secret_id is None:
         raise ProviderConnectionCheckError("provider secret is unavailable")
     try:
@@ -288,55 +312,131 @@ def run_synthetic_llm_check(
         raise ProviderConnectionCheckError("provider secret is unavailable") from error
 
     settings_sha = settings_sha256(settings)
-    task_id = f"provider-check-{connection.connection_id}"
-    existing = load_task_state(output_root, task_id, settings_sha)
-    if existing is not None and existing.attempts:
-        raise ProviderConnectionCheckError(
-            "synthetic connection check was already attempted"
-        )
+    connection_digest = hashlib.sha256(
+        connection.connection_id.encode("utf-8")
+    ).hexdigest()[:4]
+    task_id = f"pcheck-{connection_digest}-{uuid.uuid4().hex[:12]}"
     pending = AutomationTaskState(
         task_id=task_id,
         policy_sha256=settings_sha,
+    )
+    stage: Literal["writer", "tts"] = (
+        "tts" if connection.capability == "tts" else "writer"
     )
     try:
         running, admitted = admit_provider_call(
             output_root,
             pending,
-            stage="writer",
+            stage=stage,
             now=selected_now,
             retries_per_stage=0,
             global_calls_per_day=settings.global_calls_per_day,
             budget_group_calls_per_day=settings.budget_group_calls_per_day,
+            counts_toward_limit=False,
         )
     except ProviderAdmissionError as error:
         raise ProviderConnectionCheckError(
-            "provider call limit is exhausted"
+            "provider connection check could not be admitted"
         ) from error
     try:
-        client = client_factory(
-            api_key=secret.get_secret_value(),
-            base_url=connection.endpoint,
-            max_retries=0,
-        )
-        response = client.chat.completions.create(
-            model=connection.model,
-            messages=[
-                {"role": "system", "content": "Reply with OK only."},
-                {"role": "user", "content": "Synthetic connection check."},
-            ],
-            stream=False,
-            max_completion_tokens=16,
-        )
-        if not getattr(response, "choices", None):
-            raise RuntimeError("empty provider response")
+        if connection.capability == "llm":
+            _check_llm_connection(connection, secret.get_secret_value(), client_factory)
+        else:
+            _check_tts_connection(connection, secret, client_factory)
     except Exception as error:
         status: Literal["failed", "unknown"] = (
             "unknown" if "timeout" in str(error).lower() else "failed"
         )
         _save_terminal(output_root, running, admitted, status, selected_now)
-        return status
+        return ProviderConnectionCheckResult(
+            status=status,
+            capability=connection.capability,
+            billable=True,
+        )
     _save_terminal(output_root, running, admitted, "completed", selected_now)
-    return "completed"
+    return ProviderConnectionCheckResult(
+        status="completed",
+        capability=connection.capability,
+        billable=True,
+    )
+
+
+def _check_llm_connection(
+    connection: ProviderConnection,
+    secret: str,
+    client_factory: Callable[..., Any],
+) -> None:
+    client = client_factory(
+        api_key=secret,
+        base_url=connection.endpoint,
+        max_retries=0,
+    )
+    response = client.chat.completions.create(
+        model=connection.model,
+        messages=[
+            {"role": "system", "content": "Reply with OK only."},
+            {"role": "user", "content": "Connection check."},
+        ],
+        stream=False,
+        max_tokens=8,
+    )
+    if not getattr(response, "choices", None):
+        raise RuntimeError("empty provider response")
+
+
+def _check_tts_connection(
+    connection: ProviderConnection,
+    secret: SecretStr,
+    client_factory: Callable[..., Any],
+) -> None:
+    provider = OpenAICompatibleTtsProvider(
+        secret,
+        provider_name=connection.provider,
+        model=connection.model,
+        base_url=connection.endpoint,
+        client_factory=client_factory,
+    )
+    validate_wav_bytes(provider.synthesize("测试", "自然、清晰地朗读。"))
+
+
+def _run_local_connection_check(
+    connection: ProviderConnection,
+) -> ProviderConnectionCheckResult:
+    try:
+        if connection.provider in {"local-asr", "local-ocr"}:
+            command = (
+                "doctor-asr" if connection.provider == "local-asr" else "doctor-ocr"
+            )
+            expected_provider = (
+                "faster-whisper" if connection.provider == "local-asr" else "paddleocr"
+            )
+            payload = json.loads(providers.run_worker([command]).stdout)
+            if (
+                not isinstance(payload, dict)
+                or payload.get("ok") is not True
+                or payload.get("provider") != expected_provider
+            ):
+                raise RuntimeError("local provider probe returned an invalid result")
+        elif connection.provider == "windows-tts":
+            voice = windows_tts_voice_from_endpoint(connection.endpoint)
+            if voice is None:
+                raise RuntimeError("Windows TTS voice is unavailable")
+            validate_wav_bytes(
+                WindowsTtsProvider(voice).synthesize("测试", "自然、清晰地朗读。")
+            )
+        else:
+            raise ProviderConnectionCheckError(
+                "connection cannot perform a local check"
+            )
+    except ProviderConnectionCheckError:
+        raise
+    except Exception:
+        return ProviderConnectionCheckResult(
+            status="failed", capability=connection.capability, billable=False
+        )
+    return ProviderConnectionCheckResult(
+        status="completed", capability=connection.capability, billable=False
+    )
 
 
 def _save_terminal(

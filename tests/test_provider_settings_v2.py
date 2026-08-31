@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
+import wave
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,11 +12,17 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from learnnest.automation_models import AutomationBudget
+from learnnest.automation_models import AutomationAttempt, AutomationBudget
 from learnnest.automation_models import AutomationPolicy
 from learnnest.automation_runner import AutomationProviders, run_automation_tasks
-from learnnest.automation_store import authorize, save_policy
-from learnnest.automation_store import load_task_state
+from learnnest.automation_store import (
+    authorize,
+    load_task_state,
+    provider_budget_group_call_usage,
+    provider_call_usage,
+    provider_role_call_usage,
+    save_policy,
+)
 from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.provider_profiles import (
     ProviderConnectionBoundError,
@@ -34,18 +42,29 @@ from learnnest.provider_profiles import (
 )
 from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
 from learnnest.provider_service import (
-    ProviderConnectionCheckError,
+    ProviderConnectionCheckResult,
     AdmittedAssistedProvider,
     assisted_provider_from_snapshot,
     execute_direct_provider_call,
     podcast_provider_from_snapshot,
-    run_synthetic_llm_check,
+    run_provider_connection_check,
     tts_provider_from_snapshot,
 )
 from learnnest.task_store import create_task
 from learnnest.web_app import create_web_app
 import learnnest.web_app as web_app
+import learnnest.provider_service as provider_service
 from learnnest.note_providers import NoteProviderError
+
+
+def _valid_wav_bytes() -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(16_000)
+        stream.writeframes(b"\x00\x00" * 160)
+    return output.getvalue()
 
 
 def test_dpapi_secret_is_ciphertext_and_never_enters_settings_or_web_api(
@@ -541,20 +560,76 @@ def test_role_and_global_caps_block_before_fake_provider_invocation(
     assert settings.call_allowed("note_reviewer", used_global=1, used_group=0) is False
 
 
-def test_connection_check_cap_blocks_before_client_construction(tmp_path: Path) -> None:
+def test_connection_check_bypasses_task_caps_without_consuming_usage(
+    tmp_path: Path,
+) -> None:
     connect(tmp_path, name="mimo", preset="mimo", secret_value="check-secret")
-    settings = load_settings(tmp_path).model_copy(update={"global_calls_per_day": 0})
+    settings = load_settings(tmp_path).model_copy(
+        update={
+            "global_calls_per_day": 0,
+            "budget_group_calls_per_day": {
+                "note": 0,
+                "podcast": 0,
+                "tts": 0,
+                "asr": 0,
+                "ocr": 0,
+            },
+        }
+    )
     save_settings(tmp_path, ProviderSettings.model_validate(settings.model_dump()))
     calls = 0
+    now = datetime(2026, 8, 29, 12, tzinfo=UTC)
 
-    def client_factory(**_: object) -> object:
+    def client_factory(**options: object) -> object:
         nonlocal calls
         calls += 1
-        return object()
+        assert options["max_retries"] == 0
 
-    with pytest.raises(ProviderConnectionCheckError, match="limit is exhausted"):
-        run_synthetic_llm_check(str(tmp_path), "mimo", client_factory=client_factory)
-    assert calls == 0
+        class Completions:
+            def create(self, **_: object) -> object:
+                return type("Response", (), {"choices": [object()]})()
+
+        return type(
+            "Client",
+            (),
+            {"chat": type("Chat", (), {"completions": Completions()})()},
+        )()
+
+    result = run_provider_connection_check(
+        str(tmp_path), "mimo", now=now, client_factory=client_factory
+    )
+
+    assert result.status == "completed"
+    assert calls == 1
+    policy_sha = settings_sha256(load_settings(tmp_path))
+    assert provider_call_usage(tmp_path, policy_sha, now=now, limit=0) == (0, 0, 0)
+    assert provider_budget_group_call_usage(tmp_path, "note", now=now) == 0
+    assert provider_role_call_usage(tmp_path, "note_writer", now=now) == 0
+    state_path = next(
+        (tmp_path / ".learnnest" / "automation" / "tasks").glob("pcheck-*/*.json")
+    )
+    state = load_task_state(tmp_path, state_path.parent.name, policy_sha)
+    assert state is not None
+    assert state.attempts[0].billing == "paid"
+    assert state.attempts[0].counts_toward_limit is False
+
+
+def test_legacy_and_regular_attempts_continue_to_count_toward_limits() -> None:
+    now = datetime(2026, 8, 29, 12, tzinfo=UTC)
+    regular = AutomationAttempt(
+        stage="writer",
+        attempt=1,
+        status="completed",
+        started_at=now,
+    )
+
+    assert regular.counts_toward_limit is True
+    assert (
+        AutomationAttempt.model_validate(
+            regular.model_dump(exclude={"counts_toward_limit"})
+        ).counts_toward_limit
+        is True
+    )
 
 
 @pytest.mark.parametrize("stage", ["writer", "reviewer", "podcast", "tts"])
@@ -1235,17 +1310,22 @@ def test_settings_join_the_live_refresh_without_repainting_active_forms() -> Non
     assert "function settingsFormNeedsProtection(form)" in script
 
 
-def test_synthetic_check_persists_one_safe_attempt_and_never_retries(
+def test_paid_connection_check_sends_one_request_per_confirmation_and_allows_repeat(
     tmp_path: Path,
 ) -> None:
     connect(tmp_path, name="mimo", preset="mimo", secret_value="check-secret")
     calls = 0
+    requests: list[dict[str, object]] = []
+    constructions: list[dict[str, object]] = []
 
-    def client_factory(**_: object) -> object:
+    def client_factory(**options: object) -> object:
+        constructions.append(options)
+
         class Completions:
-            def create(self, **__: object) -> object:
+            def create(self, **request: object) -> object:
                 nonlocal calls
                 calls += 1
+                requests.append(request)
                 return type("Response", (), {"choices": [object()]})()
 
         return type(
@@ -1254,19 +1334,235 @@ def test_synthetic_check_persists_one_safe_attempt_and_never_retries(
             {"chat": type("Chat", (), {"completions": Completions()})()},
         )()
 
-    assert (
-        run_synthetic_llm_check(str(tmp_path), "mimo", client_factory=client_factory)
-        == "completed"
+    first = run_provider_connection_check(
+        str(tmp_path), "mimo", client_factory=client_factory
     )
-    with pytest.raises(ProviderConnectionCheckError, match="already attempted"):
-        run_synthetic_llm_check(str(tmp_path), "mimo", client_factory=client_factory)
+    second = run_provider_connection_check(
+        str(tmp_path), "mimo", client_factory=client_factory
+    )
 
+    assert first == ProviderConnectionCheckResult(
+        status="completed", capability="llm", billable=True
+    )
+    assert second == first
+    assert calls == 2
+    assert all(item["max_retries"] == 0 for item in constructions)
+    assert all(item["stream"] is False for item in requests)
+    assert all(item["max_tokens"] == 8 for item in requests)
+    stored = [
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / ".learnnest" / "automation" / "tasks").glob(
+            "pcheck-*/*.json"
+        )
+    ]
+    assert len(stored) == 2
+    assert all("check-secret" not in item for item in stored)
+    assert all('"status": "completed"' in item for item in stored)
+
+
+def test_mimo_tts_connection_check_sends_one_request_and_validates_audio(
+    tmp_path: Path,
+) -> None:
+    connect(
+        tmp_path,
+        name="mimo-tts",
+        preset="mimo-tts",
+        secret_value="tts-check-secret",
+    )
+    requests: list[dict[str, object]] = []
+
+    def client_factory(**options: object) -> object:
+        assert options["max_retries"] == 0
+
+        class Completions:
+            def create(self, **request: object) -> object:
+                requests.append(request)
+                message = type(
+                    "Message",
+                    (),
+                    {"audio": {"data": base64.b64encode(_valid_wav_bytes()).decode()}},
+                )()
+                choice = type("Choice", (), {"message": message})()
+                return type("Response", (), {"choices": [choice]})()
+
+        return type(
+            "Client",
+            (),
+            {"chat": type("Chat", (), {"completions": Completions()})()},
+        )()
+
+    result = run_provider_connection_check(
+        str(tmp_path), "mimo-tts", client_factory=client_factory
+    )
+
+    assert result == ProviderConnectionCheckResult(
+        status="completed", capability="tts", billable=True
+    )
+    assert len(requests) == 1
+    assert requests[0]["audio"] == {"format": "wav", "voice": "冰糖"}
+
+
+def test_paid_connection_check_failure_is_recorded_without_retry(
+    tmp_path: Path,
+) -> None:
+    connect(tmp_path, name="deepseek", preset="deepseek", secret_value="check-secret")
+    calls = 0
+
+    def client_factory(**options: object) -> object:
+        assert options["max_retries"] == 0
+
+        class Completions:
+            def create(self, **_: object) -> object:
+                nonlocal calls
+                calls += 1
+                raise RuntimeError("provider rejected the request")
+
+        return type(
+            "Client",
+            (),
+            {"chat": type("Chat", (), {"completions": Completions()})()},
+        )()
+
+    result = run_provider_connection_check(
+        str(tmp_path), "deepseek", client_factory=client_factory
+    )
+
+    assert result == ProviderConnectionCheckResult(
+        status="failed", capability="llm", billable=True
+    )
     assert calls == 1
     stored = next(
-        (tmp_path / ".learnnest" / "automation" / "tasks").glob("*/*.json")
+        (tmp_path / ".learnnest" / "automation" / "tasks").glob("pcheck-*/*.json")
     ).read_text(encoding="utf-8")
-    assert "check-secret" not in stored
-    assert '"status": "completed"' in stored
+    assert '"status": "failed"' in stored
+
+
+@pytest.mark.parametrize(
+    ("preset", "worker_command", "payload"),
+    [
+        (
+            "local-asr",
+            "doctor-asr",
+            {"provider": "faster-whisper", "ok": True, "segments": 1},
+        ),
+        (
+            "local-ocr",
+            "doctor-ocr",
+            {"provider": "paddleocr", "ok": True, "items": 1},
+        ),
+    ],
+)
+def test_local_material_connection_check_runs_the_real_worker_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    preset: str,
+    worker_command: str,
+    payload: dict[str, object],
+) -> None:
+    connect(tmp_path, name=preset, preset=preset)
+    calls: list[list[str]] = []
+
+    def run_worker(args: list[str]) -> object:
+        calls.append(args)
+        return type("Completed", (), {"stdout": json.dumps(payload)})()
+
+    monkeypatch.setattr(provider_service.providers, "run_worker", run_worker)
+
+    result = run_provider_connection_check(str(tmp_path), preset)
+
+    assert result == ProviderConnectionCheckResult(
+        status="completed",
+        capability="asr" if preset == "local-asr" else "ocr",
+        billable=False,
+    )
+    assert calls == [[worker_command]]
+
+
+def test_windows_tts_connection_check_synthesizes_and_validates_audio(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    connect(
+        tmp_path,
+        name="windows-voice",
+        preset="windows-tts",
+        voice="Huihui Desktop",
+    )
+    calls: list[tuple[str, str]] = []
+
+    def synthesize(self: object, speech_text: str, style_instruction: str) -> bytes:
+        calls.append((speech_text, style_instruction))
+        return _valid_wav_bytes()
+
+    monkeypatch.setattr(provider_service.WindowsTtsProvider, "synthesize", synthesize)
+
+    result = run_provider_connection_check(str(tmp_path), "windows-voice")
+
+    assert result == ProviderConnectionCheckResult(
+        status="completed", capability="tts", billable=False
+    )
+    assert calls == [("测试", "自然、清晰地朗读。")]
+
+
+def test_web_connection_check_reports_real_paid_and_local_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    connect(tmp_path, name="mimo", preset="mimo", secret_value="check-secret")
+    connect(tmp_path, name="asr", preset="local-asr")
+    outcomes = {
+        "mimo": ProviderConnectionCheckResult(
+            status="completed", capability="llm", billable=True
+        ),
+        "asr": ProviderConnectionCheckResult(
+            status="completed", capability="asr", billable=False
+        ),
+    }
+
+    monkeypatch.setattr(
+        web_app,
+        "run_provider_connection_check",
+        lambda _root, name: outcomes[name],
+    )
+    client = TestClient(create_web_app(tmp_path))
+
+    unconfirmed = client.post("/api/providers/connections/mimo/check")
+    paid = client.post(
+        "/api/providers/connections/mimo/check", json={"confirm_paid": True}
+    )
+    local = client.post("/api/providers/connections/asr/check")
+
+    assert unconfirmed.status_code == 403
+    assert unconfirmed.json() == {"detail": "真实 Provider 检测需要明确确认。"}
+    assert paid.status_code == 200
+    assert paid.json() == {
+        "status": "completed",
+        "billable": True,
+        "message": (
+            "已完成 1 次真实 Provider 请求，连接可用；可能产生少量费用，"
+            "不计入任务每日调用限额。"
+        ),
+    }
+    assert local.status_code == 200
+    assert local.json() == {
+        "status": "completed",
+        "billable": False,
+        "message": "已完成 1 次本地功能检测，连接可用；未产生 Provider 费用。",
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ({}, {"confirm_paid": False}, {"confirm_paid": True, "extra": 1}),
+)
+def test_paid_connection_check_rejects_ambiguous_confirmation_payloads(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    connect(tmp_path, name="mimo", preset="mimo", secret_value="check-secret")
+
+    response = TestClient(create_web_app(tmp_path)).post(
+        "/api/providers/connections/mimo/check", json=payload
+    )
+
+    assert response.status_code == 422
 
 
 def test_admitted_assisted_provider_maps_reviewer_dossier_and_rejects_unknown_or_repeat(

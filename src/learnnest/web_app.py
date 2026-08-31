@@ -81,12 +81,15 @@ from learnnest.provider_profiles import (
     settings_sha256,
     update_limits,
 )
+from learnnest.provider_service import (
+    ProviderConnectionCheckError,
+    run_provider_connection_check,
+)
 from learnnest.tts_providers import (
     TtsProviderError,
     default_windows_tts_voice,
     list_windows_tts_voices,
 )
-from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
 from learnnest.sources import SourceParseError, collect_sources
 from learnnest.task_store import find_task_by_id, load_task
 from learnnest.task_trash import (
@@ -185,6 +188,12 @@ class ProviderLimitsRequest(BaseModel):
     retries_per_role: int = Field(ge=0, le=3)
     global_calls_per_day: int = Field(ge=0, le=800)
     budget_group_calls_per_day: dict[ProviderBudgetGroup, int]
+
+
+class ProviderConnectionCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm_paid: Literal[True]
 
 
 class AutomationConfigureRequest(BaseModel):
@@ -730,25 +739,48 @@ class WebService:
         clear_role_binding(self.output_root, role=role)
         return self.provider_settings()
 
-    def check_provider_connection(self, name: str) -> dict[str, str]:
-        """Perform a zero-cost DPAPI/configuration check; no Provider call occurs."""
-        settings = public_provider_settings(self.output_root)
-        connection = next(
-            (item for item in settings["connections"] if item["name"] == name), None
-        )
-        if not isinstance(connection, dict):
+    def check_provider_connection(
+        self, name: str, *, confirm_paid: bool = False
+    ) -> dict[str, str | bool]:
+        """Run one user-confirmed functional request without automatic retries."""
+        connection = load_settings(self.output_root).connections.get(name)
+        if connection is None:
             raise KeyError(name)
-        # The public projection hides secret_id, so resolve only to prove that
-        # the current Windows user can decrypt the configured object.
-        from learnnest.provider_profiles import get_connection
-
-        stored = get_connection(self.output_root, name)
-        if stored.secret_id is not None:
-            try:
-                ProviderSecretStore(self.output_root).read(stored.secret_id)
-            except SecretStoreError as error:
-                raise ValueError("连接密钥不可用。") from error
-        return {"message": "已完成本地配置校验；未调用 Provider。"}
+        if connection.api_family != "local" and not confirm_paid:
+            raise PermissionError("真实 Provider 检测需要明确确认。")
+        try:
+            result = run_provider_connection_check(str(self.output_root), name)
+        except ProviderConnectionCheckError as error:
+            reason = str(error)
+            if "secret is unavailable" in reason:
+                message = "连接检测未发送：API Key 无法读取，请重新保存连接。"
+            else:
+                message = "当前连接暂时无法执行功能检测。"
+            raise ValueError(message) from error
+        if result.status == "completed":
+            message = (
+                "已完成 1 次真实 Provider 请求，连接可用；可能产生少量费用，"
+                "不计入任务每日调用限额。"
+                if result.billable
+                else "已完成 1 次本地功能检测，连接可用；未产生 Provider 费用。"
+            )
+        elif result.status == "unknown":
+            message = (
+                "已发送 1 次真实 Provider 请求，但结果无法确认；可能已经计费，"
+                "且不会自动重试。"
+            )
+        else:
+            message = (
+                "真实 Provider 请求失败；本次未自动重试。请检查 API Key、"
+                "服务地址和模型。"
+                if result.billable
+                else "本地功能检测失败；请检查本地模型、测试素材和系统语音。"
+            )
+        return {
+            "status": result.status,
+            "billable": result.billable,
+            "message": message,
+        }
 
     def save_provider_limits(self, request: ProviderLimitsRequest) -> dict[str, object]:
         try:
@@ -1406,11 +1438,18 @@ syncInitialHashBookmark();
             raise HTTPException(status_code=409, detail="职责无法解绑。") from error
 
     @app.post("/api/providers/connections/{name}/check")
-    def check_provider_connection(name: str) -> dict[str, str]:
+    def check_provider_connection(
+        name: str, request: ProviderConnectionCheckRequest | None = None
+    ) -> dict[str, str | bool]:
         try:
-            return service.check_provider_connection(name)
+            return service.check_provider_connection(
+                name,
+                confirm_paid=request is not None and request.confirm_paid is True,
+            )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="连接不存在。") from error
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 

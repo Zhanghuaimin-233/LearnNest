@@ -86,6 +86,9 @@ const connectionDialog = document.querySelector("#connection-dialog");
 const connectionDialogTitle = document.querySelector("#connection-dialog-title");
 const connectionDialogCopy = document.querySelector("#connection-dialog-copy");
 const providerServiceHint = document.querySelector("#provider-service-hint");
+const checkConnectionDialog = document.querySelector("#check-connection-dialog");
+const checkConnectionName = document.querySelector("#check-connection-name");
+const confirmCheckConnection = document.querySelector("#confirm-check-connection");
 const deleteConnectionDialog = document.querySelector("#delete-connection-dialog");
 const deleteConnectionForm = document.querySelector("#delete-connection-form");
 const deleteConnectionName = document.querySelector("#delete-connection-name");
@@ -147,6 +150,7 @@ let activeFavoriteFolderId = "all";
 let latestFavoritesSnapshot = { synced_at: null, folders: [], items: [] };
 let suggestedProviderConnectionName = "";
 let latestProviderSettings = { connections: [], adapters: [], roles: {}, readiness: null };
+let pendingCheckConnection = null;
 let pendingDeleteConnection = null;
 let providerSettingsMutationRevision = 0;
 const dirtySettingsForms = new Set();
@@ -196,16 +200,7 @@ function renderProviderSettings(settings) {
     return `<span>${capability.toUpperCase()} ${ready ? "已配置" : "待配置"}</span>`;
   }).join("");
   providerCapabilityList.innerHTML = capabilities.map((capability) => renderProviderCapabilityCard(capability, settings)).join("");
-  providerCapabilityList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", async () => {
-    const label = button.textContent;
-    button.disabled = true;
-    button.textContent = "检查中…";
-    try {
-      const result = await api(`/api/providers/connections/${encodeURIComponent(button.dataset.checkConnection)}/check`, { method: "POST" });
-      providerFeedback.textContent = result.message;
-      say(result.message);
-    } catch (error) { providerFeedback.textContent = error.message; say(error.message); } finally { button.disabled = false; button.textContent = label; }
-  }));
+  providerCapabilityList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", () => requestProviderConnectionCheck(button)));
   providerCapabilityList.querySelectorAll("button[data-delete-connection]:not(:disabled)").forEach((button) => button.addEventListener("click", () => openDeleteProviderConnection(button)));
   providerCapabilityList.querySelectorAll("button[data-use-connection]").forEach((button) => button.addEventListener("click", () => setCurrentProviderConnection(button)));
   providerCapabilityList.querySelectorAll("button[data-add-capability]").forEach((button) => button.addEventListener("click", () => openConnectionDialog(button.dataset.addCapability)));
@@ -356,6 +351,47 @@ async function setCurrentProviderConnection(button) {
     providerFeedback.textContent = `已将${connectionName}设为${label}的当前连接；付费整理许可需要重新确认。`;
     say(providerFeedback.textContent);
   } catch (error) { showProviderUpdateFailure(error); } finally { button.disabled = false; button.textContent = buttonLabel; }
+}
+
+function requestProviderConnectionCheck(button) {
+  const name = button.dataset.checkConnection;
+  const connection = latestProviderSettings.connections.find((item) => item.name === name);
+  if (!connection) return;
+  if (connection.local) {
+    runProviderConnectionCheck(button);
+    return;
+  }
+  pendingCheckConnection = name;
+  checkConnectionName.textContent = `${connection.name}（${connection.provider}）`;
+  checkConnectionDialog.showModal();
+  window.requestAnimationFrame(() => confirmCheckConnection.focus({ preventScroll: true }));
+}
+
+async function runProviderConnectionCheck(button, confirmPaid = false) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "检测中…";
+  try {
+    const request = { method: "POST" };
+    if (confirmPaid) request.body = JSON.stringify({ confirm_paid: true });
+    const result = await api(`/api/providers/connections/${encodeURIComponent(button.dataset.checkConnection)}/check`, request);
+    providerFeedback.textContent = result.message;
+    say(result.message);
+  } catch (error) {
+    providerFeedback.textContent = error.message;
+    say(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+async function confirmProviderConnectionCheck() {
+  if (!pendingCheckConnection) return;
+  const name = pendingCheckConnection;
+  const button = providerCapabilityList.querySelector(`button[data-check-connection="${CSS.escape(name)}"]`);
+  checkConnectionDialog.close();
+  if (button) await runProviderConnectionCheck(button, true);
 }
 
 function openDeleteProviderConnection(button) {
@@ -1497,6 +1533,9 @@ document.querySelectorAll("[data-close-single-video]").forEach((button) => butto
 document.querySelectorAll("[data-close-automation-authorization]").forEach((button) => button.addEventListener("click", closeAutomationAuthorization));
 document.querySelectorAll("[data-close-delete-task]").forEach((button) => button.addEventListener("click", closeDeleteTask));
 deleteTaskDialog.addEventListener("close", () => { pendingDeleteItemRef = null; });
+confirmCheckConnection.addEventListener("click", confirmProviderConnectionCheck);
+document.querySelectorAll("[data-close-check-connection]").forEach((button) => button.addEventListener("click", () => checkConnectionDialog.close()));
+checkConnectionDialog.addEventListener("close", () => { pendingCheckConnection = null; });
 deleteConnectionForm.addEventListener("submit", deleteProviderConnection);
 document.querySelectorAll("[data-close-delete-connection]").forEach((button) => button.addEventListener("click", () => deleteConnectionDialog.close()));
 deleteConnectionDialog.addEventListener("close", () => { pendingDeleteConnection = null; });

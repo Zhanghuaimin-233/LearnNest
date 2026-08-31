@@ -1,8 +1,15 @@
 const api = async (path, options = {}) => {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      ...options,
+    });
+  } catch (networkError) {
+    const error = new Error("无法连接语栖服务。请确认语栖正在运行，然后刷新页面。");
+    error.status = 0;
+    throw error;
+  }
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
   if (!response.ok) {
@@ -1561,6 +1568,8 @@ refreshDouyinButton.addEventListener("click", refreshDouyinQr);
 cancelDouyinButton.addEventListener("click", cancelDouyin);
 syncFavoritesButton.addEventListener("click", syncFavorites);
 document.addEventListener("visibilitychange", () => refresh(true));
+if ("scrollRestoration" in window.history) window.history.scrollRestoration = "manual";
+window.addEventListener("load", () => window.scrollTo({ top: 0, behavior: "auto" }));
 restoreDouyinLogin();
 suggestProviderConnectionName();
 loadProviderSettings();

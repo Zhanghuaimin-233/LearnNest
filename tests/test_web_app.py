@@ -1572,7 +1572,7 @@ def test_learning_note_has_a_readable_shell_and_only_shows_verified_audio(
     assert 'href="/#library"' not in with_audio.text
     for shell_class in ("note-app-header", "note-rail", "note-reading"):
         assert f'class="{shell_class}"' in with_audio.text
-    assert "/static/workspace.css?v=20260829-1" in with_audio.text
+    assert "/static/workspace.css?v=20260831-1" in with_audio.text
     assert 'aria-label="播放本篇笔记的音频"' in with_audio.text
     assert f"/api/learning/items/{task.task_id}/audio" in with_audio.text
     assert f"/api/learning/items/{task.task_id}/images/cover.png" in with_audio.text
@@ -1704,8 +1704,8 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
         "settings-summary-interval",
     ):
         assert f'id="{element_id}"' in page
-    assert "/static/workspace.css?v=20260829-1" in page
-    assert "/static/workspace.js?v=20260829-1" in page
+    assert "/static/workspace.css?v=20260831-1" in page
+    assert "/static/workspace.js?v=20260831-1" in page
     assert ".source-console {" in stylesheet
     assert "grid-template-columns: 232px minmax(0, 1fr) 300px" in stylesheet
     assert ".source-insight-rail {" in stylesheet

@@ -1677,7 +1677,7 @@ def _learning_note_page(note: Any, fragment: str, audio_href: str | None) -> str
 <html lang="zh-CN"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>{title} · 语栖</title><link rel="icon" href="data:," />
-<link rel="stylesheet" href="/static/workspace.css?v=20260829-1" />
+<link rel="stylesheet" href="/static/workspace.css?v=20260831-1" />
 </head><body class="note-page">
 <header class="note-app-header"><div class="note-app-header-inner">
 <a class="note-brand" href="/#tasks"><span class="brand-mark" aria-hidden="true">语</span><span><strong>语栖</strong><small>LEARNNEST</small></span></a>

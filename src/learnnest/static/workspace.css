@@ -97,7 +97,8 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .runtime-state small, .settings-readiness small { color: var(--slate); font-size: 10px; line-height: 1.5; }
 
 .main-surface { min-width: 0; }
-.view { min-height: calc(100vh - 76px); padding: 40px 34px 64px; }
+.view { min-height: calc(100vh - 76px); padding: 40px 34px 64px; scroll-margin-top: 96px; }
+.source-intake-row, .source-douyin-panel { scroll-margin-top: 96px; }
 .view:not(.is-visible) { display: none; }
 .page-header { max-width: var(--workspace-max); margin: 0 auto 30px; display: flex; align-items: center; justify-content: space-between; gap: 28px; }
 .compact-header { margin-bottom: 20px; padding-bottom: 0; border-bottom: 0; }
@@ -730,14 +731,16 @@ input:focus, select:focus { border-color: var(--blue); outline: 3px solid rgba(5
   .favorite-browser { display: block; }
   .favorite-folder-rail { padding: 18px 0 12px; border-right: 0; border-bottom: 1px solid var(--line); }
   .favorite-folder-rail .rail-label { display: none; }
-  .favorite-folders { display: flex; gap: 7px; overflow-x: auto; scrollbar-width: thin; }
+  .favorite-folders { display: flex; gap: 7px; overflow-x: auto; scrollbar-width: none; }
+  .favorite-folders::-webkit-scrollbar { display: none; }
   .favorite-folders button { flex: 0 0 auto; width: auto; padding-inline: 10px; }
   .favorite-collection-panel { padding-left: 0; }
   .favorite-toolbar { align-items: flex-end; }
   .favorite-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 8px; }
   .favorite-card-copy { padding: 9px; }
   .favorite-card-meta { align-items: flex-start; flex-direction: column; gap: 5px; }
-  .settings-nav { position: static; width: 100%; padding: 8px; display: flex; gap: 7px; overflow-x: auto; border: 1px solid var(--line); }
+  .settings-nav { position: static; width: 100%; padding: 8px; display: flex; gap: 7px; overflow-x: auto; scrollbar-width: none; border: 1px solid var(--line); }
+  .settings-nav::-webkit-scrollbar { display: none; }
   .settings-nav .rail-label { display: none; }
   .settings-nav > button { flex: 0 0 auto; width: auto; padding: 9px 11px; }
   .settings-nav > button small { display: none; }

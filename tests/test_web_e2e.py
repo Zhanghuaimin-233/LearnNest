@@ -848,7 +848,7 @@ def test_goal4_three_sources_reach_a_safe_note_in_real_edge(
         with page.expect_response(
             lambda response: response.url.endswith("/api/learning/submit")
         ) as public:
-            page.locator("#url-form button").click()
+            page.locator('button[form="url-form"]').click()
         assert public.value.status == 202
         expect(page.locator(".source-jobs .source-job")).to_have_count(2)
         _open_view(page, "sources")
@@ -915,7 +915,7 @@ def test_goal4_waiting_setup_survives_refresh_without_constructing_a_provider(
         with page.expect_response(
             lambda response: response.url.endswith("/api/learning/submit")
         ) as submitted:
-            page.locator("#url-form button").click()
+            page.locator('button[form="url-form"]').click()
         assert submitted.value.status == 202
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
         expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
@@ -1129,7 +1129,7 @@ def test_goal4_substantive_setting_change_revokes_browser_authorization(
         expect(page.locator("#automation-state")).to_have_text("需要重新确认付费许可")
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
-        page.locator("#url-form button").click()
+        page.locator('button[form="url-form"]').click()
         expect(page.locator("#processing-list")).to_contain_text("请开启付费整理许可")
         assert loopback_app.provider_runs == []
         assert "first-test-key" not in page.locator("body").inner_text()
@@ -1147,7 +1147,7 @@ def test_goal4_restarting_webui_keeps_source_job_and_intake_visible(
         page.goto(loopback_app.url)
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
-        page.locator("#url-form button").click()
+        page.locator('button[form="url-form"]').click()
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
         expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
         browser.close()
@@ -1365,7 +1365,7 @@ def test_goal4_corrupting_an_intake_fact_turns_the_browser_gate_red_then_green(
         with page.expect_response(
             lambda response: response.url.endswith("/api/learning/submit")
         ) as submitted:
-            page.locator("#url-form button").click()
+            page.locator('button[form="url-form"]').click()
         assert submitted.value.status == 202
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
         expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
@@ -1402,7 +1402,7 @@ def test_goal4_user_can_move_one_stopped_task_to_trash(
         page.goto(loopback_app.url)
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
-        page.locator("#url-form button").click()
+        page.locator('button[form="url-form"]').click()
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
         _open_view(page, "tasks")
         expect(page.locator("#task-list article")).to_have_count(1)
@@ -1566,7 +1566,7 @@ def test_goal4_audio_success_is_playable_from_the_real_note_page(
         _enable_audio_automation(page)
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
-        page.locator("#url-form button").click()
+        page.locator('button[form="url-form"]').click()
         expect(page.locator("#library-list article")).to_have_count(1)
         expect(page.locator("#library-list")).to_contain_text("\u53ef\u64ad\u653e")
         found = find_task_by_id(loopback_app.root, "20260813-goal40001")
@@ -1608,7 +1608,7 @@ def test_goal4_audio_failure_keeps_the_note_readable_and_distinct(
         _enable_audio_automation(page)
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
-        page.locator("#url-form button").click()
+        page.locator('button[form="url-form"]').click()
         expect(page.locator("#library-list article")).to_have_count(1)
         expect(page.locator("#library-list")).to_contain_text("音频仍在处理中")
         _open_first_task(page, "library-list")
@@ -1635,7 +1635,7 @@ def test_goal4_retryable_writer_failure_retries_the_same_task_record(
         _enable_note_automation(page, key="retry-key")
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
-        page.locator("#url-form button").click()
+        page.locator('button[form="url-form"]').click()
         expect(page.locator("#processing-list")).to_contain_text("处理已停止")
         _open_first_task(page, "processing-list")
         expect(
@@ -1674,7 +1674,7 @@ def test_goal4_retryable_source_failure_reuses_the_same_durable_browser_job(
         page.goto(loopback_app.url)
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
-        page.locator("#url-form button").click()
+        page.locator('button[form="url-form"]').click()
         expect(page.locator(".source-jobs button[data-retry-job]")).to_have_count(1)
         _open_view(page, "sources")
         retry = page.locator(".source-jobs button[data-retry-job]")
@@ -1703,7 +1703,7 @@ def test_goal4_unknown_and_permanent_automation_failures_hide_retry_and_stop_fac
         _enable_note_automation(page, key="test-key")
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
-        page.locator("#url-form button").click()
+        page.locator('button[form="url-form"]').click()
         expect(page.locator("#processing-list")).to_contain_text("处理已停止")
         _open_first_task(page, "processing-list")
         reason = page.locator("#task-detail .failure-explanation")

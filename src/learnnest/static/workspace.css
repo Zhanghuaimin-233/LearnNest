@@ -107,7 +107,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .page-summary { margin: 12px 0 0; color: var(--slate); font-size: 14px; line-height: 1.65; }
 .page-summary strong { color: var(--ink); }
 
-.primary-action, button[type="submit"], #authorize-automation, #confirm-automation-authorization, #confirm-check-connection, #connect-douyin, #add-selected-favorites, .inline-action {
+.primary-action, button[type="submit"], #authorize-automation, #confirm-automation-authorization, #confirm-check-connection, #add-selected-favorites, .inline-action {
   min-height: 42px;
   border: 0;
   border-radius: 10px;
@@ -117,10 +117,10 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   font-weight: 650;
   box-shadow: 0 10px 24px rgba(52, 127, 196, 0.16);
 }
-.primary-action:hover, button[type="submit"]:hover, #authorize-automation:hover, #confirm-automation-authorization:hover, #confirm-check-connection:hover, #connect-douyin:hover, #add-selected-favorites:hover, .inline-action:hover { background: var(--blue-deep); }
+.primary-action:hover, button[type="submit"]:hover, #authorize-automation:hover, #confirm-automation-authorization:hover, #confirm-check-connection:hover, #add-selected-favorites:hover, .inline-action:hover { background: var(--blue-deep); }
 .primary-action { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .compact-action { min-height: 38px; padding-inline: 14px; font-size: 13px; }
-.secondary-button, .text-button, .icon-button, .provider-actions button, #sync-favorites, #refresh-douyin {
+.secondary-button, .text-button, .icon-button, .provider-actions button, #connect-douyin, #sync-favorites, #refresh-douyin {
   border: 1px solid var(--line-strong);
   border-radius: 9px;
   min-height: 36px;
@@ -131,7 +131,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   font-size: 12px;
   font-weight: 600;
 }
-.text-button, #sync-favorites { border-color: transparent; color: var(--blue-deep); background: transparent; }
+.text-button, #connect-douyin, #sync-favorites, #disconnect-douyin { border-color: transparent; color: var(--blue-deep); background: transparent; }
 .icon-button { width: 36px; padding: 0; font-size: 17px; }
 
 .task-page-header { max-width: var(--workspace-max); margin-bottom: 20px; }

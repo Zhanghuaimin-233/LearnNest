@@ -42,6 +42,7 @@ const loginMessage = document.querySelector("#douyin-login-message");
 const loginCountdown = document.querySelector("#douyin-countdown");
 const refreshDouyinButton = document.querySelector("#refresh-douyin");
 const cancelDouyinButton = document.querySelector("#cancel-douyin");
+const disconnectDouyinButton = document.querySelector("#disconnect-douyin");
 const providerForm = document.querySelector("#provider-connection-form");
 const providerKeyField = document.querySelector("#provider-key-field");
 const providerCapabilityList = document.querySelector("#provider-capability-list");
@@ -1062,13 +1063,17 @@ function showLoginState(state) {
   const requestContractBlocked = state.failure_kind === "request_rejected";
   loginState.textContent = requestContractBlocked ? "接口变化" : (loginLabel[state.status] || "需重连");
   loginState.className = `status-pill ${state.status}`;
-  loginPanel.hidden = false;
   connectDouyinButton.disabled = requestContractBlocked;
   connectDouyinButton.textContent = requestContractBlocked
     ? "暂不需要重新扫码"
     : (state.status === "connected" ? "重新验证" : "打开抖音验证窗口");
   const reconnect = ["expired", "failed", "cancelled"].includes(state.status);
-  if (state.status === "connected") {
+  const connected = state.status === "connected";
+  const inProgress = !connected && !reconnect && !requestContractBlocked;
+  loginPanel.hidden = !inProgress;
+  cancelDouyinButton.hidden = !inProgress;
+  disconnectDouyinButton.hidden = !connected;
+  if (connected) {
     loginMessage.textContent = "官方短信与扫码验证已完成，可以同步收藏。";
   } else if (state.status === "browser_ready") {
     loginMessage.textContent = "请在抖音官方窗口完成手机号验证码，并按提示使用抖音 App 扫码确认；随后官方页面会自动验证收藏访问。";
@@ -1570,6 +1575,7 @@ document.querySelector("#back-to-tasks").addEventListener("click", showTaskWorkb
 connectDouyinButton.addEventListener("click", connectDouyin);
 refreshDouyinButton.addEventListener("click", refreshDouyinQr);
 cancelDouyinButton.addEventListener("click", cancelDouyin);
+disconnectDouyinButton.addEventListener("click", cancelDouyin);
 syncFavoritesButton.addEventListener("click", syncFavorites);
 document.addEventListener("visibilitychange", () => refresh(true));
 if ("scrollRestoration" in window.history) window.history.scrollRestoration = "manual";

@@ -159,12 +159,12 @@
               <section class="source-douyin-panel" id="source-douyin">
                 <header class="source-panel-toolbar source-douyin-toolbar">
                   <div><p class="panel-kicker">已连接的内容库</p><h2>抖音收藏</h2><span>同步默认与自建收藏夹，再选择要加入任务的内容。</span></div>
-                  <div class="source-actions"><button id="connect-douyin" type="button">打开抖音验证窗口</button><button id="sync-favorites" class="secondary-button" type="button">手动同步</button></div>
+                  <div class="source-actions"><button id="connect-douyin" class="secondary-button" type="button">打开抖音验证窗口</button><button id="sync-favorites" class="secondary-button" type="button">手动同步</button><button id="disconnect-douyin" class="secondary-button" type="button" hidden>断开连接</button></div>
                 </header>
 
                 <div id="douyin-login-panel" class="login-panel" hidden>
                   <img id="douyin-qr" class="qr-image" alt="抖音登录二维码" hidden />
-                  <div><p id="douyin-login-message" aria-live="polite">正在打开官方短信与扫码验证窗口。</p><p id="douyin-countdown" class="countdown" aria-live="polite" hidden></p><div class="form-actions"><button id="refresh-douyin" type="button" hidden>刷新二维码</button><button id="cancel-douyin" class="text-button" type="button">取消</button></div></div>
+                  <div><p id="douyin-login-message" aria-live="polite">正在打开官方短信与扫码验证窗口。</p><p id="douyin-countdown" class="countdown" aria-live="polite" hidden></p><div class="form-actions"><button id="refresh-douyin" type="button" hidden>刷新二维码</button><button id="cancel-douyin" class="text-button" type="button">取消连接</button></div></div>
                 </div>
 
                 <div class="favorite-browser">

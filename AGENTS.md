@@ -56,9 +56,10 @@ LearnNest（语栖）是 Windows 上本地优先的个人学习产品，目标�
 - 设置更新先校验完整候选，再写 secret 和 settings；不兼容更新必须保持旧状态不变。
 - 付费整理许可默认关闭，必须由用户显式确认；它与“自动加入新收藏”是两个独立状态。手动任务只要求有效付费许可，不能被自动来源开关阻塞。
 - 可配置重试 0–3 次，默认重试 1 次；只重试明确的临时错误。
-- synthetic、显式命令和 automation 共用付费准入；在构造 Provider 前先持久化 running 事实。
-- 全局及 note/podcast/TTS/ASR/OCR 五组预算都按冻结策略执行；running 和 unknown 继续计数。
-- 每次尝试都可见、计数并持久化；`unknown`、永久错误和配置错误立即停止。
+- 显式命令和 automation 共用付费准入；在构造 Provider 前先持久化 running 事实。
+- 全局及 note/podcast/TTS/ASR/OCR 五组任务预算都按冻结策略执行；普通任务的 running 和 unknown 继续计数。
+- 普通任务的每次尝试都可见、计数并持久化；`unknown`、永久错误和配置错误立即停止。
+- 设置页的云端“检查连接”是显式诊断：只接受精确付费确认，每次发送一个最小真实请求且不自动重试；它可能产生 Provider 费用，会持久化审计事实但不计入任务每日调用限额，也不保存 Provider 返回正文。本地 ASR/OCR/Windows TTS 检查只运行对应本机能力，不产生云端费用。
 - Provider、云 TTS、重试次数或自动来源范围等实质变化会使旧授权失效。
 
 ## 当前代码地图

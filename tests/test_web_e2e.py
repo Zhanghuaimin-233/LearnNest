@@ -1237,6 +1237,263 @@ def test_provider_model_picker_covers_loading_empty_error_and_ignores_late_respo
         browser.close()
 
 
+def test_w32_provider_new_connection_live_curated_atomic_save_on_desktop_and_narrow_edge(
+    loopback_app: _LoopbackApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import learnnest.web_app as web_app
+    from learnnest.provider_model_catalog import ModelCatalogPreview
+
+    previews: list[tuple[str, str]] = []
+
+    def fake_preview(
+        preset: str, api_key: str, **_kwargs: object
+    ) -> ModelCatalogPreview:
+        previews.append((preset, api_key))
+        if preset == "kimi":
+            return ModelCatalogPreview(
+                source="live",
+                models=[
+                    {"id": "kimi-k2.6"},
+                    {"id": "kimi-k3", "owned_by": "moonshot"},
+                ],
+                note="实时目录来自该 Provider 当前可见模型与语栖适配允许列表的交集。",
+                adapter_revision="1",
+            )
+        return ModelCatalogPreview(
+            source="curated",
+            models=[{"id": "glm-4.6"}, {"id": "glm-5.3"}],
+            note="内置支持列表由语栖维护，不代表你的账号已开通该模型。",
+            adapter_revision="1",
+        )
+
+    monkeypatch.setattr(web_app, "preview_provider_model_catalog", fake_preview)
+
+    def fake_fetch(_root: str | Path, name: str) -> list[dict[str, str]]:
+        assert name == "w32-kimi"
+        return [{"id": "kimi-k2.6"}, {"id": "kimi-k3", "owned_by": "moonshot"}]
+
+    monkeypatch.setattr(web_app, "fetch_provider_model_catalog", fake_fetch)
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(loopback_app.url)
+        _open_settings_panel(page, "connections")
+
+        page.locator('button[data-add-capability="llm"]').click()
+        expect(page.locator("#connection-dialog")).to_be_visible()
+        expect(
+            page.locator('#provider-connection-form option[value="openrouter"]')
+        ).to_have_text("OpenRouter（多模型平台）")
+        page.locator("#provider-connection-form [name=name]").fill("w32-kimi")
+        page.locator("#provider-connection-form [name=preset]").select_option("kimi")
+        expect(page.locator("#new-provider-model-section")).to_be_visible()
+        expect(page.locator("#provider-key-entry")).to_be_visible()
+        expect(page.locator("#provider-key-entry-link")).to_have_attribute(
+            "href", "https://platform.kimi.com/console/api-keys"
+        )
+        expect(
+            page.locator("#provider-connection-form button[type=submit]")
+        ).to_be_disabled()
+        page.locator("#provider-connection-form [name=api_key]").fill("kimi-e2e-key")
+        page.locator("#fetch-new-provider-models").click()
+        expect(
+            page.locator("#new-provider-model-list button[data-new-provider-model]")
+        ).to_have_count(2)
+        expect(page.locator("#new-provider-model-feedback")).to_contain_text("实时目录")
+        expect(
+            page.locator("#provider-connection-form button[type=submit]")
+        ).to_be_disabled()
+        page.locator('button[data-new-provider-model="kimi-k3"]').click()
+        expect(
+            page.locator("#provider-connection-form button[type=submit]")
+        ).to_be_enabled()
+        page.locator("#provider-connection-form button[type=submit]").click()
+        expect(page.locator("#connection-dialog")).not_to_be_visible()
+        expect(page.locator("#provider-feedback")).to_contain_text("kimi-k3")
+
+        settings = load_settings(loopback_app.root)
+        connection = settings.connections["w32-kimi"]
+        assert connection.model == "kimi-k3"
+        assert connection.api_family == "openai_chat"
+        assert connection.preset == "kimi"
+        assert connection.secret_id is not None
+        assert (
+            loopback_app.root / ".learnnest" / "providers" / "settings.json"
+        ).is_file()
+        from learnnest.provider_secrets import ProviderSecretStore
+
+        assert (
+            ProviderSecretStore(loopback_app.root)
+            .path_for(connection.secret_id)
+            .is_file()
+        )
+        assert "kimi-e2e-key" not in page.locator("body").inner_text()
+        assert previews == [("kimi", "kimi-e2e-key")]
+
+        page.locator('select[data-setup-role-select="笔记 Writer"]').select_option(
+            "w32-kimi"
+        )
+        expect(page.locator("#provider-feedback")).to_contain_text("笔记 Writer")
+
+        row = page.locator('[data-connection="w32-kimi"]')
+        row.locator("button[data-select-model]").click()
+        expect(page.locator("#model-selection-dialog")).to_be_visible()
+        expect(page.locator("#model-selection-current")).to_have_text("kimi-k3")
+        page.locator("#fetch-provider-models").click()
+        expect(
+            page.locator("#provider-model-list button[data-provider-model]")
+        ).to_have_count(2)
+        page.locator('button[data-provider-model="kimi-k2.6"]').click()
+        page.locator("#save-provider-model").click()
+        expect(page.locator("#model-selection-dialog")).not_to_be_visible()
+        expect(page.locator("#provider-feedback")).to_contain_text("受影响职责")
+        expect(page.locator("#provider-feedback")).to_contain_text("付费许可需重新确认")
+        assert (
+            load_settings(loopback_app.root).connections["w32-kimi"].model
+            == "kimi-k2.6"
+        )
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.locator('button[data-add-capability="llm"]').click()
+        expect(page.locator("#connection-dialog")).to_be_visible()
+        page.locator("#provider-connection-form [name=name]").fill("w32-glm")
+        page.locator("#provider-connection-form [name=preset]").select_option("glm")
+        expect(page.locator("#new-provider-model-section")).to_be_visible()
+        page.locator("#provider-connection-form [name=api_key]").fill("glm-e2e-key")
+        page.locator("#fetch-new-provider-models").click()
+        expect(
+            page.locator("#new-provider-model-list button[data-new-provider-model]")
+        ).to_have_count(2)
+        expect(page.locator("#new-provider-model-feedback")).to_contain_text(
+            "内置支持列表"
+        )
+        page.locator('button[data-new-provider-model="glm-5.3"]').click()
+        page.locator("#provider-connection-form button[type=submit]").click()
+        expect(page.locator("#connection-dialog")).not_to_be_visible()
+        assert (
+            load_settings(loopback_app.root).connections["w32-glm"].model == "glm-5.3"
+        )
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth"
+        )
+        assert "glm-e2e-key" not in page.locator("body").inner_text()
+        browser.close()
+
+
+def test_w32_provider_refuses_without_model_and_cancel_or_failure_leave_zero_residue(
+    loopback_app: _LoopbackApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import learnnest.web_app as web_app
+    from learnnest.provider_model_catalog import ModelCatalogPreview
+
+    mode = ["ok"]
+
+    def fake_preview(
+        _preset: str, _api_key: str, **_kwargs: object
+    ) -> ModelCatalogPreview:
+        if mode[0] == "error":
+            raise ProviderModelCatalogError(
+                "authentication", "官方目录认证失败，请检查已保存 API Key。"
+            )
+        return ModelCatalogPreview(
+            source="live",
+            models=[{"id": "kimi-k2.6"}, {"id": "kimi-k3"}],
+            note="实时目录来自交集。",
+            adapter_revision="1",
+        )
+
+    monkeypatch.setattr(web_app, "preview_provider_model_catalog", fake_preview)
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(loopback_app.url)
+        _open_settings_panel(page, "connections")
+
+        def provider_files() -> list[str]:
+            return sorted(
+                path.name
+                for path in (loopback_app.root / ".learnnest" / "providers").glob("*")
+            )
+
+        baseline = provider_files()
+
+        page.locator('button[data-add-capability="llm"]').click()
+        expect(page.locator("#connection-dialog")).to_be_visible()
+        page.locator("#provider-connection-form [name=name]").fill("w32-residue")
+        page.locator("#provider-connection-form [name=preset]").select_option("kimi")
+        page.locator("#provider-connection-form [name=api_key]").fill("residue-key")
+        page.locator("#fetch-new-provider-models").click()
+        expect(
+            page.locator("#new-provider-model-list button[data-new-provider-model]")
+        ).to_have_count(2)
+        expect(
+            page.locator("#provider-connection-form button[type=submit]")
+        ).to_be_disabled()
+        page.locator('button[data-new-provider-model="kimi-k3"]').click()
+        page.locator("#connection-dialog [data-close-connection]").first.click()
+        expect(page.locator("#connection-dialog")).not_to_be_visible()
+        assert provider_files() == baseline
+        assert load_settings(loopback_app.root).connections == {}
+
+        mode[0] = "error"
+        page.locator('button[data-add-capability="llm"]').click()
+        expect(page.locator("#connection-dialog")).to_be_visible()
+        page.locator("#provider-connection-form [name=name]").fill("w32-residue")
+        page.locator("#provider-connection-form [name=preset]").select_option("kimi")
+        page.locator("#provider-connection-form [name=api_key]").fill("residue-key")
+        page.locator("#fetch-new-provider-models").click()
+        expect(page.locator("#new-provider-model-feedback")).to_have_text(
+            "官方目录认证失败，请检查已保存 API Key。"
+        )
+        expect(
+            page.locator("#new-provider-model-list button[data-new-provider-model]")
+        ).to_have_count(0)
+        page.locator("#connection-dialog [data-close-connection]").first.click()
+        expect(page.locator("#connection-dialog")).not_to_be_visible()
+        assert provider_files() == baseline
+        assert load_settings(loopback_app.root).connections == {}
+
+        mode[0] = "ok"
+        page.locator('button[data-add-capability="llm"]').click()
+        expect(page.locator("#connection-dialog")).to_be_visible()
+        page.locator("#provider-connection-form [name=name]").fill("w32-late")
+        page.locator("#provider-connection-form [name=preset]").select_option("kimi")
+        page.locator("#provider-connection-form [name=api_key]").fill("late-key")
+        page.evaluate(
+            """
+            () => {
+              const originalFetch = window.fetch;
+              let release;
+              const gate = new Promise((resolve) => { release = resolve; });
+              window.__releasePreviewCatalog = release;
+              window.fetch = (...args) => originalFetch(...args).then(async (response) => {
+                if (String(args[0]).includes('/api/providers/presets/kimi/models')) await gate;
+                return response;
+              });
+              window.__latePreview = fetchNewProviderModels().finally(() => {
+                window.fetch = originalFetch;
+              });
+            }
+            """
+        )
+        expect(page.locator("#fetch-new-provider-models")).to_have_text("获取中…")
+        page.locator("#connection-dialog [data-close-connection]").first.click()
+        page.evaluate("window.__releasePreviewCatalog()")
+        page.evaluate("window.__latePreview")
+        page.locator('button[data-add-capability="llm"]').click()
+        expect(page.locator("#connection-dialog")).to_be_visible()
+        page.locator("#provider-connection-form [name=preset]").select_option("kimi")
+        expect(
+            page.locator("#new-provider-model-list button[data-new-provider-model]")
+        ).to_have_count(0)
+        expect(
+            page.locator("#provider-connection-form button[type=submit]")
+        ).to_be_disabled()
+        browser.close()
+
+
 def test_goal4_substantive_setting_change_revokes_browser_authorization(
     loopback_app: _LoopbackApp,
 ) -> None:

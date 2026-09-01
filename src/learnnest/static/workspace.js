@@ -106,6 +106,13 @@ const providerModelFeedback = document.querySelector("#provider-model-feedback")
 const providerModelList = document.querySelector("#provider-model-list");
 const providerModelEmpty = document.querySelector("#provider-model-empty");
 const saveProviderModelButton = document.querySelector("#save-provider-model");
+const providerKeyEntry = document.querySelector("#provider-key-entry");
+const providerKeyEntryLink = document.querySelector("#provider-key-entry-link");
+const newProviderModelSection = document.querySelector("#new-provider-model-section");
+const fetchNewProviderModelsButton = document.querySelector("#fetch-new-provider-models");
+const newProviderModelFeedback = document.querySelector("#new-provider-model-feedback");
+const newProviderModelList = document.querySelector("#new-provider-model-list");
+const newProviderModelEmpty = document.querySelector("#new-provider-model-empty");
 const deleteConnectionDialog = document.querySelector("#delete-connection-dialog");
 const deleteConnectionForm = document.querySelector("#delete-connection-form");
 const deleteConnectionName = document.querySelector("#delete-connection-name");
@@ -173,6 +180,10 @@ let pendingModelConnection = null;
 let providerModelRequestToken = 0;
 let providerModelCandidates = [];
 let selectedProviderModel = null;
+let newProviderModelRequestToken = 0;
+let newProviderModelCandidates = [];
+let selectedNewProviderModel = null;
+let newProviderModelPreset = null;
 let providerSettingsMutationRevision = 0;
 const dirtySettingsForms = new Set();
 let currentSnapshot = { inbox: [], processing: [], library: [] };
@@ -626,12 +637,112 @@ async function refreshWindowsVoices() {
   windowsVoicesLoaded = true;
 }
 
+function resetNewProviderModelState() {
+  newProviderModelRequestToken += 1;
+  newProviderModelCandidates = [];
+  selectedNewProviderModel = null;
+  newProviderModelPreset = providerForm.elements.preset.value;
+  newProviderModelList.replaceChildren();
+  newProviderModelEmpty.hidden = true;
+  fetchNewProviderModelsButton.disabled = false;
+  fetchNewProviderModelsButton.textContent = "获取模型";
+}
+
+function currentProviderAdapter() {
+  const preset = providerForm.elements.preset.value;
+  return (latestProviderSettings.adapters || []).find((adapter) => adapter.preset === preset) || null;
+}
+
 async function refreshProviderConnectionFields() {
   const preset = providerForm.elements.preset.value;
+  const adapter = currentProviderAdapter();
   const local = ["windows-tts", "local-asr", "local-ocr"].includes(preset);
   providerKeyField.hidden = local;
   if (local) providerForm.elements.api_key.value = "";
+  const keyEntry = !local && adapter?.key_entry ? adapter.key_entry : null;
+  providerKeyEntry.hidden = !keyEntry;
+  if (keyEntry) providerKeyEntryLink.href = keyEntry;
+  const requiresModel = Boolean(adapter?.requires_model);
+  newProviderModelSection.hidden = !requiresModel;
+  if (!requiresModel || newProviderModelPreset !== preset || !connectionDialog.open) {
+    resetNewProviderModelState();
+    if (requiresModel) {
+      newProviderModelFeedback.textContent = adapter.catalog_mode === "curated"
+        ? "这个服务使用语栖内置支持列表；获取后仍需明确选择一个模型。"
+        : "填写 API Key 后获取模型，再明确选择一个模型；不会自动使用默认模型。";
+    }
+  }
+  if (requiresModel) {
+    providerForm.querySelector('button[type="submit"]').disabled = !selectedNewProviderModel;
+  } else {
+    providerForm.querySelector('button[type="submit"]').disabled = !preset;
+  }
   await refreshWindowsVoices();
+}
+
+function newProviderModelRequestIsCurrent(token) {
+  return token === newProviderModelRequestToken && connectionDialog.open;
+}
+
+function renderNewProviderModels() {
+  newProviderModelList.innerHTML = newProviderModelCandidates.map((item) => {
+    const selected = item.id === selectedNewProviderModel;
+    const owner = item.owned_by ? `<small>${escapeHtml(item.owned_by)}</small>` : "";
+    return `<button class="provider-model-option${selected ? " is-selected" : ""}" type="button" data-new-provider-model="${escapeHtml(item.id)}" aria-pressed="${selected}"><strong>${escapeHtml(item.id)}</strong>${owner}</button>`;
+  }).join("");
+  newProviderModelList.querySelectorAll("button[data-new-provider-model]").forEach((button) => button.addEventListener("click", () => {
+    selectedNewProviderModel = button.dataset.newProviderModel;
+    providerForm.querySelector('button[type="submit"]').disabled = false;
+    renderNewProviderModels();
+  }));
+  newProviderModelEmpty.hidden = newProviderModelCandidates.length > 0;
+}
+
+async function fetchNewProviderModels() {
+  const preset = providerForm.elements.preset.value;
+  const adapter = currentProviderAdapter();
+  if (!adapter?.requires_model || !preset) return;
+  const key = providerForm.elements.api_key.value.trim();
+  if (adapter.catalog_mode !== "curated" && !key) {
+    newProviderModelFeedback.textContent = "请先填写 API Key，再获取模型。";
+    say(newProviderModelFeedback.textContent);
+    return;
+  }
+  const token = ++newProviderModelRequestToken;
+  fetchNewProviderModelsButton.disabled = true;
+  fetchNewProviderModelsButton.textContent = "获取中…";
+  newProviderModelFeedback.textContent = "正在读取模型目录…";
+  selectedNewProviderModel = null;
+  newProviderModelCandidates = [];
+  renderNewProviderModels();
+  try {
+    const result = await api(`/api/providers/presets/${encodeURIComponent(preset)}/models`, {
+      method: "POST",
+      body: JSON.stringify({ api_key: key }),
+    });
+    if (!newProviderModelRequestIsCurrent(token)) return;
+    newProviderModelCandidates = Array.isArray(result.models) ? result.models : [];
+    renderNewProviderModels();
+    const sourceLabel = result.source === "curated" ? "内置支持列表" : "实时目录";
+    if (!newProviderModelCandidates.length) {
+      newProviderModelFeedback.textContent = "官方目录中没有可选择的兼容模型。";
+      newProviderModelEmpty.textContent = "官方目录中没有可选择的兼容模型。";
+    } else {
+      newProviderModelFeedback.textContent = `已获取 ${newProviderModelCandidates.length} 个模型（${sourceLabel}）：${result.note || ""}请明确选择一个模型后再保存。`;
+      newProviderModelEmpty.hidden = true;
+    }
+  } catch (error) {
+    if (!newProviderModelRequestIsCurrent(token)) return;
+    newProviderModelCandidates = [];
+    renderNewProviderModels();
+    newProviderModelFeedback.textContent = error.message;
+    say(error.message);
+  } finally {
+    if (token === newProviderModelRequestToken) {
+      fetchNewProviderModelsButton.disabled = false;
+      fetchNewProviderModelsButton.textContent = "获取模型";
+    }
+  }
 }
 
 async function loadProviderSettings(defaultOutput = null, protectDirty = false) {
@@ -1607,6 +1718,12 @@ providerForm.addEventListener("submit", async (event) => {
   const form = new FormData(submittedForm);
   const preset = String(form.get("preset"));
   const key = String(form.get("api_key") || "").trim();
+  const adapter = (latestProviderSettings.adapters || []).find((item) => item.preset === preset) || null;
+  if (adapter?.requires_model && !selectedNewProviderModel) {
+    providerFeedback.textContent = "请先获取并选择具体模型，再保存连接。";
+    say(providerFeedback.textContent);
+    return;
+  }
   const finishSaving = startProviderSave(event);
   try {
     const settings = await api("/api/providers/connections", {
@@ -1614,6 +1731,7 @@ providerForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({
         name: form.get("name"), preset,
         ...(key ? { api_key: key } : {}),
+        ...(adapter?.requires_model ? { model: selectedNewProviderModel } : {}),
         ...(preset === "windows-tts" ? { voice: form.get("voice") } : {}),
       }),
     });
@@ -1622,9 +1740,12 @@ providerForm.addEventListener("submit", async (event) => {
     suggestProviderConnectionName();
     providerSettingsMutationRevision += 1;
     renderProviderSettings(settings);
-    providerFeedback.textContent = "连接已保存；密钥不会显示在页面中。";
+    providerFeedback.textContent = adapter?.requires_model
+      ? `连接已保存：${selectedNewProviderModel}；密钥不会显示在页面中。`
+      : "连接已保存；密钥不会显示在页面中。";
     say(providerFeedback.textContent);
     connectionDialog.close();
+    await refreshProviderConnectionFields().catch(() => {});
   } catch (error) { showProviderUpdateFailure(error); } finally { finishSaving(); }
 });
 
@@ -1632,6 +1753,14 @@ providerForm.elements.preset.addEventListener("change", () => {
   suggestProviderConnectionName();
   windowsVoicesLoaded = false;
   refreshProviderConnectionFields().catch((error) => say(error.message));
+});
+
+fetchNewProviderModelsButton.addEventListener("click", fetchNewProviderModels);
+connectionDialog.addEventListener("close", () => {
+  newProviderModelRequestToken += 1;
+  newProviderModelCandidates = [];
+  selectedNewProviderModel = null;
+  newProviderModelPreset = null;
 });
 
 providerModelForm.addEventListener("submit", saveProviderModel);

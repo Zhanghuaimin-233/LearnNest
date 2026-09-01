@@ -8,12 +8,18 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+import httpx
 from openai import OpenAI
 from pydantic import SecretStr, TypeAdapter
 
 from learnnest.citation_audit import (
     generated_citation_audit_v12_json_schema,
     statement_citation_packet_sha256,
+)
+from learnnest.llm_transports import (
+    NativeLlmConfig,
+    build_native_llm_transport,
+    safe_provider_diagnostic as safe_provider_diagnostic,
 )
 from learnnest.evidence_organization import organization_response_json_schema
 from learnnest.evidence_unit_models import (
@@ -47,7 +53,6 @@ from learnnest.reader_templates import (
 _MIMO_BASE_URL = "https://api.xiaomimimo.com/v1"
 _MIMO_MODEL = "mimo-v2.5"
 DEFAULT_NOTE_SAFE_INPUT_TOKENS = 64_000
-_API_KEY_PATTERN = re.compile(r"\b(?:sk|tp)-[A-Za-z0-9_-]{8,}\b")
 _PROVIDER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _JSON_RESPONSE_MODES = {"json_object", "json_schema", "prompt_only"}
 _WRITER_OUTPUT_STRATEGIES = {
@@ -1317,8 +1322,8 @@ class MimoQualityNoteProvider(OpenAICompatibleQualityNoteProvider):
         )
 
 
-class OpenAICompatibleAssistedNoteProvider(_OpenAICompatibleChatTransport):
-    """OpenAI-compatible Markdown transport for the isolated assisted route."""
+class _AssistedMarkdownPrompts:
+    """Assisted Writer/Reviewer Markdown prompts shared by every wire family."""
 
     def write_markdown(self, dossier_json: str) -> str:
         _assert_assisted_input_budget(self, dossier_json)
@@ -1384,6 +1389,34 @@ class OpenAICompatibleAssistedNoteProvider(_OpenAICompatibleChatTransport):
         )
 
 
+class OpenAICompatibleAssistedNoteProvider(
+    _OpenAICompatibleChatTransport, _AssistedMarkdownPrompts
+):
+    """OpenAI-compatible Markdown transport for the isolated assisted route."""
+
+
+class NativeLlmAssistedNoteProvider(_AssistedMarkdownPrompts):
+    """Native Responses/Anthropic/Gemini Markdown transport for the assisted route."""
+
+    def __init__(
+        self,
+        config: NativeLlmConfig,
+        *,
+        http_client_factory: Callable[..., Any] = httpx.Client,
+    ) -> None:
+        self._transport = build_native_llm_transport(
+            config,
+            error_type=NoteProviderError,
+            http_client_factory=http_client_factory,
+        )
+        self.name = self._transport.name
+        self.model = self._transport.model
+        self.safe_input_tokens = self._transport.safe_input_tokens
+
+    def _complete_text(self, messages: list[dict[str, str]], *, operation: str) -> str:
+        return self._transport.complete_text(messages, operation=operation)
+
+
 def _assert_quality_input_budget(
     provider: OpenAICompatibleQualityNoteProvider, *payloads: str
 ) -> None:
@@ -1398,7 +1431,7 @@ def _assert_quality_input_budget(
 
 
 def _assert_assisted_input_budget(
-    provider: OpenAICompatibleAssistedNoteProvider, *payloads: str
+    provider: _AssistedMarkdownPrompts, *payloads: str
 ) -> None:
     estimated_tokens = (
         sum(len(payload.encode("utf-8")) for payload in payloads) + 2_048 + 1
@@ -1407,46 +1440,3 @@ def _assert_assisted_input_budget(
         raise NoteProviderError(
             f"assisted input exceeds safe token budget before {provider.name} call"
         )
-
-
-def safe_provider_diagnostic(error: Exception, api_key: SecretStr) -> str:
-    secret = api_key.get_secret_value()
-    status_code = getattr(error, "status_code", None)
-    if not isinstance(status_code, int):
-        return type(error).__name__
-
-    parts = [f"HTTP {status_code}"]
-    body = getattr(error, "body", None)
-    response = getattr(error, "response", None)
-    details: Mapping[str, Any] | None = None
-    if isinstance(body, Mapping):
-        nested = body.get("error")
-        details = nested if isinstance(nested, Mapping) else body
-    if details is None and response is not None:
-        try:
-            response_body = response.json()
-        except (ValueError, TypeError):
-            response_body = None
-        if isinstance(response_body, Mapping):
-            nested = response_body.get("error")
-            details = nested if isinstance(nested, Mapping) else response_body
-    if details is not None:
-        for key in ("code", "type", "message"):
-            value = details.get(key)
-            if isinstance(value, (str, int)) and str(value).strip():
-                parts.append(f"{key}={_scrub_diagnostic(str(value), secret)}")
-
-    request_id = getattr(error, "request_id", None)
-    if not isinstance(request_id, str) or not request_id.strip():
-        headers = getattr(response, "headers", None)
-        if headers is not None:
-            request_id = headers.get("x-request-id")
-    if isinstance(request_id, str) and request_id.strip():
-        parts.append(f"request_id={_scrub_diagnostic(request_id, secret)}")
-    return "; ".join(parts)
-
-
-def _scrub_diagnostic(value: str, secret: str) -> str:
-    scrubbed = value.replace(secret, "***") if secret else value
-    scrubbed = _API_KEY_PATTERN.sub("***", scrubbed)
-    return " ".join(scrubbed.split())[:240]

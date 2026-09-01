@@ -87,6 +87,7 @@ from learnnest.provider_service import (
     execute_direct_provider_call,
     fetch_provider_model_catalog,
     podcast_provider_from_snapshot,
+    preview_provider_model_catalog,
     save_provider_model,
     tts_provider_from_snapshot,
 )
@@ -257,6 +258,13 @@ def provider_connect(
     if preset not in presets:
         typer.echo("ERROR: unknown provider preset", err=True)
         raise typer.Exit(code=1)
+    if presets[preset].default_model is None and not (model or "").strip():
+        typer.echo(
+            "ERROR: 该服务需要先显式选择模型；"
+            "请先运行 learnnest provider preview-models，再通过 --model 指定。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     key = ""
     if presets[preset].requires_secret:
         key = typer.prompt("API key", hide_input=True)
@@ -315,6 +323,32 @@ def provider_models(
         typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(code=1) from error
     for item in models:
+        typer.echo(item["id"])
+
+
+@provider_app.command("preview-models")
+def provider_preview_models(
+    preset: Annotated[
+        str,
+        typer.Argument(help="Provider preset key, e.g. openai, kimi, glm"),
+    ],
+) -> None:
+    """Preview one preset's live/curated model catalog without persistence."""
+    presets = connection_presets()
+    if preset not in presets:
+        typer.echo("ERROR: unknown provider preset", err=True)
+        raise typer.Exit(code=1)
+    key = ""
+    if presets[preset].requires_secret and presets[preset].catalog_mode == "live":
+        key = typer.prompt("API key", hide_input=True)
+    try:
+        preview = preview_provider_model_catalog(preset, key)
+    except (ProviderModelCatalogError, OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"source={preview.source}")
+    typer.echo(preview.note)
+    for item in preview.models:
         typer.echo(item["id"])
 
 

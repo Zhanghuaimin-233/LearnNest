@@ -14,9 +14,33 @@ from learnnest.provider_profiles import (
 
 
 def test_product_registry_has_only_declared_cloud_and_local_capabilities() -> None:
-    assert set(PRESETS) == {"mimo", "deepseek", "mimo-tts", "local-asr", "local-ocr"}
+    assert set(PRESETS) == {
+        "mimo",
+        "deepseek",
+        "openai",
+        "kimi",
+        "glm",
+        "bailian",
+        "ark",
+        "hunyuan",
+        "minimax",
+        "longcat",
+        "antling",
+        "xai",
+        "openrouter",
+        "modelscope",
+        "nvidia-nim",
+        "anthropic",
+        "gemini",
+        "mimo-tts",
+        "local-asr",
+        "local-ocr",
+    }
     assert PRESETS["mimo"].capability == "llm"
     assert PRESETS["deepseek"].capability == "llm"
+    assert PRESETS["openai"].capability == "llm"
+    assert PRESETS["anthropic"].capability == "llm"
+    assert PRESETS["gemini"].capability == "llm"
     assert PRESETS["mimo-tts"].capability == "tts"
     assert PRESETS["local-asr"].requires_secret is False
     assert PRESETS["local-ocr"].requires_secret is False
@@ -41,7 +65,7 @@ def test_connections_are_capability_checked_and_secret_free_in_settings(
 
 
 @pytest.mark.parametrize(
-    "preset", ["openai", "anthropic", "gemini", "coding-plan", "openai-compatible"]
+    "preset", ["coding-plan", "openai-compatible", "cc-switch", "siliconflow"]
 )
 def test_removed_product_presets_are_rejected(tmp_path: Path, preset: str) -> None:
     with pytest.raises(ValueError, match="unsupported provider"):

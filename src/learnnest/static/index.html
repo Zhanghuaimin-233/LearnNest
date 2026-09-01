@@ -335,6 +335,13 @@
         <label>服务<select name="preset"><option value="">正在读取支持的服务</option></select><small id="provider-service-hint">选择服务后填写连接名称。</small></label>
         <label id="windows-voice-field">Windows 语音<select name="voice" id="windows-voice"></select></label>
         <label id="provider-key-field" hidden>API Key（仅保存时输入）<input name="api_key" type="password" autocomplete="new-password" placeholder="仅云端服务需要填写" /><small>本地 ASR、OCR 和 Windows 语音不需要密钥。</small></label>
+        <p id="provider-key-entry" class="dialog-note" hidden>还没有 API Key？到 <a id="provider-key-entry-link" href="#" target="_blank" rel="noreferrer">官方控制台</a> 创建；密钥只会加密保存在本机。</p>
+        <div id="new-provider-model-section" hidden>
+          <div class="new-model-toolbar"><button type="button" id="fetch-new-provider-models" class="secondary-button">获取模型</button></div>
+          <p id="new-provider-model-feedback" class="inline-feedback" aria-live="polite">填写 API Key 后获取模型，再明确选择一个模型；不会自动使用默认模型。</p>
+          <div id="new-provider-model-list" class="provider-model-list"></div>
+          <p id="new-provider-model-empty" class="provider-capability-empty" hidden>官方目录中没有可选择的兼容模型。</p>
+        </div>
         <div class="dialog-actions"><button class="secondary-button" data-close-connection type="button">取消</button><button type="submit">保存连接</button></div>
       </form>
     </dialog>

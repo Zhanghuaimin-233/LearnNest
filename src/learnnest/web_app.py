@@ -81,10 +81,14 @@ from learnnest.provider_profiles import (
     settings_sha256,
     update_limits,
 )
-from learnnest.provider_model_catalog import ProviderModelCatalogError
+from learnnest.provider_model_catalog import (
+    ModelCatalogPreview,
+    ProviderModelCatalogError,
+)
 from learnnest.provider_service import (
     ProviderConnectionCheckError,
     fetch_provider_model_catalog,
+    preview_provider_model_catalog,
     run_provider_connection_check,
     save_provider_model,
 )
@@ -166,13 +170,36 @@ class DouyinFavoritesSelectRequest(BaseModel):
     aweme_ids: list[str] = Field(min_length=1, max_length=20)
 
 
+_PROVIDER_PRESET_KEYS = (
+    "windows-tts",
+    "mimo",
+    "deepseek",
+    "openai",
+    "kimi",
+    "glm",
+    "bailian",
+    "ark",
+    "hunyuan",
+    "minimax",
+    "longcat",
+    "antling",
+    "xai",
+    "openrouter",
+    "modelscope",
+    "nvidia-nim",
+    "anthropic",
+    "gemini",
+    "mimo-tts",
+    "local-asr",
+    "local-ocr",
+)
+
+
 class ProviderConnectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-    preset: Literal[
-        "windows-tts", "mimo", "deepseek", "mimo-tts", "local-asr", "local-ocr"
-    ]
+    preset: Literal[_PROVIDER_PRESET_KEYS]
     api_key: str | None = Field(default=None, min_length=1, max_length=2048)
     endpoint: str | None = Field(default=None, max_length=512)
     model: str | None = Field(default=None, max_length=128)
@@ -203,6 +230,14 @@ class ProviderModelUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     model: str = Field(min_length=1, max_length=128)
+
+
+class ProviderPresetCatalogRequest(BaseModel):
+    """One transient key used only for this catalog preview request."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    api_key: str = Field(min_length=1, max_length=2048)
 
 
 class AutomationConfigureRequest(BaseModel):
@@ -649,6 +684,13 @@ class WebService:
         settings = public_provider_settings(self.output_root)
         current = load_settings(self.output_root)
         adapters = connection_presets()
+
+        def _provider_label(preset_key: str, provider: str) -> str:
+            adapter = adapters.get(preset_key)
+            return (adapter.display_name if adapter else None) or public_provider_label(
+                provider
+            )
+
         projected_connections: list[dict[str, object]] = []
         for item in settings["connections"]:
             name = str(item["name"])
@@ -662,7 +704,7 @@ class WebService:
             projected_connections.append(
                 {
                     "name": name,
-                    "provider": public_provider_label(str(item["provider"])),
+                    "provider": _provider_label(stored.preset, str(item["provider"])),
                     "state": public_connection_readability(self.output_root, stored),
                     "capability": item["capability"],
                     "model": item["model"],
@@ -683,10 +725,14 @@ class WebService:
             "adapters": [
                 {
                     "preset": preset,
-                    "name": public_provider_label(adapter.provider),
+                    "name": _provider_label(preset, adapter.provider),
                     "capability": _CAPABILITY_LABELS[adapter.capability],
                     "capability_key": adapter.capability,
                     "local": not adapter.requires_secret,
+                    "api_family": adapter.api_family,
+                    "catalog_mode": adapter.catalog_mode,
+                    "requires_model": adapter.default_model is None,
+                    "key_entry": adapter.key_entry_url,
                 }
                 for preset, adapter in adapters.items()
             ],
@@ -702,6 +748,13 @@ class WebService:
     def save_provider_connection(
         self, request: ProviderConnectionRequest
     ) -> dict[str, object]:
+        adapter = connection_presets().get(request.preset)
+        if (
+            adapter is not None
+            and adapter.default_model is None
+            and not (request.model or "").strip()
+        ):
+            raise ValueError("请先获取并选择具体模型，再保存连接。")
         try:
             connect_provider(
                 self.output_root,
@@ -722,6 +775,11 @@ class WebService:
                 str(self.output_root), connection_name
             )
         }
+
+    def provider_preset_model_catalog(
+        self, preset: str, api_key: str
+    ) -> ModelCatalogPreview:
+        return preview_provider_model_catalog(preset, api_key)
 
     def save_provider_model(
         self, connection_name: str, request: ProviderModelUpdateRequest
@@ -1423,6 +1481,35 @@ syncInitialHashBookmark();
             raise HTTPException(status_code=404, detail="连接不存在。") from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/api/providers/presets/{preset}/models")
+    def provider_preset_model_catalog_endpoint(
+        preset: str,
+        request: ProviderPresetCatalogRequest,
+        raw_request: Request,
+    ) -> dict[str, object]:
+        if raw_request.query_params:
+            raise HTTPException(
+                status_code=422,
+                detail="模型目录请求不接受 URL、Key、Provider 或自定义参数。",
+            )
+        try:
+            preview = service.provider_preset_model_catalog(preset, request.api_key)
+        except ProviderModelCatalogError as error:
+            status_code = (
+                404
+                if error.code in {"unsupported_preset", "connection_not_found"}
+                else 409
+            )
+            raise HTTPException(
+                status_code=status_code, detail=error.public_message
+            ) from error
+        return {
+            "source": preview.source,
+            "models": preview.models,
+            "note": preview.note,
+            "adapter_revision": preview.adapter_revision,
+        }
 
     @app.get("/api/providers/windows-tts/voices")
     def windows_tts_voices() -> dict[str, object]:

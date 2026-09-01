@@ -521,6 +521,9 @@ input:focus, select:focus { border-color: var(--blue); outline: 3px solid rgba(5
 .model-selection-toolbar { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: end; gap: 12px; }
 .model-selection-toolbar label { display: grid; min-width: 0; gap: 7px; color: var(--ink); font-size: 11px; font-weight: 650; }
 .model-selection-toolbar input { width: 100%; min-width: 0; }
+.new-model-toolbar { display: flex; justify-content: flex-start; margin: 2px 0 10px; }
+#new-provider-model-list { max-height: 236px; overflow-y: auto; padding-right: 2px; }
+#new-provider-model-section:not([hidden]) { margin-top: 12px; display: grid; gap: 8px; }
 .inline-feedback { min-height: 18px; margin: 0; color: var(--slate); font-size: 10px; line-height: 1.55; }
 .provider-model-list { min-width: 0; display: grid; gap: 7px; }
 .provider-model-option { min-width: 0; padding: 11px 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: var(--paper); text-align: left; }

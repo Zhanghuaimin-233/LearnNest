@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
 
 Capability = Literal["asr", "ocr", "llm", "tts"]
+CatalogMode = Literal["live", "curated"]
+ApiFamily = Literal["openai_chat", "openai_responses", "anthropic", "gemini", "local"]
 WriterStrategy = Literal[
     "native_json_schema", "tool_call", "json_object", "prompted_json"
 ]
@@ -68,17 +70,24 @@ class ProviderPreset(_Model):
     preset: str
     capability: Capability
     provider: str
-    api_family: Literal["openai_chat", "local"]
+    api_family: ApiFamily
     endpoint: str
-    default_model: str
+    default_model: str | None = None
+    catalog_mode: CatalogMode | None = None
     catalog_endpoint: str | None = None
     allowed_models: tuple[str, ...] = ()
+    display_name: str | None = None
+    key_entry_url: str | None = None
     adapter_revision: str = "1"
     requires_secret: bool = True
 
 
 # OpenAI-compatible is a transport implementation detail shared by only the
 # MiMo and DeepSeek adapters; it is intentionally absent as a product choice.
+# W3.2 adds reviewed official LLM presets: every remote preset declares a fixed
+# official endpoint, its native api_family, an explicit allowlist, and whether
+# its model catalog is fetched live or curated. Presets without default_model
+# never save implicitly: the user must pick one concrete model first.
 PRESETS: dict[str, ProviderPreset] = {
     "mimo": ProviderPreset(
         preset="mimo",
@@ -87,6 +96,7 @@ PRESETS: dict[str, ProviderPreset] = {
         api_family="openai_chat",
         endpoint="https://api.xiaomimimo.com/v1",
         default_model="mimo-v2.5",
+        catalog_mode="live",
         catalog_endpoint="https://api.xiaomimimo.com/v1/models",
         allowed_models=("mimo-v2.5", "mimo-v2.5-pro"),
     ),
@@ -97,8 +107,264 @@ PRESETS: dict[str, ProviderPreset] = {
         api_family="openai_chat",
         endpoint="https://api.deepseek.com/v1",
         default_model="deepseek-v4-pro",
+        catalog_mode="live",
         catalog_endpoint="https://api.deepseek.com/models",
         allowed_models=("deepseek-v4-flash", "deepseek-v4-pro"),
+    ),
+    "openai": ProviderPreset(
+        preset="openai",
+        capability="llm",
+        provider="openai",
+        api_family="openai_responses",
+        endpoint="https://api.openai.com/v1",
+        catalog_mode="live",
+        catalog_endpoint="https://api.openai.com/v1/models",
+        allowed_models=(
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.2",
+            "gpt-5.1",
+            "gpt-5",
+        ),
+        display_name="OpenAI",
+        key_entry_url="https://platform.openai.com/api-keys",
+    ),
+    "kimi": ProviderPreset(
+        preset="kimi",
+        capability="llm",
+        provider="moonshot-kimi",
+        api_family="openai_chat",
+        endpoint="https://api.moonshot.cn/v1",
+        catalog_mode="live",
+        catalog_endpoint="https://api.moonshot.cn/v1/models",
+        allowed_models=(
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
+            "kimi-k2.6",
+        ),
+        display_name="Kimi",
+        key_entry_url="https://platform.kimi.com/console/api-keys",
+    ),
+    "glm": ProviderPreset(
+        preset="glm",
+        capability="llm",
+        provider="zhipu-glm",
+        api_family="openai_chat",
+        endpoint="https://open.bigmodel.cn/api/paas/v4",
+        catalog_mode="curated",
+        allowed_models=(
+            "glm-5.3",
+            "glm-5.3-flash",
+            "glm-5.2",
+            "glm-5.1",
+            "glm-5",
+            "glm-4.7",
+            "glm-4.6",
+        ),
+        display_name="智谱 GLM",
+        key_entry_url="https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+    ),
+    "bailian": ProviderPreset(
+        preset="bailian",
+        capability="llm",
+        provider="alibaba-bailian",
+        api_family="openai_chat",
+        endpoint="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        catalog_mode="curated",
+        allowed_models=(
+            "qwen3.8-max",
+            "qwen3.7-plus",
+            "qwen3.8-flash",
+            "qwen3-max",
+            "qwen-plus",
+            "qwen3-coder-plus",
+        ),
+        display_name="阿里云百炼",
+        key_entry_url="https://bailian.console.aliyun.com",
+    ),
+    "ark": ProviderPreset(
+        preset="ark",
+        capability="llm",
+        provider="volcengine-ark",
+        api_family="openai_chat",
+        endpoint="https://ark.cn-beijing.volces.com/api/v3",
+        catalog_mode="curated",
+        allowed_models=(
+            "doubao-seed-evolving",
+            "doubao-seed-2-1-pro-260628",
+            "doubao-seed-2-1-turbo-260628",
+            "doubao-seed-2-0-pro-260215",
+            "doubao-seed-2-0-lite-260428",
+        ),
+        display_name="火山方舟（豆包）",
+        key_entry_url="https://console.volcengine.com/ark",
+    ),
+    "hunyuan": ProviderPreset(
+        preset="hunyuan",
+        capability="llm",
+        provider="tencent-hunyuan",
+        api_family="openai_chat",
+        endpoint="https://tokenhub.tencentmaas.com/v1",
+        catalog_mode="live",
+        catalog_endpoint="https://tokenhub.tencentmaas.com/v1/models",
+        allowed_models=("hy4-preview", "hy3"),
+        display_name="腾讯混元（TokenHub）",
+        key_entry_url="https://console.cloud.tencent.com/tokenhub/apikey",
+    ),
+    "minimax": ProviderPreset(
+        preset="minimax",
+        capability="llm",
+        provider="minimax",
+        api_family="openai_chat",
+        endpoint="https://api.minimaxi.com/v1",
+        catalog_mode="live",
+        catalog_endpoint="https://api.minimaxi.com/v1/models",
+        allowed_models=(
+            "MiniMax-M3",
+            "MiniMax-M2.7",
+            "MiniMax-M2.5",
+            "MiniMax-M2.1",
+        ),
+        display_name="MiniMax",
+        key_entry_url="https://platform.minimaxi.com",
+    ),
+    "longcat": ProviderPreset(
+        preset="longcat",
+        capability="llm",
+        provider="meituan-longcat",
+        api_family="openai_chat",
+        endpoint="https://api.longcat.chat/openai/v1",
+        catalog_mode="live",
+        catalog_endpoint="https://api.longcat.chat/openai/v1/models",
+        allowed_models=("LongCat-2.0",),
+        display_name="美团 LongCat",
+        key_entry_url="https://longcat.chat/platform/api_keys",
+    ),
+    "antling": ProviderPreset(
+        preset="antling",
+        capability="llm",
+        provider="ant-ling",
+        api_family="openai_chat",
+        endpoint="https://api.ant-ling.com/v1",
+        catalog_mode="curated",
+        allowed_models=(
+            "Ling-3.0-flash",
+            "Ling-2.6-1T",
+            "Ling-2.6-flash",
+            "Ring-2.6-1T",
+        ),
+        display_name="蚂蚁百灵",
+        key_entry_url="https://chat.ant-ling.com/ope",
+    ),
+    "xai": ProviderPreset(
+        preset="xai",
+        capability="llm",
+        provider="xai",
+        api_family="openai_chat",
+        endpoint="https://api.x.ai/v1",
+        catalog_mode="live",
+        catalog_endpoint="https://api.x.ai/v1/models",
+        allowed_models=("grok-4.6", "grok-4.5", "grok-4.3", "grok-4.3-latest"),
+        display_name="xAI Grok",
+        key_entry_url="https://console.x.ai",
+    ),
+    "openrouter": ProviderPreset(
+        preset="openrouter",
+        capability="llm",
+        provider="openrouter",
+        api_family="openai_chat",
+        endpoint="https://openrouter.ai/api/v1",
+        catalog_mode="live",
+        catalog_endpoint="https://openrouter.ai/api/v1/models",
+        allowed_models=(
+            "openai/gpt-5.6-luna",
+            "anthropic/claude-sonnet-4.5",
+            "google/gemini-2.5-pro",
+            "deepseek/deepseek-v4-flash-0731",
+            "z-ai/glm-5.3",
+            "qwen/qwen3.8-27b",
+            "xiaomi/mimo-v2.5",
+            "tencent/hy3",
+        ),
+        display_name="OpenRouter（多模型平台）",
+        key_entry_url="https://openrouter.ai/keys",
+    ),
+    "modelscope": ProviderPreset(
+        preset="modelscope",
+        capability="llm",
+        provider="modelscope",
+        api_family="openai_chat",
+        endpoint="https://api-inference.modelscope.cn/v1",
+        catalog_mode="live",
+        catalog_endpoint="https://api-inference.modelscope.cn/v1/models",
+        allowed_models=(
+            "Qwen/Qwen3-235B-A22B",
+            "deepseek-ai/DeepSeek-V4-Pro",
+            "ZhipuAI/GLM-5.2",
+            "MiniMax/MiniMax-M3",
+        ),
+        display_name="ModelScope（多模型平台）",
+        key_entry_url="https://modelscope.cn/my/myaccesstoken",
+    ),
+    "nvidia-nim": ProviderPreset(
+        preset="nvidia-nim",
+        capability="llm",
+        provider="nvidia-nim",
+        api_family="openai_chat",
+        endpoint="https://integrate.api.nvidia.com/v1",
+        catalog_mode="live",
+        catalog_endpoint="https://integrate.api.nvidia.com/v1/models",
+        allowed_models=(
+            "meta/llama-3.3-70b-instruct",
+            "deepseek-ai/deepseek-r1",
+            "qwen/qwq-32b",
+            "openai/gpt-oss-120b",
+        ),
+        display_name="NVIDIA NIM（多模型平台）",
+        key_entry_url="https://build.nvidia.com",
+    ),
+    "anthropic": ProviderPreset(
+        preset="anthropic",
+        capability="llm",
+        provider="anthropic",
+        api_family="anthropic",
+        endpoint="https://api.anthropic.com",
+        catalog_mode="live",
+        catalog_endpoint="https://api.anthropic.com/v1/models",
+        allowed_models=(
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+            "claude-sonnet-4-5",
+            "claude-opus-4-6",
+        ),
+        display_name="Anthropic Claude",
+        key_entry_url="https://platform.claude.com/settings/keys",
+    ),
+    "gemini": ProviderPreset(
+        preset="gemini",
+        capability="llm",
+        provider="google-gemini",
+        api_family="gemini",
+        endpoint="https://generativelanguage.googleapis.com",
+        catalog_mode="live",
+        catalog_endpoint="https://generativelanguage.googleapis.com/v1beta/models",
+        allowed_models=(
+            "gemini-3.1-pro-preview",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ),
+        display_name="Google Gemini",
+        key_entry_url="https://aistudio.google.com/apikey",
     ),
     "mimo-tts": ProviderPreset(
         preset="mimo-tts",
@@ -149,13 +415,21 @@ def _supported_models(preset: ProviderPreset) -> tuple[str, ...]:
     return preset.allowed_models or (preset.default_model,)
 
 
+def llm_preset_by_provider(provider: str) -> ProviderPreset | None:
+    """Return the one LLM preset that owns a persisted provider identity."""
+    for preset in PRESETS.values():
+        if preset.provider == provider and preset.capability == "llm":
+            return preset
+    return None
+
+
 class ProviderConnection(_Model):
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
     connection_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
     preset: str
     capability: Capability
     provider: str
-    api_family: Literal["openai_chat", "local"]
+    api_family: ApiFamily
     endpoint: str
     model: str
     secret_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
@@ -377,13 +651,16 @@ def connect(
         base = _CONNECTION_PRESETS[preset]
     except KeyError as error:
         raise ValueError("unsupported provider") from error
+    if base.default_model is None and endpoint is not None:
+        raise ValueError("provider endpoint is fixed to the official entry")
     selected_endpoint = endpoint or base.endpoint
-    selected_model = (model or base.default_model).strip()
+    selected_model = model or base.default_model
+    if selected_model is None:
+        raise ValueError("provider model is required")
+    selected_model = selected_model.strip()
     if selected_model not in _supported_models(base):
         raise ValueError("unsupported provider model")
-    if base.api_family == "openai_chat" and not selected_endpoint.startswith(
-        "https://"
-    ):
+    if base.api_family != "local" and not selected_endpoint.startswith("https://"):
         raise ValueError("provider endpoint is invalid")
     if base.requires_secret and not (secret_value and secret_value.strip()):
         raise ValueError("provider secret is required")

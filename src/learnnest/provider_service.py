@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+import httpx
 from openai import OpenAI
 from pydantic import SecretStr
 
@@ -22,21 +23,35 @@ from learnnest.automation_store import (
     finish_provider_call,
     save_task_state,
 )
+from learnnest.llm_transports import (
+    NativeLlmConfig,
+    NativeLlmTransportError,
+    build_native_llm_transport,
+)
 from learnnest.models import ProviderBindingSnapshot
 from learnnest.note_providers import (
+    NativeLlmAssistedNoteProvider,
     OpenAICompatibleAssistedNoteProvider,
     OpenAICompatibleChatConfig,
 )
-from learnnest.podcast_providers import OpenAICompatiblePodcastProvider
+from learnnest.podcast_providers import (
+    NativeLlmPodcastProvider,
+    OpenAICompatiblePodcastProvider,
+)
 from learnnest.provider_profiles import (
     Capability,
     ProviderConnection,
     ProviderRoleSnapshot,
+    llm_preset_by_provider,
     load_settings,
     settings_sha256,
     update_connection_model,
 )
-from learnnest.provider_model_catalog import fetch_model_catalog
+from learnnest.provider_model_catalog import (
+    ModelCatalogPreview,
+    fetch_model_catalog,
+    preview_model_catalog,
+)
 from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
 from learnnest.tts_providers import (
     OpenAICompatibleTtsProvider,
@@ -71,6 +86,22 @@ def fetch_provider_model_catalog(
     """Fetch one manually requested, compatibility-filtered model directory."""
     return fetch_model_catalog(
         output_root, connection_name, client_factory=client_factory
+    )
+
+
+def preview_provider_model_catalog(
+    preset: str,
+    api_key: str,
+    *,
+    client_factory: Callable[..., Any] = OpenAI,
+    http_client_factory: Callable[..., Any] = httpx.Client,
+) -> ModelCatalogPreview:
+    """Preview one preset's catalog with a transient key and zero persistence."""
+    return preview_model_catalog(
+        preset,
+        api_key,
+        client_factory=client_factory,
+        http_client_factory=http_client_factory,
     )
 
 
@@ -205,8 +236,15 @@ def assisted_provider_from_snapshot(
     binding: FrozenBinding | AssistedConnectionSnapshot,
     *,
     client_factory: Callable[..., Any] = OpenAI,
-) -> OpenAICompatibleAssistedNoteProvider:
-    """Construct one Writer/Reviewer transport from an immutable secret reference."""
+    http_client_factory: Callable[..., Any] = httpx.Client,
+) -> OpenAICompatibleAssistedNoteProvider | NativeLlmAssistedNoteProvider:
+    """Construct one Writer/Reviewer transport from an immutable secret reference.
+
+    The transport family is resolved from the provider identity in the frozen
+    binding: OpenAI-compatible providers keep the shared Chat Completions
+    transport, and native Responses/Anthropic/Gemini connections use their own
+    wire protocol without hidden conversion.
+    """
     if isinstance(binding, AssistedConnectionSnapshot):
         endpoint = binding.endpoint_identity
         secret_id = binding.secret_id
@@ -219,14 +257,26 @@ def assisted_provider_from_snapshot(
         provider = binding.provider
         model = binding.model
     secret = _read_secret(output_root, secret_id)
-    return OpenAICompatibleAssistedNoteProvider(
-        OpenAICompatibleChatConfig(
+    native_family = _native_llm_family(provider)
+    if native_family is None:
+        return OpenAICompatibleAssistedNoteProvider(
+            OpenAICompatibleChatConfig(
+                provider_name=provider,
+                model=model,
+                base_url=endpoint,
+                api_key=secret,
+            ),
+            client_factory=client_factory,
+        )
+    return NativeLlmAssistedNoteProvider(
+        NativeLlmConfig(
             provider_name=provider,
             model=model,
             base_url=endpoint,
             api_key=secret,
+            api_family=native_family,
         ),
-        client_factory=client_factory,
+        http_client_factory=http_client_factory,
     )
 
 
@@ -235,15 +285,29 @@ def podcast_provider_from_snapshot(
     binding: FrozenBinding,
     *,
     client_factory: Callable[..., Any] = OpenAI,
-) -> OpenAICompatiblePodcastProvider:
-    """Construct one MiMo or DeepSeek podcast role without provider fallback."""
+    http_client_factory: Callable[..., Any] = httpx.Client,
+) -> OpenAICompatiblePodcastProvider | NativeLlmPodcastProvider:
+    """Construct one frozen podcast role without provider fallback."""
     _require_llm_binding(binding)
-    return OpenAICompatiblePodcastProvider(
-        _read_secret(output_root, binding.secret_id),
-        provider_name=binding.provider,
-        model=binding.model,
-        base_url=_require_endpoint(binding),
-        client_factory=client_factory,
+    secret = _read_secret(output_root, binding.secret_id)
+    native_family = _native_llm_family(binding.provider)
+    if native_family is None:
+        return OpenAICompatiblePodcastProvider(
+            secret,
+            provider_name=binding.provider,
+            model=binding.model,
+            base_url=_require_endpoint(binding),
+            client_factory=client_factory,
+        )
+    return NativeLlmPodcastProvider(
+        NativeLlmConfig(
+            provider_name=binding.provider,
+            model=binding.model,
+            base_url=_require_endpoint(binding),
+            api_key=secret,
+            api_family=native_family,
+        ),
+        http_client_factory=http_client_factory,
     )
 
 
@@ -276,11 +340,18 @@ def tts_provider_from_snapshot(
     )
 
 
+def _native_llm_family(
+    provider: str,
+) -> Literal["openai_responses", "anthropic", "gemini"] | None:
+    """Resolve one provider identity to its native (non-chat) wire family."""
+    preset = llm_preset_by_provider(provider)
+    if preset is None or preset.api_family in {"openai_chat", "local"}:
+        return None
+    return preset.api_family  # type: ignore[return-value]
+
+
 def _require_llm_binding(binding: FrozenBinding) -> None:
-    if binding.capability != "llm" or binding.provider not in {
-        "xiaomi-mimo",
-        "deepseek",
-    }:
+    if binding.capability != "llm" or llm_preset_by_provider(binding.provider) is None:
         raise ValueError("frozen binding cannot perform an LLM role")
 
 
@@ -306,6 +377,7 @@ def run_provider_connection_check(
     *,
     now: datetime | None = None,
     client_factory: Callable[..., Any] = OpenAI,
+    http_client_factory: Callable[..., Any] = httpx.Client,
 ) -> ProviderConnectionCheckResult:
     """Run one real, response-free functional check for the selected connection.
 
@@ -322,10 +394,12 @@ def run_provider_connection_check(
         raise ProviderConnectionCheckError("provider connection does not exist")
     if connection.api_family == "local":
         return _run_local_connection_check(connection)
-    if connection.api_family != "openai_chat" or connection.capability not in {
-        "llm",
-        "tts",
-    }:
+    if connection.api_family not in {
+        "openai_chat",
+        "openai_responses",
+        "anthropic",
+        "gemini",
+    } or connection.capability not in {"llm", "tts"}:
         raise ProviderConnectionCheckError("connection cannot perform a real check")
     if connection.secret_id is None:
         raise ProviderConnectionCheckError("provider secret is unavailable")
@@ -363,7 +437,12 @@ def run_provider_connection_check(
         ) from error
     try:
         if connection.capability == "llm":
-            _check_llm_connection(connection, secret.get_secret_value(), client_factory)
+            _check_llm_connection(
+                connection,
+                secret.get_secret_value(),
+                client_factory,
+                http_client_factory,
+            )
         else:
             _check_tts_connection(connection, secret, client_factory)
     except Exception as error:
@@ -388,7 +467,31 @@ def _check_llm_connection(
     connection: ProviderConnection,
     secret: str,
     client_factory: Callable[..., Any],
+    http_client_factory: Callable[..., Any],
 ) -> None:
+    native_family = _native_llm_family(connection.provider)
+    if native_family is not None and connection.api_family == native_family:
+        transport = build_native_llm_transport(
+            NativeLlmConfig(
+                provider_name=connection.provider,
+                model=connection.model,
+                base_url=connection.endpoint,
+                api_key=SecretStr(secret),
+                api_family=native_family,
+            ),
+            error_type=NativeLlmTransportError,
+            http_client_factory=http_client_factory,
+        )
+        text = transport.complete_text(
+            [
+                {"role": "system", "content": "Reply with OK only."},
+                {"role": "user", "content": "Connection check."},
+            ],
+            operation="connection check",
+        )
+        if not text.strip():
+            raise RuntimeError("empty provider response")
+        return
     client = client_factory(
         api_key=secret,
         base_url=connection.endpoint,

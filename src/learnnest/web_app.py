@@ -81,9 +81,12 @@ from learnnest.provider_profiles import (
     settings_sha256,
     update_limits,
 )
+from learnnest.provider_model_catalog import ProviderModelCatalogError
 from learnnest.provider_service import (
     ProviderConnectionCheckError,
+    fetch_provider_model_catalog,
     run_provider_connection_check,
+    save_provider_model,
 )
 from learnnest.tts_providers import (
     TtsProviderError,
@@ -194,6 +197,12 @@ class ProviderConnectionCheckRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     confirm_paid: Literal[True]
+
+
+class ProviderModelUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    model: str = Field(min_length=1, max_length=128)
 
 
 class AutomationConfigureRequest(BaseModel):
@@ -705,6 +714,22 @@ class WebService:
             )
         except ValueError as error:
             raise ValueError("连接配置无法保存。") from error
+        return self.provider_settings()
+
+    def provider_model_catalog(self, connection_name: str) -> dict[str, object]:
+        return {
+            "models": fetch_provider_model_catalog(
+                str(self.output_root), connection_name
+            )
+        }
+
+    def save_provider_model(
+        self, connection_name: str, request: ProviderModelUpdateRequest
+    ) -> dict[str, object]:
+        try:
+            save_provider_model(str(self.output_root), connection_name, request.model)
+        except ValueError as error:
+            raise ValueError(str(error)) from error
         return self.provider_settings()
 
     def delete_provider_connection(self, name: str) -> dict[str, object]:
@@ -1372,6 +1397,32 @@ syncInitialHashBookmark();
             ) from error
         except ValueError as error:
             raise HTTPException(status_code=409, detail="连接无法删除。") from error
+
+    @app.post("/api/providers/connections/{name}/models")
+    async def provider_model_catalog(name: str, request: Request) -> dict[str, object]:
+        if (await request.body()).strip() or request.query_params:
+            raise HTTPException(
+                status_code=422,
+                detail="模型目录请求不接受 URL、Key、Provider 或自定义参数。",
+            )
+        try:
+            return service.provider_model_catalog(name)
+        except ProviderModelCatalogError as error:
+            status_code = 404 if error.code == "connection_not_found" else 409
+            raise HTTPException(
+                status_code=status_code, detail=error.public_message
+            ) from error
+
+    @app.put("/api/providers/connections/{name}/model")
+    def save_provider_model_endpoint(
+        name: str, request: ProviderModelUpdateRequest
+    ) -> dict[str, object]:
+        try:
+            return service.save_provider_model(name, request)
+        except ProviderConnectionNotFoundError as error:
+            raise HTTPException(status_code=404, detail="连接不存在。") from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/api/providers/windows-tts/voices")
     def windows_tts_voices() -> dict[str, object]:

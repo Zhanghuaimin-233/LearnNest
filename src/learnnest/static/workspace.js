@@ -97,6 +97,16 @@ const providerServiceHint = document.querySelector("#provider-service-hint");
 const checkConnectionDialog = document.querySelector("#check-connection-dialog");
 const checkConnectionName = document.querySelector("#check-connection-name");
 const confirmCheckConnection = document.querySelector("#confirm-check-connection");
+const modelSelectionDialog = document.querySelector("#model-selection-dialog");
+const providerModelForm = document.querySelector("#provider-model-form");
+const modelSelectionCurrent = document.querySelector("#model-selection-current");
+const modelSelectionConnection = document.querySelector("#model-selection-connection");
+const fetchProviderModelsButton = document.querySelector("#fetch-provider-models");
+const providerModelSearch = document.querySelector("#provider-model-search");
+const providerModelFeedback = document.querySelector("#provider-model-feedback");
+const providerModelList = document.querySelector("#provider-model-list");
+const providerModelEmpty = document.querySelector("#provider-model-empty");
+const saveProviderModelButton = document.querySelector("#save-provider-model");
 const deleteConnectionDialog = document.querySelector("#delete-connection-dialog");
 const deleteConnectionForm = document.querySelector("#delete-connection-form");
 const deleteConnectionName = document.querySelector("#delete-connection-name");
@@ -160,6 +170,10 @@ let suggestedProviderConnectionName = "";
 let latestProviderSettings = { connections: [], adapters: [], roles: {}, readiness: null };
 let pendingCheckConnection = null;
 let pendingDeleteConnection = null;
+let pendingModelConnection = null;
+let providerModelRequestToken = 0;
+let providerModelCandidates = [];
+let selectedProviderModel = null;
 let providerSettingsMutationRevision = 0;
 const dirtySettingsForms = new Set();
 let currentSnapshot = { inbox: [], processing: [], library: [] };
@@ -194,7 +208,37 @@ function say(message) {
 }
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value ?? ""; return node.innerHTML; }
 
+function providerConnectionFingerprint(item) {
+  return JSON.stringify({
+    name: item.name,
+    provider: item.provider,
+    capability: item.capability,
+    preset: item.preset,
+    model: item.model,
+    voice: item.voice,
+    local: item.local,
+  });
+}
+
+function invalidateProviderModelRequest(message = "") {
+  providerModelRequestToken += 1;
+  providerModelCandidates = [];
+  selectedProviderModel = null;
+  providerModelList.replaceChildren();
+  providerModelEmpty.hidden = false;
+  providerModelEmpty.textContent = message || "连接设置已变化，请重新获取模型目录。";
+  fetchProviderModelsButton.disabled = false;
+  fetchProviderModelsButton.textContent = "获取模型";
+  saveProviderModelButton.disabled = true;
+  if (message) providerModelFeedback.textContent = message;
+}
+
 function renderProviderSettings(settings) {
+  const nextModelConnection = pendingModelConnection && settings.connections.find((item) => item.name === pendingModelConnection.name);
+  if (pendingModelConnection && (!nextModelConnection || providerConnectionFingerprint(nextModelConnection) !== pendingModelConnection.fingerprint)) {
+    pendingModelConnection = null;
+    invalidateProviderModelRequest();
+  }
   latestProviderSettings = settings;
   const configured = settings.connections.length;
   const capabilities = Object.keys(providerCapabilityDefinitions);
@@ -215,6 +259,7 @@ function renderProviderSettings(settings) {
   providerCapabilityList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", () => requestProviderConnectionCheck(button)));
   providerCapabilityList.querySelectorAll("button[data-delete-connection]:not(:disabled)").forEach((button) => button.addEventListener("click", () => openDeleteProviderConnection(button)));
   providerCapabilityList.querySelectorAll("button[data-use-connection]").forEach((button) => button.addEventListener("click", () => setCurrentProviderConnection(button)));
+  providerCapabilityList.querySelectorAll("button[data-select-model]").forEach((button) => button.addEventListener("click", () => openProviderModelDialog(button)));
   providerCapabilityList.querySelectorAll("button[data-add-capability]").forEach((button) => button.addEventListener("click", () => openConnectionDialog(button.dataset.addCapability)));
   providerCapabilityList.querySelectorAll("select[data-setup-role-select]").forEach((select) => select.addEventListener("change", () => saveProviderRoleSelection(select)));
   renderProviderLimits(settings.limits);
@@ -243,6 +288,9 @@ function renderProviderConnectionRow(item, capability, role) {
   const model = item.voice || item.model || item.provider;
   const roleBadges = item.bound_roles.map((label) => `<span class="provider-badge is-role">${escapeHtml(label.replace("笔记 ", ""))}</span>`).join("");
   const localBadge = item.local ? '<span class="provider-badge is-local">本地</span>' : "";
+  const selectModelButton = capability === "llm" && !item.local
+    ? `<button type="button" data-select-model="${escapeHtml(item.name)}">选择模型</button>`
+    : "";
   const useButton = capability === "llm"
     ? ""
     : `<button class="provider-use-button" type="button" data-use-connection="${escapeHtml(item.name)}" data-use-role="${escapeHtml(role?.name || "")}"${current ? " disabled" : ""}>${current ? "使用中" : "设为当前"}</button>`;
@@ -251,7 +299,7 @@ function renderProviderConnectionRow(item, capability, role) {
     <span class="provider-logo">${escapeHtml(providerLogo(item))}</span>
     <span class="provider-copy"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.provider)} · ${escapeHtml(item.state)}</span></span>
     <span class="provider-model"><strong>${escapeHtml(model)}</strong><span class="provider-badges">${roleBadges}${localBadge}</span></span>
-    <span class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查连接</button>${useButton}<button class="provider-delete-button" type="button" data-delete-connection="${escapeHtml(item.name)}" aria-label="${escapeHtml(deleteTitle)}" title="${escapeHtml(deleteTitle)}"${item.deletable ? "" : " disabled"}>删除</button></span>
+    <span class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查连接</button>${selectModelButton}${useButton}<button class="provider-delete-button" type="button" data-delete-connection="${escapeHtml(item.name)}" aria-label="${escapeHtml(deleteTitle)}" title="${escapeHtml(deleteTitle)}"${item.deletable ? "" : " disabled"}>删除</button></span>
   </section>`;
 }
 
@@ -313,6 +361,136 @@ function showProviderUpdateFailure(error) {
   providerState.className = "status-pill";
   providerFeedback.textContent = error.message;
   say(error.message);
+}
+
+function renderProviderModelCandidates() {
+  const query = providerModelSearch.value.trim().toLocaleLowerCase("zh-CN");
+  const candidates = providerModelCandidates.filter((item) => {
+    if (!query) return true;
+    return `${item.id} ${item.owned_by || ""}`.toLocaleLowerCase("zh-CN").includes(query);
+  });
+  providerModelList.innerHTML = candidates.map((item) => {
+    const selected = item.id === selectedProviderModel;
+    const owner = item.owned_by ? `<small>${escapeHtml(item.owned_by)}</small>` : "";
+    return `<button class="provider-model-option${selected ? " is-selected" : ""}" type="button" data-provider-model="${escapeHtml(item.id)}" aria-pressed="${selected}"><strong>${escapeHtml(item.id)}</strong>${owner}</button>`;
+  }).join("");
+  providerModelList.querySelectorAll("button[data-provider-model]").forEach((button) => button.addEventListener("click", () => {
+    selectedProviderModel = button.dataset.providerModel;
+    saveProviderModelButton.disabled = false;
+    renderProviderModelCandidates();
+  }));
+  providerModelEmpty.hidden = candidates.length > 0;
+  if (!candidates.length) providerModelEmpty.textContent = query ? "没有符合搜索条件的模型。" : "官方目录中没有可选择的兼容模型。";
+}
+
+function openProviderModelDialog(button) {
+  const connection = latestProviderSettings.connections.find((item) => item.name === button.dataset.selectModel);
+  if (!connection || connection.local || connection.capability !== "llm") return;
+  providerModelRequestToken += 1;
+  pendingModelConnection = {
+    name: connection.name,
+    model: connection.model,
+    fingerprint: providerConnectionFingerprint(connection),
+  };
+  providerModelCandidates = [];
+  selectedProviderModel = null;
+  modelSelectionCurrent.textContent = connection.model;
+  modelSelectionConnection.textContent = `${connection.name} · ${connection.provider}`;
+  providerModelSearch.value = "";
+  providerModelFeedback.textContent = "尚未获取模型目录。";
+  providerModelEmpty.hidden = false;
+  providerModelEmpty.textContent = "点击“获取模型”读取当前连接提供的兼容模型。";
+  providerModelList.replaceChildren();
+  saveProviderModelButton.disabled = true;
+  fetchProviderModelsButton.disabled = false;
+  fetchProviderModelsButton.textContent = "获取模型";
+  modelSelectionDialog.showModal();
+  window.requestAnimationFrame(() => fetchProviderModelsButton.focus({ preventScroll: true }));
+}
+
+function providerModelRequestIsCurrent(token, mutationRevision, request) {
+  const current = latestProviderSettings.connections.find((item) => item.name === request.name);
+  return token === providerModelRequestToken
+    && mutationRevision === providerSettingsMutationRevision
+    && modelSelectionDialog.open
+    && pendingModelConnection === request
+    && current
+    && providerConnectionFingerprint(current) === request.fingerprint;
+}
+
+async function fetchProviderModels() {
+  if (!pendingModelConnection) return;
+  const request = pendingModelConnection;
+  const token = ++providerModelRequestToken;
+  const mutationRevision = providerSettingsMutationRevision;
+  fetchProviderModelsButton.disabled = true;
+  fetchProviderModelsButton.textContent = "获取中…";
+  providerModelFeedback.textContent = "正在从官方目录读取兼容模型…";
+  providerModelCandidates = [];
+  selectedProviderModel = null;
+  renderProviderModelCandidates();
+  try {
+    const result = await api(`/api/providers/connections/${encodeURIComponent(request.name)}/models`, { method: "POST" });
+    if (!providerModelRequestIsCurrent(token, mutationRevision, request)) return;
+    providerModelCandidates = Array.isArray(result.models) ? result.models : [];
+    renderProviderModelCandidates();
+    if (!providerModelCandidates.length) {
+      providerModelFeedback.textContent = "官方目录中没有可选择的兼容模型。";
+    } else if (!providerModelCandidates.some((item) => item.id === request.model)) {
+      providerModelFeedback.textContent = `警告：当前已保存模型 ${request.model} 不在本次目录中，仍保留当前模型；请选择其他模型后再保存。`;
+    } else {
+      providerModelFeedback.textContent = `已获取 ${providerModelCandidates.length} 个兼容模型；请选择后保存。`;
+    }
+  } catch (error) {
+    if (!providerModelRequestIsCurrent(token, mutationRevision, request)) return;
+    providerModelCandidates = [];
+    renderProviderModelCandidates();
+    providerModelFeedback.textContent = error.message;
+    say(error.message);
+  } finally {
+    if (token === providerModelRequestToken) {
+      fetchProviderModelsButton.disabled = false;
+      fetchProviderModelsButton.textContent = "获取模型";
+    }
+  }
+}
+
+async function saveProviderModel(event) {
+  event.preventDefault();
+  if (!pendingModelConnection || !selectedProviderModel) return;
+  const request = pendingModelConnection;
+  const connection = latestProviderSettings.connections.find((item) => item.name === request.name);
+  if (!connection || providerConnectionFingerprint(connection) !== request.fingerprint) {
+    pendingModelConnection = null;
+    invalidateProviderModelRequest();
+    providerModelFeedback.textContent = "连接设置已变化，请关闭后重新打开模型选择。";
+    return;
+  }
+  const model = selectedProviderModel;
+  const label = saveProviderModelButton.textContent;
+  providerModelRequestToken += 1;
+  saveProviderModelButton.disabled = true;
+  saveProviderModelButton.textContent = "保存中…";
+  try {
+    const settings = await api(`/api/providers/connections/${encodeURIComponent(request.name)}/model`, {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    });
+    providerSettingsMutationRevision += 1;
+    renderProviderSettings(settings);
+    await loadAutomationStatus();
+    const updated = settings.connections.find((item) => item.name === request.name);
+    const roles = updated?.bound_roles?.length ? updated.bound_roles.join("、") : "尚未绑定职责";
+    providerFeedback.textContent = `模型已保存：${model}。受影响职责：${roles}；付费许可需重新确认。`;
+    say(providerFeedback.textContent);
+    modelSelectionDialog.close();
+  } catch (error) {
+    providerModelFeedback.textContent = error.message;
+    say(error.message);
+  } finally {
+    saveProviderModelButton.disabled = false;
+    saveProviderModelButton.textContent = label;
+  }
 }
 
 function renderSetupReadiness(readiness) {
@@ -463,6 +641,7 @@ async function loadProviderSettings(defaultOutput = null, protectDirty = false) 
     const mutationRevision = providerSettingsMutationRevision;
     const settings = await api(`/api/providers/settings${defaultOutput ? `?default_output=${encodeURIComponent(defaultOutput)}` : ""}`);
     if (protectDirty && mutationRevision !== providerSettingsMutationRevision) return;
+    if (!protectDirty && mutationRevision !== providerSettingsMutationRevision) return;
     if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(providerCapabilityList))) return;
     if (protectDirty && settingsFormNeedsProtection(providerLimitsForm)) return;
     renderProviderSettings(settings);
@@ -1457,6 +1636,10 @@ providerForm.elements.preset.addEventListener("change", () => {
   refreshProviderConnectionFields().catch((error) => say(error.message));
 });
 
+providerModelForm.addEventListener("submit", saveProviderModel);
+fetchProviderModelsButton.addEventListener("click", fetchProviderModels);
+providerModelSearch.addEventListener("input", renderProviderModelCandidates);
+
 providerLimitsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -1552,6 +1735,15 @@ deleteTaskDialog.addEventListener("close", () => { pendingDeleteItemRef = null; 
 confirmCheckConnection.addEventListener("click", confirmProviderConnectionCheck);
 document.querySelectorAll("[data-close-check-connection]").forEach((button) => button.addEventListener("click", () => checkConnectionDialog.close()));
 checkConnectionDialog.addEventListener("close", () => { pendingCheckConnection = null; });
+document.querySelectorAll("[data-close-model-selection]").forEach((button) => button.addEventListener("click", () => modelSelectionDialog.close()));
+modelSelectionDialog.addEventListener("close", () => {
+  providerModelRequestToken += 1;
+  pendingModelConnection = null;
+  providerModelCandidates = [];
+  selectedProviderModel = null;
+  providerModelList.replaceChildren();
+  saveProviderModelButton.disabled = true;
+});
 deleteConnectionForm.addEventListener("submit", deleteProviderConnection);
 document.querySelectorAll("[data-close-delete-connection]").forEach((button) => button.addEventListener("click", () => deleteConnectionDialog.close()));
 deleteConnectionDialog.addEventListener("close", () => { pendingDeleteConnection = null; });
@@ -1572,6 +1764,7 @@ document.querySelector("#local-video").addEventListener("change", (event) => {
 document.querySelector("#refresh-tasks").addEventListener("click", () => refresh(true));
 document.querySelector("#back-to-tasks").addEventListener("click", showTaskWorkbench);
 
+window.fetchProviderModels = fetchProviderModels;
 connectDouyinButton.addEventListener("click", connectDouyin);
 refreshDouyinButton.addEventListener("click", refreshDouyinQr);
 cancelDouyinButton.addEventListener("click", cancelDouyin);

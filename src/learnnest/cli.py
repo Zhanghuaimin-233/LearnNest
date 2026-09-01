@@ -79,12 +79,15 @@ from learnnest.provider_profiles import (
     set_role_binding,
     settings_sha256,
 )
+from learnnest.provider_model_catalog import ProviderModelCatalogError
 from learnnest.provider_service import (
     AdmittedAssistedProvider,
     assisted_provider_from_snapshot,
     assisted_snapshot_from_binding,
     execute_direct_provider_call,
+    fetch_provider_model_catalog,
     podcast_provider_from_snapshot,
+    save_provider_model,
     tts_provider_from_snapshot,
 )
 from learnnest.quality_execution_models import WriterCapabilitySnapshot
@@ -295,6 +298,42 @@ def provider_status(
     except ValueError as error:
         typer.echo(f"ERROR: {error}", err=True)
         raise typer.Exit(code=1) from error
+
+
+@provider_app.command("models")
+def provider_models(
+    connection_name: Annotated[str, typer.Argument(help="Configured connection name")],
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Fetch the manually requested, compatible model directory."""
+    root = _output_root(output_root)
+    try:
+        models = fetch_provider_model_catalog(str(root), connection_name)
+    except (ProviderModelCatalogError, OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    for item in models:
+        typer.echo(item["id"])
+
+
+@provider_app.command("set-model")
+def provider_set_model(
+    connection_name: Annotated[str, typer.Argument(help="Configured connection name")],
+    model: Annotated[str, typer.Argument(help="Supported model ID")],
+    output_root: Annotated[
+        Path | None, typer.Option("--output-root", help="Vault root.")
+    ] = None,
+) -> None:
+    """Save one explicitly selected model for a Provider connection."""
+    root = _output_root(output_root)
+    try:
+        connection = save_provider_model(str(root), connection_name, model)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"ERROR: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Saved {connection.name}: {connection.provider} / {connection.model}")
 
 
 @provider_app.command("delete")

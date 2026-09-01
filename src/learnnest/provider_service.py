@@ -34,7 +34,9 @@ from learnnest.provider_profiles import (
     ProviderRoleSnapshot,
     load_settings,
     settings_sha256,
+    update_connection_model,
 )
+from learnnest.provider_model_catalog import fetch_model_catalog
 from learnnest.provider_secrets import ProviderSecretStore, SecretStoreError
 from learnnest.tts_providers import (
     OpenAICompatibleTtsProvider,
@@ -58,6 +60,27 @@ class ProviderConnectionCheckResult:
 
 
 FrozenBinding = ProviderRoleSnapshot | ProviderBindingSnapshot
+
+
+def fetch_provider_model_catalog(
+    output_root: str,
+    connection_name: str,
+    *,
+    client_factory: Callable[..., Any] = OpenAI,
+) -> list[dict[str, str]]:
+    """Fetch one manually requested, compatibility-filtered model directory."""
+    return fetch_model_catalog(
+        output_root, connection_name, client_factory=client_factory
+    )
+
+
+def save_provider_model(
+    output_root: str,
+    connection_name: str,
+    model: str,
+) -> ProviderConnection:
+    """Save a model through the dedicated connection-update boundary."""
+    return update_connection_model(output_root, name=connection_name, model=model)
 
 
 class AdmittedAssistedProvider:

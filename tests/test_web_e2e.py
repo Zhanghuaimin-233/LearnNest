@@ -37,6 +37,7 @@ from learnnest.douyin_favorites import (
 from learnnest.execution_models import FailureInfo, TaskAttempt
 from learnnest.models import ContentPack, Evidence, StageStatus
 from learnnest.pipeline import PipelineError
+from learnnest.provider_model_catalog import ProviderModelCatalogError
 from learnnest.provider_profiles import load_settings
 from learnnest.task_store import create_task, find_task_by_id, write_task_atomic
 from learnnest.task_control import load_task_control
@@ -1108,6 +1109,130 @@ def test_goal4_late_provider_poll_does_not_replace_a_new_role_selection(
         expect(page.locator("select[data-setup-role-select]").first).to_have_value(
             "offline-note"
         )
+        browser.close()
+
+
+def test_provider_model_picker_fetches_searches_saves_and_persists_on_desktop_and_narrow_edge(
+    loopback_app: _LoopbackApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import learnnest.web_app as web_app
+
+    fetches: list[tuple[Path, str]] = []
+
+    def fake_fetch(root: str | Path, name: str) -> list[dict[str, str]]:
+        fetches.append((Path(root), name))
+        return [
+            {"id": "mimo-v2.5"},
+            {"id": "mimo-v2.5-pro", "owned_by": "xiaomi"},
+        ]
+
+    monkeypatch.setattr(web_app, "fetch_provider_model_catalog", fake_fetch)
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(loopback_app.url)
+        _add_connection(page, name="mimo-model", preset="mimo", key="catalog-key")
+        for role in ("笔记 Writer", "笔记 Reviewer"):
+            page.locator(f'select[data-setup-role-select="{role}"]').select_option(
+                "mimo-model"
+            )
+        assert fetches == []
+
+        row = page.locator('[data-connection="mimo-model"]')
+        row.locator("button[data-select-model]").click()
+        expect(page.locator("#model-selection-dialog")).to_be_visible()
+        expect(page.locator("#model-selection-current")).to_have_text("mimo-v2.5")
+        expect(page.locator("#provider-model-empty")).to_be_visible()
+
+        page.locator("#fetch-provider-models").click()
+        expect(
+            page.locator("#provider-model-list button[data-provider-model]")
+        ).to_have_count(2)
+        assert fetches == [(loopback_app.root.resolve(), "mimo-model")]
+        page.locator("#provider-model-search").fill("pro")
+        expect(
+            page.locator("#provider-model-list button[data-provider-model]")
+        ).to_have_count(1)
+        page.locator('button[data-provider-model="mimo-v2.5-pro"]').click()
+        expect(page.locator("#save-provider-model")).to_be_enabled()
+        page.locator("#save-provider-model").click()
+        expect(page.locator("#model-selection-dialog")).not_to_be_visible()
+        expect(page.locator("#provider-feedback")).to_contain_text("受影响职责")
+        expect(page.locator("#provider-feedback")).to_contain_text("付费许可需重新确认")
+
+        page.reload()
+        _open_settings_panel(page, "connections")
+        expect(row.locator(".provider-model")).to_contain_text("mimo-v2.5-pro")
+        assert load_settings(loopback_app.root).connections["mimo-model"].model == (
+            "mimo-v2.5-pro"
+        )
+        page.set_viewport_size({"width": 390, "height": 844})
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth"
+        )
+        browser.close()
+
+
+def test_provider_model_picker_covers_loading_empty_error_and_ignores_late_response(
+    loopback_app: _LoopbackApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import learnnest.web_app as web_app
+
+    mode = ["empty"]
+
+    def fake_fetch(_root: str | Path, _name: str) -> list[dict[str, str]]:
+        if mode[0] == "error":
+            raise ProviderModelCatalogError(
+                "service_error", "官方模型目录服务暂时不可用，请稍后重试。"
+            )
+        return []
+
+    monkeypatch.setattr(web_app, "fetch_provider_model_catalog", fake_fetch)
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(loopback_app.url)
+        _add_connection(page, name="mimo-empty", preset="mimo", key="catalog-key")
+        page.locator('[data-connection="mimo-empty"] button[data-select-model]').click()
+        page.locator("#fetch-provider-models").click()
+        expect(page.locator("#provider-model-empty")).to_contain_text(
+            "没有可选择的兼容模型"
+        )
+
+        mode[0] = "error"
+        page.locator("#fetch-provider-models").click()
+        expect(page.locator("#provider-model-feedback")).to_have_text(
+            "官方模型目录服务暂时不可用，请稍后重试。"
+        )
+
+        mode[0] = "empty"
+        page.evaluate(
+            """
+            () => {
+              const originalFetch = window.fetch;
+              let release;
+              const gate = new Promise((resolve) => { release = resolve; });
+              window.__releaseModelCatalog = release;
+              window.fetch = (...args) => originalFetch(...args).then(async (response) => {
+                if (String(args[0]).includes('/api/providers/connections/mimo-empty/models')) await gate;
+                return response;
+              });
+              window.__lateModelCatalog = fetchProviderModels().finally(() => {
+                window.fetch = originalFetch;
+              });
+            }
+            """
+        )
+        expect(page.locator("#fetch-provider-models")).to_have_text("获取中…")
+        page.locator(
+            "#model-selection-dialog [data-close-model-selection]"
+        ).first.click()
+        page.evaluate("window.__releaseModelCatalog()")
+        page.evaluate("window.__lateModelCatalog")
+        page.locator('[data-connection="mimo-empty"] button[data-select-model]').click()
+        expect(page.locator("#provider-model-list")).to_be_empty()
         browser.close()
 
 

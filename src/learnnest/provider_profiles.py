@@ -71,6 +71,8 @@ class ProviderPreset(_Model):
     api_family: Literal["openai_chat", "local"]
     endpoint: str
     default_model: str
+    catalog_endpoint: str | None = None
+    allowed_models: tuple[str, ...] = ()
     adapter_revision: str = "1"
     requires_secret: bool = True
 
@@ -85,6 +87,8 @@ PRESETS: dict[str, ProviderPreset] = {
         api_family="openai_chat",
         endpoint="https://api.xiaomimimo.com/v1",
         default_model="mimo-v2.5",
+        catalog_endpoint="https://api.xiaomimimo.com/v1/models",
+        allowed_models=("mimo-v2.5", "mimo-v2.5-pro"),
     ),
     "deepseek": ProviderPreset(
         preset="deepseek",
@@ -93,6 +97,8 @@ PRESETS: dict[str, ProviderPreset] = {
         api_family="openai_chat",
         endpoint="https://api.deepseek.com/v1",
         default_model="deepseek-v4-pro",
+        catalog_endpoint="https://api.deepseek.com/models",
+        allowed_models=("deepseek-v4-flash", "deepseek-v4-pro"),
     ),
     "mimo-tts": ProviderPreset(
         preset="mimo-tts",
@@ -137,6 +143,10 @@ _CONNECTION_PRESETS: dict[str, ProviderPreset] = {
         requires_secret=False,
     ),
 }
+
+
+def _supported_models(preset: ProviderPreset) -> tuple[str, ...]:
+    return preset.allowed_models or (preset.default_model,)
 
 
 class ProviderConnection(_Model):
@@ -231,6 +241,9 @@ class ProviderSettings(_Model):
                 raise ValueError("provider connection identity is invalid")
             if connection.preset not in _CONNECTION_PRESETS:
                 raise ValueError("unsupported provider")
+            preset = _CONNECTION_PRESETS[connection.preset]
+            if connection.model not in _supported_models(preset):
+                raise ValueError("unsupported provider model")
         if set(self.budget_group_calls_per_day) != set(_ROLE_BUDGET_GROUPS.values()):
             raise ValueError("provider budget group caps must be complete")
         for role, binding in self.role_bindings.items():
@@ -365,8 +378,8 @@ def connect(
     except KeyError as error:
         raise ValueError("unsupported provider") from error
     selected_endpoint = endpoint or base.endpoint
-    selected_model = model or base.default_model
-    if selected_model != base.default_model:
+    selected_model = (model or base.default_model).strip()
+    if selected_model not in _supported_models(base):
         raise ValueError("unsupported provider model")
     if base.api_family == "openai_chat" and not selected_endpoint.startswith(
         "https://"
@@ -431,6 +444,49 @@ def connect(
                 pass
         raise
     return connection
+
+
+def update_connection_model(
+    output_root: str | Path,
+    *,
+    name: str,
+    model: str,
+    now: datetime | None = None,
+) -> ProviderConnection:
+    """Persist one supported model without touching its endpoint or secret."""
+    settings = load_settings(output_root)
+    try:
+        connection = settings.connections[name]
+    except KeyError as error:
+        raise ProviderConnectionNotFoundError(
+            "provider connection is not configured"
+        ) from error
+    try:
+        preset = _CONNECTION_PRESETS[connection.preset]
+    except KeyError as error:
+        raise ValueError("unsupported provider") from error
+    if (
+        connection.capability != preset.capability
+        or connection.provider != preset.provider
+        or connection.api_family != preset.api_family
+        or connection.adapter_revision != preset.adapter_revision
+    ):
+        raise ValueError("provider connection identity is invalid")
+    selected_model = model.strip()
+    if selected_model not in _supported_models(preset):
+        raise ValueError("unsupported provider model")
+    updated = connection.model_copy(
+        update={
+            "model": selected_model,
+            "updated_at": (now or datetime.now(UTC)).astimezone(UTC),
+        }
+    )
+    candidate = settings.model_copy(
+        update={"connections": {**settings.connections, name: updated}}
+    )
+    validated = ProviderSettings.model_validate(candidate.model_dump(mode="python"))
+    save_settings(output_root, validated)
+    return validated.connections[name]
 
 
 def delete_connection(output_root: str | Path, *, name: str) -> ProviderSettings:

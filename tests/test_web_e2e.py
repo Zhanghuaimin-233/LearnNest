@@ -1143,6 +1143,7 @@ def test_provider_model_picker_fetches_searches_saves_and_persists_on_desktop_an
         row.locator("button[data-select-model]").click()
         expect(page.locator("#model-selection-dialog")).to_be_visible()
         expect(page.locator("#model-selection-current")).to_have_text("mimo-v2.5")
+        expect(page.locator("#model-selection-connection")).to_have_count(0)
         expect(page.locator("#provider-model-empty")).to_be_visible()
 
         page.locator("#fetch-provider-models").click()

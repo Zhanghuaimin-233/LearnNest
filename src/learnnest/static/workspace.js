@@ -100,7 +100,6 @@ const confirmCheckConnection = document.querySelector("#confirm-check-connection
 const modelSelectionDialog = document.querySelector("#model-selection-dialog");
 const providerModelForm = document.querySelector("#provider-model-form");
 const modelSelectionCurrent = document.querySelector("#model-selection-current");
-const modelSelectionConnection = document.querySelector("#model-selection-connection");
 const fetchProviderModelsButton = document.querySelector("#fetch-provider-models");
 const providerModelSearch = document.querySelector("#provider-model-search");
 const providerModelFeedback = document.querySelector("#provider-model-feedback");
@@ -395,7 +394,6 @@ function openProviderModelDialog(button) {
   providerModelCandidates = [];
   selectedProviderModel = null;
   modelSelectionCurrent.textContent = connection.model;
-  modelSelectionConnection.textContent = `${connection.name} · ${connection.provider}`;
   providerModelSearch.value = "";
   providerModelFeedback.textContent = "尚未获取模型目录。";
   providerModelEmpty.hidden = false;

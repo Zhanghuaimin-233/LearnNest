@@ -306,6 +306,7 @@ def test_w32_registry_is_complete_unique_and_llm_only_catalogs() -> None:
         if preset.capability == "llm":
             assert preset.catalog_mode in {"live", "curated"}
             assert preset.allowed_models
+            assert preset.default_model is None
             if preset.catalog_mode == "live":
                 assert preset.catalog_endpoint is not None
                 assert preset.catalog_endpoint.startswith("https://")
@@ -317,8 +318,8 @@ def test_w32_registry_is_complete_unique_and_llm_only_catalogs() -> None:
             assert preset.catalog_endpoint is None
     assert PRESETS["mimo"].catalog_mode == "live"
     assert PRESETS["deepseek"].catalog_mode == "live"
-    assert PRESETS["mimo"].default_model == "mimo-v2.5"
-    assert PRESETS["deepseek"].default_model == "deepseek-v4-pro"
+    assert PRESETS["mimo"].key_entry_url is not None
+    assert PRESETS["deepseek"].key_entry_url is not None
 
 
 def test_w32_platform_presets_do_not_disguise_as_model_vendors() -> None:
@@ -647,6 +648,31 @@ def test_connect_refuses_new_llm_preset_without_explicit_model(tmp_path: Path) -
     assert not (tmp_path / ".learnnest").exists()
 
 
+@pytest.mark.parametrize("preset_key", ["mimo", "deepseek"])
+def test_baseline_llm_presets_have_no_default_model_bypass(
+    preset_key: str, tmp_path: Path
+) -> None:
+    preset = connection_presets()[preset_key]
+    assert preset.default_model is None
+    assert preset.allowed_models
+    assert preset.catalog_mode == "live"
+
+    with pytest.raises(ValueError, match="model"):
+        connect(tmp_path, name="baseline", preset=preset_key, secret_value="sk-test")
+
+    assert load_settings(tmp_path).connections == {}
+    assert not (tmp_path / ".learnnest").exists()
+
+    saved = connect(
+        tmp_path,
+        name="baseline",
+        preset=preset_key,
+        secret_value="sk-test",
+        model=preset.allowed_models[0],
+    )
+    assert saved.model == preset.allowed_models[0]
+
+
 def test_connect_refuses_unsupported_model_and_endpoint_override(
     tmp_path: Path,
 ) -> None:
@@ -695,7 +721,13 @@ def test_connect_creates_new_family_connection_atomically(tmp_path: Path) -> Non
 def test_connect_rollback_keeps_settings_and_secret_on_disk_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    connect(tmp_path, name="baseline", preset="mimo", secret_value="keep-me")
+    connect(
+        tmp_path,
+        name="baseline",
+        preset="mimo",
+        secret_value="keep-me",
+        model="mimo-v2.5",
+    )
     before_settings = (
         tmp_path / ".learnnest" / "providers" / "settings.json"
     ).read_text(encoding="utf-8")
@@ -1189,8 +1221,13 @@ def test_web_api_projects_w32_adapter_catalog(tmp_path: Path) -> None:
     assert adapters["glm"]["requires_model"] is True
     assert adapters["anthropic"]["catalog_mode"] == "live"
     assert adapters["anthropic"]["api_family"] == "anthropic"
-    assert adapters["mimo"]["requires_model"] is False
+    assert adapters["mimo"]["requires_model"] is True
     assert adapters["mimo"]["catalog_mode"] == "live"
+    assert adapters["mimo"]["key_entry"] == (
+        "https://platform.xiaomimimo.com/#/console/api-keys"
+    )
+    assert adapters["deepseek"]["requires_model"] is True
+    assert adapters["deepseek"]["key_entry"] == "https://platform.deepseek.com/api_keys"
 
 
 def test_web_api_preview_catalog_uses_body_key_only(

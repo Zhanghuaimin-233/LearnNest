@@ -76,6 +76,7 @@ def test_dpapi_secret_is_ciphertext_and_never_enters_settings_or_web_api(
         name="mimo-note",
         preset="mimo",
         secret_value=secret,
+        model="mimo-v2.5",
         now=datetime(2026, 8, 2, tzinfo=UTC),
     )
 
@@ -128,9 +129,27 @@ def test_provider_settings_projects_the_real_webui_catalog_and_editable_limits(
         }
 
     assert payload["adapters"] == [
-        _adapter("mimo", "MiMo", "文本模型", "llm", False, "openai_chat", "live"),
         _adapter(
-            "deepseek", "DeepSeek", "文本模型", "llm", False, "openai_chat", "live"
+            "mimo",
+            "MiMo",
+            "文本模型",
+            "llm",
+            False,
+            "openai_chat",
+            "live",
+            True,
+            "https://platform.xiaomimimo.com/#/console/api-keys",
+        ),
+        _adapter(
+            "deepseek",
+            "DeepSeek",
+            "文本模型",
+            "llm",
+            False,
+            "openai_chat",
+            "live",
+            True,
+            "https://platform.deepseek.com/api_keys",
         ),
         _adapter(
             "openai",
@@ -336,7 +355,19 @@ def test_webui_provider_settings_labels_persistent_provider_ids(
     secret_value: str | None,
     expected_provider: str,
 ) -> None:
-    connect(tmp_path, name=name, preset=preset, secret_value=secret_value)
+    connect(
+        tmp_path,
+        name=name,
+        preset=preset,
+        secret_value=secret_value,
+        **(
+            {"model": "mimo-v2.5"}
+            if preset == "mimo"
+            else {"model": "deepseek-v4-pro"}
+            if preset == "deepseek"
+            else {}
+        ),
+    )
 
     response = TestClient(create_web_app(tmp_path)).get("/api/providers/settings")
 
@@ -363,12 +394,14 @@ def test_webui_projects_capability_cards_and_bound_delete_state(tmp_path: Path) 
         name="mimo-note",
         preset="mimo",
         secret_value="never-show-current",
+        model="mimo-v2.5",
     )
     connect(
         tmp_path,
         name="deepseek-spare",
         preset="deepseek",
         secret_value="never-show-spare",
+        model="deepseek-v4-pro",
     )
     set_role_binding(
         tmp_path, role="note_writer", connection_name=current.connection_id
@@ -418,7 +451,9 @@ def test_webui_provider_settings_projects_a_corrupt_dpapi_secret_as_unavailable(
     tmp_path: Path,
 ) -> None:
     secret = "corrupt-dpapi-secret-never-disclose"
-    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value=secret)
+    connection = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value=secret, model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name=connection.name)
     set_role_binding(tmp_path, role="note_reviewer", connection_name=connection.name)
     assert connection.secret_id is not None
@@ -501,7 +536,9 @@ def test_v1_settings_migrate_and_unsupported_products_are_rejected(
 def test_role_snapshot_is_secret_free_immutable_and_invalidates_old_authorization(
     tmp_path: Path,
 ) -> None:
-    first = connect(tmp_path, name="mimo-note", preset="mimo", secret_value="one")
+    first = connect(
+        tmp_path, name="mimo-note", preset="mimo", secret_value="one", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name=first.name)
     set_role_binding(tmp_path, role="note_reviewer", connection_name=first.name)
     frozen = freeze_role_bindings(tmp_path)
@@ -514,7 +551,9 @@ def test_role_snapshot_is_secret_free_immutable_and_invalidates_old_authorizatio
     )
     old_sha = task.provider_settings_sha256
 
-    updated = connect(tmp_path, name="mimo-note", preset="mimo", secret_value="two")
+    updated = connect(
+        tmp_path, name="mimo-note", preset="mimo", secret_value="two", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name=updated.name)
     current = load_settings(tmp_path)
 
@@ -536,21 +575,21 @@ def test_role_factories_use_only_frozen_endpoint_and_role_secret(
         name="mimo-writer",
         preset="mimo",
         secret_value="same-key",
-        endpoint="https://writer.example/v1",
+        model="mimo-v2.5",
     )
     reviewer = connect(
         tmp_path,
         name="deepseek-reviewer",
         preset="deepseek",
         secret_value="same-key",
-        endpoint="https://reviewer.example/v1",
+        model="deepseek-v4-pro",
     )
     podcast = connect(
         tmp_path,
         name="deepseek-podcast",
         preset="deepseek",
         secret_value="same-key",
-        endpoint="https://podcast.example/v1",
+        model="deepseek-v4-pro",
     )
     tts = connect(
         tmp_path,
@@ -585,16 +624,16 @@ def test_role_factories_use_only_frozen_endpoint_and_role_secret(
     )
 
     assert writer.secret_id != reviewer.secret_id != podcast.secret_id != tts.secret_id
-    assert note_writer.endpoint_identity == "https://writer.example/v1"
-    assert note_reviewer.endpoint_identity == "https://reviewer.example/v1"
+    assert note_writer.endpoint_identity == "https://api.xiaomimimo.com/v1"
+    assert note_reviewer.endpoint_identity == "https://api.deepseek.com/v1"
     assert podcast_provider.name == "deepseek"
     assert podcast_provider.model == "deepseek-v4-pro"
     assert tts_provider.name == "xiaomi-mimo-tts"
     assert tts_provider.model == "mimo-v2.5-tts"
     assert [call["base_url"] for call in calls] == [
-        "https://writer.example/v1",
-        "https://reviewer.example/v1",
-        "https://podcast.example/v1",
+        "https://api.xiaomimimo.com/v1",
+        "https://api.deepseek.com/v1",
+        "https://api.deepseek.com/v1",
         "https://tts.example/v1",
     ]
 
@@ -607,18 +646,21 @@ def test_role_factories_call_only_the_bound_fake_transport_without_fallback(
         name="mimo-writer",
         preset="mimo",
         secret_value="writer-key",
+        model="mimo-v2.5",
     )
     reviewer = connect(
         tmp_path,
         name="deepseek-reviewer",
         preset="deepseek",
         secret_value="reviewer-key",
+        model="deepseek-v4-pro",
     )
     podcast = connect(
         tmp_path,
         name="deepseek-podcast",
         preset="deepseek",
         secret_value="podcast-key",
+        model="deepseek-v4-pro",
     )
     tts = connect(
         tmp_path,
@@ -720,7 +762,13 @@ def test_role_and_global_caps_block_before_fake_provider_invocation(
 def test_connection_check_bypasses_task_caps_without_consuming_usage(
     tmp_path: Path,
 ) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="check-secret")
+    connect(
+        tmp_path,
+        name="mimo",
+        preset="mimo",
+        secret_value="check-secret",
+        model="mimo-v2.5",
+    )
     settings = load_settings(tmp_path).model_copy(
         update={
             "global_calls_per_day": 0,
@@ -898,9 +946,15 @@ def test_windows_tts_voice_is_secret_free_public_and_frozen_exactly(
 def test_mimo_and_deepseek_connections_have_no_fallback_or_shared_secret_object(
     tmp_path: Path,
 ) -> None:
-    mimo = connect(tmp_path, name="mimo", preset="mimo", secret_value="same-key")
+    mimo = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="same-key", model="mimo-v2.5"
+    )
     deepseek = connect(
-        tmp_path, name="deepseek", preset="deepseek", secret_value="same-key"
+        tmp_path,
+        name="deepseek",
+        preset="deepseek",
+        secret_value="same-key",
+        model="deepseek-v4-pro",
     )
 
     assert mimo.provider == "xiaomi-mimo"
@@ -923,7 +977,13 @@ def test_incompatible_same_name_connection_update_is_rejected_before_secret_or_s
     before_secret_ids = sorted(path.name for path in secrets_dir.glob("*.dpapi"))
 
     with pytest.raises(ValueError, match="provider connection update is incompatible"):
-        connect(tmp_path, name="shared", preset="mimo", secret_value="new-secret")
+        connect(
+            tmp_path,
+            name="shared",
+            preset="mimo",
+            secret_value="new-secret",
+            model="mimo-v2.5",
+        )
 
     assert settings_path.read_bytes() == before_settings
     assert (
@@ -936,7 +996,9 @@ def test_incompatible_same_name_connection_update_is_rejected_before_secret_or_s
 def test_delete_connection_removes_unbound_local_and_cloud_connections(
     tmp_path: Path,
 ) -> None:
-    cloud = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    cloud = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     connect(tmp_path, name="local-asr", preset="local-asr")
     before_sha = settings_sha256(load_settings(tmp_path))
     assert cloud.secret_id is not None
@@ -955,7 +1017,9 @@ def test_delete_connection_removes_unbound_local_and_cloud_connections(
 def test_delete_connection_rejects_missing_or_bound_connections_without_mutation(
     tmp_path: Path,
 ) -> None:
-    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connection = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name=connection.name)
     before = load_settings(tmp_path).model_dump(mode="json")
     assert connection.secret_id is not None
@@ -974,7 +1038,9 @@ def test_delete_connection_rejects_missing_or_bound_connections_without_mutation
 def test_clear_role_binding_keeps_connection_and_changes_settings_sha(
     tmp_path: Path,
 ) -> None:
-    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connection = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name=connection.name)
     before_sha = settings_sha256(load_settings(tmp_path))
     assert connection.secret_id is not None
@@ -997,7 +1063,9 @@ def test_delete_connection_rolls_back_when_setting_or_secret_cleanup_fails(
 ) -> None:
     import learnnest.provider_profiles as profiles
 
-    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connection = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     assert connection.secret_id is not None
     secret_path = ProviderSecretStore(tmp_path).path_for(connection.secret_id)
 
@@ -1026,9 +1094,15 @@ def test_delete_connection_rolls_back_when_setting_or_secret_cleanup_fails(
 def test_note_and_podcast_cannot_share_connection_or_secret_even_if_json_is_tampered(
     tmp_path: Path,
 ) -> None:
-    note = connect(tmp_path, name="note", preset="mimo", secret_value="same-key")
+    note = connect(
+        tmp_path, name="note", preset="mimo", secret_value="same-key", model="mimo-v2.5"
+    )
     podcast = connect(
-        tmp_path, name="podcast", preset="deepseek", secret_value="same-key"
+        tmp_path,
+        name="podcast",
+        preset="deepseek",
+        secret_value="same-key",
+        model="deepseek-v4-pro",
     )
     set_role_binding(tmp_path, role="note_writer", connection_name=note.name)
     set_role_binding(tmp_path, role="note_reviewer", connection_name=note.name)
@@ -1051,7 +1125,13 @@ def test_note_and_podcast_cannot_share_connection_or_secret_even_if_json_is_tamp
 def test_webui_podcast_options_exclude_note_domain_connections_and_explain_isolation(
     tmp_path: Path,
 ) -> None:
-    note = connect(tmp_path, name="mimo-note", preset="mimo", secret_value="same-key")
+    note = connect(
+        tmp_path,
+        name="mimo-note",
+        preset="mimo",
+        secret_value="same-key",
+        model="mimo-v2.5",
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name=note.name)
     set_role_binding(tmp_path, role="note_reviewer", connection_name=note.name)
     client = TestClient(create_web_app(tmp_path))
@@ -1076,6 +1156,7 @@ def test_webui_podcast_options_exclude_note_domain_connections_and_explain_isola
         name="mimo-podcast",
         preset="mimo",
         secret_value="same-key",
+        model="mimo-v2.5",
     )
     response = client.get(
         "/api/providers/settings?default_output=complete_note_with_audio"
@@ -1093,7 +1174,13 @@ def test_webui_podcast_options_exclude_note_domain_connections_and_explain_isola
 def test_webui_settings_page_and_api_expose_selected_readiness_but_never_a_key(
     tmp_path: Path,
 ) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="never-show-this")
+    connect(
+        tmp_path,
+        name="mimo",
+        preset="mimo",
+        secret_value="never-show-this",
+        model="mimo-v2.5",
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="mimo")
     client = TestClient(create_web_app(tmp_path))
 
@@ -1156,9 +1243,19 @@ def test_webui_projects_only_selected_output_readiness_without_exposing_internal
     expected_roles: list[str],
     expected_states: list[str],
 ) -> None:
-    note = connect(tmp_path, name="note", preset="mimo", secret_value="never-show")
+    note = connect(
+        tmp_path,
+        name="note",
+        preset="mimo",
+        secret_value="never-show",
+        model="mimo-v2.5",
+    )
     podcast = connect(
-        tmp_path, name="podcast", preset="deepseek", secret_value="never-show"
+        tmp_path,
+        name="podcast",
+        preset="deepseek",
+        secret_value="never-show",
+        model="deepseek-v4-pro",
     )
     voice = connect(tmp_path, name="voice", preset="windows-tts")
     for role, connection in (
@@ -1295,7 +1392,13 @@ def test_webui_binds_local_material_models_into_new_task_snapshots(
 def test_webui_deletes_only_unbound_connections_without_exposing_secrets(
     tmp_path: Path,
 ) -> None:
-    cloud = connect(tmp_path, name="mimo", preset="mimo", secret_value="never-show")
+    cloud = connect(
+        tmp_path,
+        name="mimo",
+        preset="mimo",
+        secret_value="never-show",
+        model="mimo-v2.5",
+    )
     connect(tmp_path, name="local-asr", preset="local-asr")
     client = TestClient(create_web_app(tmp_path))
     assert cloud.secret_id is not None
@@ -1317,7 +1420,9 @@ def test_webui_deletes_only_unbound_connections_without_exposing_secrets(
 def test_webui_rejects_deleting_a_bound_connection_with_role_guidance(
     tmp_path: Path,
 ) -> None:
-    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connection = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name=connection.name)
     client = TestClient(create_web_app(tmp_path))
 
@@ -1331,7 +1436,9 @@ def test_webui_rejects_deleting_a_bound_connection_with_role_guidance(
 
 def test_webui_unbinds_a_role_without_deleting_its_connection(tmp_path: Path) -> None:
     secret = "clear-role-secret-never-show"
-    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value=secret)
+    connection = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value=secret, model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name=connection.name)
     client = TestClient(create_web_app(tmp_path))
 
@@ -1348,7 +1455,13 @@ def test_webui_unbinds_a_role_without_deleting_its_connection(tmp_path: Path) ->
 def test_webui_renders_capability_cards_with_inline_feedback(
     tmp_path: Path,
 ) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="never-show-this")
+    connect(
+        tmp_path,
+        name="mimo",
+        preset="mimo",
+        secret_value="never-show-this",
+        model="mimo-v2.5",
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="mimo")
     client = TestClient(create_web_app(tmp_path))
 
@@ -1402,7 +1515,9 @@ def test_provider_setting_change_invalidates_automatic_authorization_before_call
         tmp_path,
         AutomationPolicy(schedule_id="manual", writer=snapshot, reviewer=snapshot),
     )
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="changed")
+    connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="changed", model="mimo-v2.5"
+    )
     authorize(tmp_path, now=datetime(2026, 8, 2, tzinfo=UTC))
     delete_connection(tmp_path, name="mimo")
 
@@ -1470,7 +1585,13 @@ def test_settings_join_the_live_refresh_without_repainting_active_forms() -> Non
 def test_paid_connection_check_sends_one_request_per_confirmation_and_allows_repeat(
     tmp_path: Path,
 ) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="check-secret")
+    connect(
+        tmp_path,
+        name="mimo",
+        preset="mimo",
+        secret_value="check-secret",
+        model="mimo-v2.5",
+    )
     calls = 0
     requests: list[dict[str, object]] = []
     constructions: list[dict[str, object]] = []
@@ -1562,7 +1683,13 @@ def test_mimo_tts_connection_check_sends_one_request_and_validates_audio(
 def test_paid_connection_check_failure_is_recorded_without_retry(
     tmp_path: Path,
 ) -> None:
-    connect(tmp_path, name="deepseek", preset="deepseek", secret_value="check-secret")
+    connect(
+        tmp_path,
+        name="deepseek",
+        preset="deepseek",
+        secret_value="check-secret",
+        model="deepseek-v4-pro",
+    )
     calls = 0
 
     def client_factory(**options: object) -> object:
@@ -1663,7 +1790,13 @@ def test_windows_tts_connection_check_synthesizes_and_validates_audio(
 def test_web_connection_check_reports_real_paid_and_local_results(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="check-secret")
+    connect(
+        tmp_path,
+        name="mimo",
+        preset="mimo",
+        secret_value="check-secret",
+        model="mimo-v2.5",
+    )
     connect(tmp_path, name="asr", preset="local-asr")
     outcomes = {
         "mimo": ProviderConnectionCheckResult(
@@ -1713,7 +1846,13 @@ def test_web_connection_check_reports_real_paid_and_local_results(
 def test_paid_connection_check_rejects_ambiguous_confirmation_payloads(
     tmp_path: Path, payload: dict[str, object]
 ) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="check-secret")
+    connect(
+        tmp_path,
+        name="mimo",
+        preset="mimo",
+        secret_value="check-secret",
+        model="mimo-v2.5",
+    )
 
     response = TestClient(create_web_app(tmp_path)).post(
         "/api/providers/connections/mimo/check", json=payload

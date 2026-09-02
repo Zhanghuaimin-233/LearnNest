@@ -85,7 +85,11 @@ def test_model_catalog_fetches_from_fixed_official_client_and_filters_sorted_uni
     tmp_path: Path,
 ) -> None:
     connection = connect(
-        tmp_path, name="mimo", preset="mimo", secret_value="catalog-secret"
+        tmp_path,
+        name="mimo",
+        preset="mimo",
+        secret_value="catalog-secret",
+        model="mimo-v2.5",
     )
     calls: list[dict[str, object]] = []
     response = _ModelPage(
@@ -123,7 +127,13 @@ def test_model_catalog_fetches_from_fixed_official_client_and_filters_sorted_uni
 
 
 def test_deepseek_catalog_uses_models_root_without_v1(tmp_path: Path) -> None:
-    connect(tmp_path, name="deepseek", preset="deepseek", secret_value="secret")
+    connect(
+        tmp_path,
+        name="deepseek",
+        preset="deepseek",
+        secret_value="secret",
+        model="deepseek-v4-pro",
+    )
     calls: list[dict[str, object]] = []
 
     result = fetch_model_catalog(
@@ -145,24 +155,27 @@ def test_deepseek_catalog_uses_models_root_without_v1(tmp_path: Path) -> None:
 def test_custom_endpoint_is_rejected_before_any_client_or_secret_use(
     tmp_path: Path,
 ) -> None:
-    connect(
-        tmp_path,
-        name="proxy",
-        preset="mimo",
-        endpoint="https://proxy.example/v1",
-        secret_value="must-not-leave-store",
-    )
     calls: list[dict[str, object]] = []
 
-    with pytest.raises(ProviderModelCatalogError, match="不支持获取") as error:
-        fetch_model_catalog(tmp_path, "proxy", client_factory=_factory({}, calls))
+    with pytest.raises(ValueError, match="endpoint"):
+        connect(
+            tmp_path,
+            name="proxy",
+            preset="mimo",
+            endpoint="https://proxy.example/v1",
+            secret_value="must-not-leave-store",
+            model="mimo-v2.5",
+        )
 
-    assert error.value.code == "unsupported_endpoint"
+    assert load_settings(tmp_path).connections == {}
+    assert not (tmp_path / ".learnnest" / "providers" / "secrets").exists()
     assert calls == []
 
 
 def test_missing_secret_is_safe_and_does_not_construct_a_client(tmp_path: Path) -> None:
-    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connection = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     assert connection.secret_id is not None
     ProviderSecretStore(tmp_path).path_for(connection.secret_id).unlink()
     calls: list[dict[str, object]] = []
@@ -206,7 +219,13 @@ def test_catalog_errors_are_classified_without_provider_details(
     code: str,
     message: str,
 ) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="secret-value")
+    connect(
+        tmp_path,
+        name="mimo",
+        preset="mimo",
+        secret_value="secret-value",
+        model="mimo-v2.5",
+    )
 
     class FailingModels:
         def list(self) -> object:
@@ -229,7 +248,9 @@ def test_catalog_errors_are_classified_without_provider_details(
 
 
 def test_catalog_format_and_compatibility_errors_are_distinct(tmp_path: Path) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
 
     with pytest.raises(ProviderModelCatalogError) as invalid:
         fetch_model_catalog(
@@ -269,7 +290,9 @@ def test_normalized_catalog_is_bounded_and_does_not_return_raw_fields() -> None:
 def test_update_connection_model_preserves_connection_identity_and_changes_settings_sha(
     tmp_path: Path,
 ) -> None:
-    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connection = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="mimo")
     set_role_binding(tmp_path, role="note_reviewer", connection_name="mimo")
     before = load_settings(tmp_path)
@@ -298,7 +321,9 @@ def test_update_connection_model_preserves_connection_identity_and_changes_setti
 def test_model_change_invalidates_authorization_but_does_not_rewrite_frozen_policy(
     tmp_path: Path,
 ) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="mimo")
     set_role_binding(tmp_path, role="note_reviewer", connection_name="mimo")
     frozen = freeze_role_bindings(tmp_path)
@@ -331,7 +356,9 @@ def test_model_change_invalidates_authorization_but_does_not_rewrite_frozen_poli
 def test_web_api_fetch_and_save_model_do_not_accept_connection_inputs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connection = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     calls: list[tuple[Path, str]] = []
 
     def fake_fetch(root: str | Path, name: str) -> list[dict[str, str]]:
@@ -362,7 +389,9 @@ def test_web_api_fetch_and_save_model_do_not_accept_connection_inputs(
 def test_web_api_projects_safe_catalog_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     monkeypatch.setattr(
         web_app,
         "fetch_provider_model_catalog",
@@ -385,7 +414,9 @@ def test_web_api_projects_safe_catalog_error(
 def test_cli_models_and_set_model_use_the_shared_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     monkeypatch.setattr(
         cli,
         "fetch_provider_model_catalog",

@@ -237,7 +237,7 @@ def main() -> None:
 def provider_connect(
     preset: Annotated[
         str,
-        typer.Argument(help="mimo, deepseek, mimo-tts, local-asr, or local-ocr"),
+        typer.Argument(help="Provider preset key, e.g. mimo, deepseek, kimi, glm"),
     ],
     name: Annotated[
         str, typer.Option("--name", help="Stable local connection name.")

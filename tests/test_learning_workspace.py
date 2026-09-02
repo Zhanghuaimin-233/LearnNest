@@ -81,7 +81,9 @@ def _published_task(root: Path, name: str = "ready-item") -> tuple[Path, TaskRec
 
 
 def _configured_root(root: Path, *, authorized: bool) -> None:
-    connect(root, name="note", preset="mimo", secret_value="fake-key")
+    connect(
+        root, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
     set_role_binding(root, role="note_writer", connection_name="note")
     set_role_binding(root, role="note_reviewer", connection_name="note")
     snapshot = AssistedConnectionSnapshot(

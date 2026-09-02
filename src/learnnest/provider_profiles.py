@@ -86,8 +86,9 @@ class ProviderPreset(_Model):
 # MiMo and DeepSeek adapters; it is intentionally absent as a product choice.
 # W3.2 adds reviewed official LLM presets: every remote preset declares a fixed
 # official endpoint, its native api_family, an explicit allowlist, and whether
-# its model catalog is fetched live or curated. Presets without default_model
-# never save implicitly: the user must pick one concrete model first.
+# its model catalog is fetched live or curated. Every LLM preset, including
+# the MiMo and DeepSeek baselines, has no default_model: the user must pick
+# one concrete model before a connection can be saved.
 PRESETS: dict[str, ProviderPreset] = {
     "mimo": ProviderPreset(
         preset="mimo",
@@ -95,10 +96,11 @@ PRESETS: dict[str, ProviderPreset] = {
         provider="xiaomi-mimo",
         api_family="openai_chat",
         endpoint="https://api.xiaomimimo.com/v1",
-        default_model="mimo-v2.5",
         catalog_mode="live",
         catalog_endpoint="https://api.xiaomimimo.com/v1/models",
         allowed_models=("mimo-v2.5", "mimo-v2.5-pro"),
+        display_name="MiMo",
+        key_entry_url="https://platform.xiaomimimo.com/#/console/api-keys",
     ),
     "deepseek": ProviderPreset(
         preset="deepseek",
@@ -106,10 +108,11 @@ PRESETS: dict[str, ProviderPreset] = {
         provider="deepseek",
         api_family="openai_chat",
         endpoint="https://api.deepseek.com/v1",
-        default_model="deepseek-v4-pro",
         catalog_mode="live",
         catalog_endpoint="https://api.deepseek.com/models",
         allowed_models=("deepseek-v4-flash", "deepseek-v4-pro"),
+        display_name="DeepSeek",
+        key_entry_url="https://platform.deepseek.com/api_keys",
     ),
     "openai": ProviderPreset(
         preset="openai",

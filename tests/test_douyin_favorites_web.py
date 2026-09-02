@@ -154,7 +154,9 @@ class FakeLogin:
 def _authorized_service(
     root: Path, store: DouyinFavoritesStore, *, auto: bool
 ) -> WebService:
-    connect(root, name="note", preset="mimo", secret_value="fake-key")
+    connect(
+        root, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
     set_role_binding(root, role="note_writer", connection_name="note")
     set_role_binding(root, role="note_reviewer", connection_name="note")
     service = WebService(root, douyin_login=FakeLogin(), douyin_favorites=store)  # type: ignore[arg-type]

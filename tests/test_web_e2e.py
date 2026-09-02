@@ -620,6 +620,13 @@ def _add_connection(page: Page, *, name: str, preset: str, key: str) -> None:
     page.locator("#provider-connection-form [name=preset]").select_option(preset)
     if page.locator("#provider-key-field").is_visible():
         page.locator("#provider-connection-form [name=api_key]").fill(key)
+    if capability == "llm":
+        page.locator("#fetch-new-provider-models").click()
+        first_model = page.locator(
+            "#new-provider-model-list button[data-new-provider-model]"
+        ).first
+        expect(first_model).to_be_visible()
+        first_model.click()
     page.locator("#provider-connection-form button[type=submit]").click()
     expect(page.locator("#connection-dialog")).not_to_be_visible()
     expect(page.get_by_text(name, exact=True)).to_be_visible()
@@ -714,6 +721,8 @@ def loopback_app(
         return _task(root, "safe-input", created)
 
     import learnnest.web_app as web_app
+    from learnnest.provider_model_catalog import ModelCatalogPreview
+    from learnnest.provider_profiles import connection_presets
 
     monkeypatch.setattr(
         web_app,
@@ -725,6 +734,19 @@ def loopback_app(
         "process_source",
         lambda source, root, profile, **_kwargs: process(source, root, profile),
     )
+
+    def fake_preview(
+        preset: str, _api_key: str, **_kwargs: object
+    ) -> ModelCatalogPreview:
+        adapter = connection_presets()[preset]
+        return ModelCatalogPreview(
+            source=adapter.catalog_mode or "live",
+            models=[{"id": model_id} for model_id in sorted(adapter.allowed_models)],
+            note="离线测试目录。",
+            adapter_revision=adapter.adapter_revision,
+        )
+
+    monkeypatch.setattr(web_app, "preview_provider_model_catalog", fake_preview)
     provider_runs: list[tuple[str, ...]] = []
 
     def run_tasks(

@@ -53,7 +53,9 @@ def test_automation_policy_defaults_to_thirty_minute_checks() -> None:
 
 
 def _authorized_root(tmp_path: Path) -> Path:
-    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    connect(
+        tmp_path, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="note")
     set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
     save_policy(

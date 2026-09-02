@@ -95,7 +95,9 @@ def test_help_lists_all_pipeline_commands() -> None:
 def test_provider_delete_requires_confirmation_and_rejects_bound_connections(
     tmp_path: Path,
 ) -> None:
-    cloud = connect(tmp_path, name="mimo", preset="mimo", secret_value="secret")
+    cloud = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="secret", model="mimo-v2.5"
+    )
     assert cloud.secret_id is not None
     result = runner.invoke(
         app, ["provider", "delete", "mimo", "--output-root", str(tmp_path)]

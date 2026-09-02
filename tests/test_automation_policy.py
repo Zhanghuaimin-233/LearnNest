@@ -202,6 +202,7 @@ def test_cli_configures_retry_limit_without_persisting_secret(tmp_path: Path) ->
         name="main",
         preset="mimo",
         secret_value="automation-test-key",
+        model="mimo-v2.5",
     )
     update_limits(
         tmp_path,

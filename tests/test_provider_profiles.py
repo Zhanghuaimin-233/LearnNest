@@ -49,7 +49,9 @@ def test_product_registry_has_only_declared_cloud_and_local_capabilities() -> No
 def test_connections_are_capability_checked_and_secret_free_in_settings(
     tmp_path: Path,
 ) -> None:
-    connection = connect(tmp_path, name="mimo", preset="mimo", secret_value="key")
+    connection = connect(
+        tmp_path, name="mimo", preset="mimo", secret_value="key", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="mimo")
 
     settings = load_settings(tmp_path)

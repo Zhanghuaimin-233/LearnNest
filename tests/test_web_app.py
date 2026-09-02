@@ -156,11 +156,19 @@ def _prepare_due_automation_retry(
         ).model_dump_json(),
         encoding="utf-8",
     )
-    connect(root, name="note", preset="mimo", secret_value="fake-key")
+    connect(
+        root, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
     set_role_binding(root, role="note_writer", connection_name="note")
     set_role_binding(root, role="note_reviewer", connection_name="note")
     if default_output == "complete_note_with_audio":
-        connect(root, name="podcast", preset="deepseek", secret_value="fake-key")
+        connect(
+            root,
+            name="podcast",
+            preset="deepseek",
+            secret_value="fake-key",
+            model="deepseek-v4-pro",
+        )
         set_role_binding(root, role="podcast", connection_name="podcast")
         connect(root, name="voice", preset="windows-tts")
         set_role_binding(root, role="tts", connection_name="voice")
@@ -526,7 +534,9 @@ def test_web_app_restarts_attention_that_never_reached_a_provider(
             }
         ),
     )
-    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    connect(
+        tmp_path, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="note")
     set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
     service = web_app.WebService(tmp_path)
@@ -583,10 +593,18 @@ def test_web_app_restarts_with_the_intake_frozen_output_not_the_new_default(
             }
         ),
     )
-    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    connect(
+        tmp_path, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="note")
     set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
-    connect(tmp_path, name="podcast", preset="deepseek", secret_value="fake-key")
+    connect(
+        tmp_path,
+        name="podcast",
+        preset="deepseek",
+        secret_value="fake-key",
+        model="deepseek-v4-pro",
+    )
     set_role_binding(tmp_path, role="podcast", connection_name="podcast")
     connect(tmp_path, name="voice", preset="windows-tts")
     set_role_binding(tmp_path, role="tts", connection_name="voice")
@@ -683,7 +701,9 @@ def test_skipped_provider_stages_are_not_a_paid_execution_trace(tmp_path: Path) 
 def test_web_app_explains_and_resumes_a_zero_call_budget_block(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    connect(
+        tmp_path, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="note")
     set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
     update_limits(
@@ -883,7 +903,9 @@ def test_web_app_never_retries_an_unsafe_automation_fact(
             }
         ),
     )
-    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    connect(
+        tmp_path, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="note")
     set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
     service = web_app.WebService(tmp_path)
@@ -1172,7 +1194,9 @@ def test_web_app_exposes_automation_as_read_only_status(tmp_path: Path) -> None:
 def test_web_app_configures_authorizes_and_disables_automation_without_calls(
     tmp_path: Path,
 ) -> None:
-    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    connect(
+        tmp_path, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="note")
     set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
     client = _client(tmp_path)
@@ -1275,7 +1299,9 @@ def test_web_storage_rejects_a_relative_or_unwritable_launcher_root(
 def test_web_automation_authorization_requires_explicit_paid_confirmation(
     tmp_path: Path,
 ) -> None:
-    connect(tmp_path, name="note", preset="mimo", secret_value="fake-key")
+    connect(
+        tmp_path, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="note")
     set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
     client = _client(tmp_path)
@@ -1297,7 +1323,13 @@ def test_web_automation_authorization_requires_explicit_paid_confirmation(
 def test_web_automation_authorization_refreshes_unchanged_note_identity_after_audio_setup(
     tmp_path: Path,
 ) -> None:
-    connect(tmp_path, name="note", preset="mimo", secret_value="fake-note-key")
+    connect(
+        tmp_path,
+        name="note",
+        preset="mimo",
+        secret_value="fake-note-key",
+        model="mimo-v2.5",
+    )
     set_role_binding(tmp_path, role="note_writer", connection_name="note")
     set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
     client = _client(tmp_path)
@@ -1311,7 +1343,11 @@ def test_web_automation_authorization_refreshes_unchanged_note_identity_after_au
         },
     )
     connect(
-        tmp_path, name="podcast", preset="deepseek", secret_value="fake-podcast-key"
+        tmp_path,
+        name="podcast",
+        preset="deepseek",
+        secret_value="fake-podcast-key",
+        model="deepseek-v4-pro",
     )
     set_role_binding(tmp_path, role="podcast", connection_name="podcast")
     connect(tmp_path, name="voice", preset="windows-tts")

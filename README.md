@@ -52,13 +52,13 @@ LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面�
 - **效率模式**：`assisted-note` 的 Writer + Reviewer 路线，后续作为默认笔记产品路径。
 - **质量模式**：`quality-note`，仍处于开发调试阶段，成功率较低，不属于稳定承诺。
 - **严格生成路线**：已退出运行时；历史 V2/V3 产物只保留必要的只读兼容，不应反向影响标准笔记合同。
-- **Provider 范围**：稳定 WebUI 维护 MiMo、DeepSeek、MiMo TTS、Windows 系统语音，以及材料提取使用的本地 faster-whisper large-v3 和 PaddleOCR。ASR/OCR 未显式绑定时沿用内置本地默认，显式绑定后会冻结进新任务；保留新增 Provider 的模块接口，但当前不承诺其他 ASR/OCR 服务。
+- **Provider 范围**：WebUI 可维护 MiMo、DeepSeek 与 W3.2 的 15 个官方/多模型平台 LLM 预设，以及 MiMo TTS、Windows 系统语音、本地 faster-whisper large-v3 和 PaddleOCR。17 个 LLM 预设的设置流程已完成机器与用户功能验收；W3.2 新增 Provider 的真实目录、连接和成品调用仍待后续逐项授权验收。ASR/OCR 未显式绑定时沿用内置本地默认，显式绑定后会冻结进新任务；当前不承诺其他 ASR/OCR 服务。
 - **TTS 边界**：Windows System.Speech 是默认本地方案，可在设置页选择并保存精确 voice；MiMo TTS 是独立的可选云端连接、密钥引用、预算和失败域。
 
 阶段 0–5.5 已完成共享内核、Provider/TTS、自动收件箱以及三类来源的 fake/offline 浏览器产品门禁。
 后续真实单视频纵向验证确认生产基座可行；W2 又把任务工作台、单视频日常路径、持久暂停/继续、
-明确失败与恢复、跨页面设计和正式进程体验收敛到主 WebUI。当前 W3 继续区分并验收“设置已保存、
-职责已绑定、连接配置可读取、付费许可有效、默认产物可完成”五类事实；之后再依次收敛三类来源、
+明确失败与恢复、跨页面设计和正式进程体验收敛到主 WebUI。W3 已完成设置、职责绑定、连接健康、
+授权与 LLM 连接/模型选择收敛；当前 W4 继续统一三类来源的生产、历史和恢复语义，之后再依次收敛
 成品与回收生命周期、统一应用服务和完整非付费门禁，最后进行受限真实 Provider、多来源稳定性与
 人工成品质量验收。本机维护者若配置了 `LOCAL-RECORDS.md`，应以其中指向的现役实施 Plan 和唯一
 State 为准。
@@ -126,7 +126,7 @@ uv run learnnest podcast --help
 uv run learnnest tts --help
 ```
 
-MiMo、DeepSeek、MiMo TTS、Windows TTS、本地 faster-whisper large-v3 和 PaddleOCR 连接都可通过 WebUI 维护，Windows TTS 可选择精确 voice。本地 ASR/OCR 不需要 API Key；未显式绑定时继续使用内置本地能力，显式绑定后与其他职责一样在任务开始时冻结，设置变化不会改写运行中任务。
+17 个 LLM Provider 预设、MiMo TTS、Windows TTS、本地 faster-whisper large-v3 和 PaddleOCR 连接都可通过 WebUI 维护；云端 LLM 新连接必须先获取目录并显式选择模型，再一次性保存连接、DPAPI secret 与模型。Windows TTS 可选择精确 voice。本地 ASR/OCR 不需要 API Key；未显式绑定时继续使用内置本地能力，显式绑定后与其他职责一样在任务开始时冻结，设置变化不会改写运行中任务。
 设置页的“检查连接”会实际验证对应能力：本地 ASR/OCR/Windows TTS 只在本机执行；云端连接必须由用户明确确认，每次只发送一个最小真实请求且不自动重试，可能产生少量 Provider 费用。诊断调用会留下审计记录，但不占用任务每日调用限额，也不会保存 Provider 返回的测试内容。
 `.env` 只保留显式旧 CLI 的迁移兼容入口，具体参数以命令帮助和
 [`.env.example`](.env.example) 为准。

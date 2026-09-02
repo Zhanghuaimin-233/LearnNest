@@ -40,14 +40,15 @@ LearnNest（语栖）是 Windows 上本地优先的个人学习产品，目标�
 
 ## Provider 与自动化
 
-当前已经实现并完成机器验证的稳定范围是：
+当前已经实现并完成机器与设置流程验收的范围是：
 
-- LLM：MiMo、DeepSeek。
+- LLM：MiMo、DeepSeek，以及 W3.2 的 OpenAI、Kimi、GLM、百炼/Qwen、方舟/豆包、混元、
+  MiniMax、LongCat、百灵、xAI、OpenRouter、ModelScope、NVIDIA NIM、Anthropic、Gemini 预设。
 - TTS：Windows 系统 TTS（默认）、MiMo TTS（可选云端）。
 
-W3.2 已确认可以扩展经过审查的官方 LLM Provider 预设，以及 OpenRouter 这类具有公开官方
-文档的多模型平台；未实现和未验收的预设不得宣传为当前能力。新增预设只支持普通用户的固定
-官方 endpoint + API Key 路径，内部声明 API 格式、官方 Key 入口、目录模式和显式允许模型列表；
+W3.2 新增预设与三类原生 transport 只完成 fake/offline 机器和用户设置流程验收，尚未逐项完成真实
+Provider 目录、连接或成品调用；不得把配置成功宣传为真实 Provider 已验收。新增预设只支持普通用户
+的固定官方 endpoint + API Key 路径，内部声明 API 格式、官方 Key 入口、目录模式和显式允许模型列表；
 当前不增加地域、Workspace、Resource、Deployment 或其他企业连接字段。不得复制 CC Switch 的
 赞助商、中转站、推广链接、协议转换、候选地址探测或隐藏路由。Provider 不自动跨供应商回退。
 

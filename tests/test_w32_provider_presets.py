@@ -1279,6 +1279,30 @@ def test_web_api_preview_error_is_sanitized(
     assert "sk-live-1234567890" not in response.text
 
 
+def test_web_api_validation_failures_never_echo_credential_inputs(
+    tmp_path: Path,
+) -> None:
+    over_long_key = "sk-echo-" + "A" * 5000
+    client = TestClient(create_web_app(tmp_path))
+
+    preview = client.post(
+        "/api/providers/presets/glm/models", json={"api_key": over_long_key}
+    )
+    connection = client.post(
+        "/api/providers/connections",
+        json={"name": "echo", "preset": "kimi", "api_key": over_long_key},
+    )
+
+    for response in (preview, connection):
+        assert response.status_code == 422
+        assert over_long_key not in response.text
+        assert "AAAA" not in response.text
+        details = response.json()["detail"]
+        assert details
+        assert all("input" not in error for error in details)
+        assert all("msg" in error and "loc" in error for error in details)
+
+
 # --------------------------------------------------------------------------- #
 # Thin CLI: preview-models and explicit-model connect.
 # --------------------------------------------------------------------------- #

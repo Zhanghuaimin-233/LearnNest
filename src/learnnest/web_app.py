@@ -15,7 +15,8 @@ from urllib.parse import quote, urlsplit
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from markdown_it import MarkdownIt
 from pydantic import BaseModel, ConfigDict, Field
@@ -1012,6 +1013,20 @@ def create_web_app(
     app.state.web_service = service
     app.state.learning_workspace = workspace
     app.state.automation_coordinator = coordinator
+
+    @app.exception_handler(RequestValidationError)
+    async def sanitized_validation_error(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """Never echo request inputs back: they may contain API keys."""
+
+        def _scrub(error: dict[str, object]) -> dict[str, object]:
+            return {key: value for key, value in error.items() if key != "input"}
+
+        return JSONResponse(
+            status_code=422,
+            content={"detail": [_scrub(error) for error in exc.errors()]},
+        )
 
     @app.middleware("http")
     async def revalidate_loopback_ui(

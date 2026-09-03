@@ -74,6 +74,10 @@ Provider 目录、连接或成品调用；不得把配置成功宣传为真实 P
 - 普通任务的每次尝试都可见、计数并持久化；`unknown`、永久错误和配置错误立即停止。
 - 设置页的云端“检查连接”是显式诊断：只接受精确付费确认，每次发送一个最小真实请求且不自动重试；它可能产生 Provider 费用，会持久化审计事实但不计入任务每日调用限额，也不保存 Provider 返回正文。本地 ASR/OCR/Windows TTS 检查只运行对应本机能力，不产生云端费用。
 - Provider、云 TTS、重试次数或自动来源范围等实质变化会使旧授权失效。
+- 本地模型下载只覆盖现有 `faster-whisper large-v3` 与 PaddleOCR 检测/识别资产，由用户在 WebUI
+  显式触发。默认模型仓是程序本体旁的 `model`；用户可以切换到其他可写绝对路径，但下载进行中拒绝
+  切换，旧目录不自动迁移或删除。下载使用固定官方仓库/revision、独立暂存、完整性校验和原子发布；
+  页面加载、启动、测试、`doctor` 与任务执行不得隐式下载或联网补模型。
 
 ## 当前代码地图
 
@@ -86,6 +90,7 @@ Provider 目录、连接或成品调用；不得把配置成功宣传为真实 P
 | 笔记 | `note_*.py`、`evidence_*.py`、`quality_*.py`、`rendering.py` | 效率/质量策略、历史只读兼容、验证和渲染 |
 | 播客与音频 | `podcast_*.py`、`tts_*.py` | 播客稿、speech、音频与发布 |
 | 来源与下载 | `sources.py`、`downloader.py`、`adapters/` | 本地输入、公开 URL、抖音发现与下载 |
+| 本地模型资产 | `local_models.py`、`launcher.py`、`worker.py` | 模型仓配置、显式下载、校验发布与离线解析 |
 | 调度与锁 | `scheduler.py`、`locks.py`、`schedule_*.py` | 前台 tick、资源 semaphore 与跨进程锁 |
 | Provider 与运行配置 | `provider_profiles.py`、`provider_service.py`、`provider_secrets.py`、`runtime_config.py` | 连接、密钥、职责冻结、调用准入和旧 CLI 兼容 |
 | 回归保护 | `tests/` | 行为合同、失败路径和 Provider fake |
@@ -98,6 +103,7 @@ Provider 目录、连接或成品调用；不得把配置成功宣传为真实 P
 - `task_id` 是身份，标题和目录名不是；TaskRecord/BatchManifest JSON 是事实，SQLite 是可重建投影。
 - OCR、字幕和 AI 补充内容的来源类型必须区分；URL 只能逐字来自被引用的 transcript 或 OCR。
 - ASR 与 OCR 独立子进程运行；Paddle CPU OCR 显式禁用 MKLDNN。
+- ASR/OCR worker 只解析明确可用的本地模型目录；目录存在、包存在或下载结束不能单独等同于可用。
 - LLM 输出必须受约束并由程序验证 evidence、OCR 父 frame、URL、SHA 与最终 Markdown。
 - 外部调用成功响应先完整落盘，再验证和发布；恢复优先复用已落盘响应，不隐藏重复调用。
 - API Key、Cookie、原始 Provider 请求、模型缓存和本地媒体不得写入 Git、任务、批次、日志或 SQLite。

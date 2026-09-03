@@ -1626,7 +1626,7 @@ def test_workspace_page_syncs_the_initial_navigation_hash(tmp_path: Path) -> Non
     )
 
 
-def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
+def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
     tmp_path: Path,
 ) -> None:
     client = _client(tmp_path)
@@ -1644,15 +1644,9 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
         "task-search",
         "task-filter-empty",
         "task-table-heading",
-        "task-insight-rail",
-        "recent-activity",
-        "task-system-status",
         "task-workbench",
         "task-focus",
         "task-list",
-        "task-detail-view",
-        "task-detail",
-        "back-to-tasks",
         "single-video-dialog",
         "single-video-output",
         "storage-form",
@@ -1676,16 +1670,20 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
     assert "JSON.stringify({ confirm_paid: true })" in script
     assert "可能产生少量费用" in page
     assert "付费整理许可" in page
-    assert "--workspace-max: 2048px" in stylesheet
-    assert ".app-header-inner { max-width: var(--workspace-max)" in stylesheet
-    assert ".page-header { max-width: var(--workspace-max)" in stylesheet
-    assert ".task-page-header { max-width: var(--workspace-max);" in stylesheet
-    assert ".task-console { max-width: var(--workspace-max)" in stylesheet
-    assert "grid-template-columns: 232px minmax(0, 1fr) 300px" in stylesheet
+    assert "--sidebar-width: 220px" in stylesheet
+    assert "--workspace-max: 1180px" in stylesheet
+    assert ".app-header {" in stylesheet
+    assert "width: var(--sidebar-width)" in stylesheet
+    assert "margin-left: var(--sidebar-width)" in stylesheet
+    assert ".task-tabs" in stylesheet
     assert ".task-table-heading {" in stylesheet
-    assert ".task-insight-rail {" in stylesheet
-    assert ".source-workspace { max-width: var(--workspace-max)" in stylesheet
-    assert ".settings-workspace { max-width: var(--workspace-max)" in stylesheet
+    assert ".task-canvas," in stylesheet
+    assert ".source-type-nav" in stylesheet
+    assert ".settings-nav" in stylesheet
+    assert "@media (max-width: 760px)" in stylesheet
+    assert ".mobile-nav" in stylesheet
+    assert 'data-settings-tab="local-models"' in page
+    assert 'id="local-models-panel"' in page
     assert 'id="favorite-folders"' in page
     assert 'class="favorite-browser"' in page
     assert ".favorite-browser {" in stylesheet
@@ -1718,37 +1716,38 @@ def test_workspace_page_uses_the_flat_three_view_shell_and_real_video_entry(
     assert 'api("/api/learning/submit"' in script
     assert 'class="app-header"' in page
     assert "function renderTaskFocus(items)" in script
-    assert "function renderRecentActivity(items)" in script
-    assert "function renderTaskSystemStatus(status)" in script
+    assert 'id="task-insight-rail"' not in page
     assert "activeTaskQuery" in script
     assert "没有匹配的任务" in page
-    assert "function showTaskWorkbench()" in script
-    assert "taskWorkbench.hidden = true;" in script
-    assert "taskDetailView.hidden = false;" in script
+    assert 'id="task-detail-view"' not in page
+    assert 'id="task-detail"' not in page
+    assert 'id="back-to-tasks"' not in page
+    assert "function renderTaskDetail" not in script
+    assert "function selectTask" not in script
     assert ".task-focus {" in stylesheet
-    assert ".task-detail-view {" in stylesheet
-    assert ".production-track {" in stylesheet
+    assert ".row-problem {" in stylesheet
+    assert ".task-row-delete {" in stylesheet
     for element_id in (
         "source-console",
         "source-type-rail",
         "source-canvas",
-        "source-insight-rail",
-        "settings-insight-rail",
-        "settings-summary-output",
-        "settings-summary-license",
-        "settings-summary-favorites",
-        "settings-summary-interval",
+        "douyin-connection-state",
+        "favorites-status",
     ):
         assert f'id="{element_id}"' in page
-    assert "/static/workspace.css?v=20260831-1" in page
-    assert "/static/workspace.js?v=20260831-1" in page
+    assert 'id="source-insight-rail"' not in page
+    assert 'id="settings-insight-rail"' not in page
+    assert "/static/workspace.css?v=20260903-3" in page
+    assert "/static/workspace.js?v=20260903-3" in page
     assert ".source-console {" in stylesheet
-    assert "grid-template-columns: 232px minmax(0, 1fr) 300px" in stylesheet
-    assert ".source-insight-rail {" in stylesheet
-    assert ".settings-insight-rail {" in stylesheet
-    assert (
-        ".task-console.has-detail .task-canvas { grid-column: 2 / -1; }" in stylesheet
-    )
+    assert ".task-console," in stylesheet
+    assert "grid-template-columns: minmax(0, 1fr);" in stylesheet
+    assert "Settings use the approved prototype grammar" in stylesheet
+    assert ".settings-panel > .settings-form," in stylesheet
+    assert "#provider-role-list {" in stylesheet
+    assert ".provider-capability-card {" in stylesheet
+    assert ".local-model-location," in stylesheet
+    assert "border-radius: 16px;" in stylesheet
     assert ".note-reading {" in stylesheet
 
 
@@ -1774,12 +1773,13 @@ def test_workspace_settings_polling_preserves_dirty_forms_and_uses_inline_feedba
     assert "function settingsFormNeedsProtection(form)" in script
     assert "!settingsFormNeedsProtection(providerForm)" in script
     assert "!settingsFormNeedsProtection(providerCapabilityList)" in script
+    assert "!settingsFormNeedsProtection(providerRoleList)" in script
     assert (
         "loadProviderSettings(automationForm.elements.default_output.value, true)"
         in script
     )
     assert (
-        "if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(providerCapabilityList))) return;"
+        "if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(providerCapabilityList) || settingsFormNeedsProtection(providerRoleList))) return;"
         in script
     )
     assert "const mutationRevision = providerSettingsMutationRevision;" in script
@@ -1788,11 +1788,53 @@ def test_workspace_settings_polling_preserves_dirty_forms_and_uses_inline_feedba
         in script
     )
     assert "providerFeedback.textContent" in script
-    assert "const options = role.options.map" in script
-    assert "role.hint || role.state" in script
+    assert "const options = Array.isArray(role.options) ? role.options : [];" in script
+    assert "providerRolePresentation" in script
     assert "settings.roles?.[capability] || []" in script
     assert "function renderProviderCapabilityCard" in script
+    assert "function renderProviderRoleList(settings)" in script
+    assert (
+        'const providerRoleList = document.querySelector("#provider-role-list");'
+        in script
+    )
+    assert "renderProviderRoleList(settings);" in script
+    assert "data-setup-role-select" in script
+    capability_start = script.index("function renderProviderCapabilityCard")
+    capability_end = script.index("function renderProviderLimits", capability_start)
+    assert "data-setup-role-select" not in script[capability_start:capability_end]
+    assert "data-use-connection" not in script[capability_start:capability_end]
     assert "window.setTimeout(() => refresh(), document.hidden ? 5000 : 2000)" in script
+
+
+def test_workspace_script_keeps_local_model_reads_separate_from_explicit_mutations(
+    tmp_path: Path,
+) -> None:
+    script = _client(tmp_path).get("/static/workspace.js").text
+
+    assert "async function loadLocalModels" in script
+    assert 'api("/api/local-models")' in script
+    assert 'data-local-model-action="download"' in script
+    assert 'data-local-model-action="cancel"' in script
+    assert "`/api/local-models/${encodeURIComponent(assetId)}/${action}`" in script
+    assert 'method: "POST"' in script
+    for state_label in (
+        "未安装",
+        "外部可用",
+        "下载中",
+        "校验中",
+        "已就绪",
+        "下载失败",
+        "已中断",
+    ):
+        assert state_label in script
+    assert "const localModelPollLimit = 300;" in script
+    assert "stopLocalModelPolling();" in script
+
+    load_start = script.index("async function loadLocalModels")
+    load_end = script.index("function notifyLocalModel", load_start)
+    assert 'method: "POST"' not in script[load_start:load_end]
+    action_start = script.index("async function actOnLocalModel")
+    assert 'method: "POST"' in script[action_start:]
 
 
 def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
@@ -1830,9 +1872,11 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
     assert "partial_ready" in stylesheet
     assert "waiting_setup" in stylesheet
     assert "waiting_authorization" in stylesheet
-    assert ".detail-heading > div { min-width: 0; }" in stylesheet
+    assert ".row-problem strong {" in stylesheet
+    assert ".row-action-pair {" in stylesheet
     assert "overflow-wrap: anywhere" in stylesheet
     assert 'data-delete-item-ref="${escapeHtml(item.item_ref)}"' in script
+    assert 'data-action="open_note"' in script
     assert 'data-pause-item-ref="${escapeHtml(item.item_ref)}"' in script
     assert 'if (item.manually_paused) return "已暂停"' in script
     assert 'if (item.failure_reason) return "处理已停止"' in script

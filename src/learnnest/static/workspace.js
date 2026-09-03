@@ -46,6 +46,8 @@ const disconnectDouyinButton = document.querySelector("#disconnect-douyin");
 const providerForm = document.querySelector("#provider-connection-form");
 const providerKeyField = document.querySelector("#provider-key-field");
 const providerCapabilityList = document.querySelector("#provider-capability-list");
+const providerRoleList = document.querySelector("#provider-role-list");
+const providerRoleFeedback = document.querySelector("#provider-role-feedback");
 const providerState = document.querySelector("#provider-settings-state");
 const providerFeedback = document.querySelector("#provider-feedback");
 const providerReadyCount = document.querySelector("#provider-ready-count");
@@ -71,12 +73,6 @@ const trashList = document.querySelector("#trash-list");
 const taskSearch = document.querySelector("#task-search");
 const taskTableCount = document.querySelector("#task-table-count");
 const taskFilterEmpty = document.querySelector("#task-filter-empty");
-const recentActivity = document.querySelector("#recent-activity");
-const taskSystemStatus = document.querySelector("#task-system-status");
-const taskDetail = document.querySelector("#task-detail");
-const taskWorkbench = document.querySelector("#task-workbench");
-const taskDetailView = document.querySelector("#task-detail-view");
-const taskConsole = document.querySelector("#task-console");
 const taskFocus = document.querySelector("#task-focus");
 const workbenchNote = document.querySelector("#workbench-note");
 const taskSummary = document.querySelector("#task-summary");
@@ -125,13 +121,6 @@ const storageFeedback = document.querySelector("#storage-feedback");
 const runtimeState = document.querySelector(".runtime-state");
 const runtimeTitle = document.querySelector("#runtime-title");
 const runtimeCopy = document.querySelector("#runtime-copy");
-const settingsReadiness = document.querySelector(".settings-readiness");
-const settingsReadinessTitle = document.querySelector("#settings-readiness-title");
-const settingsReadinessCopy = document.querySelector("#settings-readiness-copy");
-const settingsSummaryOutput = document.querySelector("#settings-summary-output");
-const settingsSummaryLicense = document.querySelector("#settings-summary-license");
-const settingsSummaryFavorites = document.querySelector("#settings-summary-favorites");
-const settingsSummaryInterval = document.querySelector("#settings-summary-interval");
 let windowsVoicesLoaded = false;
 let pendingDeleteItemRef = null;
 const stateLabel = {
@@ -188,7 +177,6 @@ let providerSettingsMutationRevision = 0;
 const dirtySettingsForms = new Set();
 let currentSnapshot = { inbox: [], processing: [], library: [] };
 let currentTrash = [];
-let selectedItemRef = null;
 let activeTaskFilter = "all";
 let activeTaskQuery = "";
 let noticeTimer = null;
@@ -199,16 +187,326 @@ const providerConnectionNameDefaults = {
   "local-ocr": "local-ocr",
 };
 const providerCapabilityDefinitions = {
-  asr: { icon: "ASR", title: "ASR · 语音识别", copy: "从视频中提取语音内容，新任务只使用一个当前连接。", empty: "当前使用内置 faster-whisper large-v3；添加服务后可以显式绑定。" },
-  ocr: { icon: "OCR", title: "OCR · 画面文字", copy: "识别视频画面中的文字内容，新任务只使用一个当前连接。", empty: "当前使用内置 PaddleOCR；添加服务后可以显式绑定。" },
-  llm: { icon: "LLM", title: "LLM · 内容生成", copy: "连接是通用资源；Writer、Reviewer、Podcast 可以分别选择兼容连接。", empty: "还没有 LLM 连接。添加 MiMo 或 DeepSeek 后再分配职责。" },
-  tts: { icon: "TTS", title: "TTS · 语音合成", copy: "将播客稿转换为音频，新任务只使用一个当前语音连接。", empty: "还没有语音连接。可以添加 Windows 系统语音或 MiMo TTS。" },
+  asr: { icon: "ASR", title: "ASR · 语音识别", copy: "维护语音识别服务连接；具体职责请在职责配置中选择。", empty: "当前使用内置 faster-whisper large-v3；添加服务后可在职责配置中选择。" },
+  ocr: { icon: "OCR", title: "OCR · 画面文字", copy: "维护画面文字识别服务连接；具体职责请在职责配置中选择。", empty: "当前使用内置 PaddleOCR；添加服务后可在职责配置中选择。" },
+  llm: { icon: "LLM", title: "LLM · 内容生成", copy: "维护可供职责配置使用的文本模型连接。", empty: "还没有 LLM 连接。添加 MiMo 或 DeepSeek 后再到职责配置中选择。" },
+  tts: { icon: "TTS", title: "TTS · 语音合成", copy: "维护语音合成服务连接；具体职责请在职责配置中选择。", empty: "还没有语音连接。可以添加 Windows 系统语音或 MiMo TTS。" },
 };
-const providerRoleCopy = {
-  "笔记 Writer": "生成完整笔记初稿",
-  "笔记 Reviewer": "复核内容和证据约束",
-  "播客": "生成播客稿与 speech.txt",
+const providerRoleOrder = [
+  ["asr", "语音识别（ASR）", "ASR"],
+  ["ocr", "画面文字（OCR）", "OCR"],
+  ["llm", "笔记 Writer", "W"],
+  ["llm", "笔记 Reviewer", "R"],
+  ["llm", "播客", "P"],
+  ["tts", "TTS", "TTS"],
+];
+const providerRolePresentation = {
+  "语音识别（ASR）": { title: "语音识别", copy: "从视频中提取语音内容", local: "Faster Whisper · large-v3" },
+  "画面文字（OCR）": { title: "画面文字识别", copy: "识别视频画面中的字幕与文字", local: "PaddleOCR · PP-OCRv6 medium" },
+  "笔记 Writer": { title: "笔记生成", copy: "Writer · 生成最终学习笔记" },
+  "笔记 Reviewer": { title: "内容校验", copy: "Reviewer · 检查结构与生成结果" },
+  播客: { title: "播客稿生成", copy: "Podcast · 将学习笔记改写为口播内容" },
+  TTS: { title: "语音合成", copy: "将播客稿转换为语音" },
 };
+
+// The native settings page owns the markup for this panel.  Keep the selectors
+// deliberately small and optional so the existing workspace can load while a
+// page variant is being rolled out, and so reading status never creates a
+// model download as a side effect.
+const localModelPanelNames = new Set(["local", "local-models", "local_models"]);
+const localModelStateLabels = {
+  not_installed: "未安装",
+  external_ready: "外部可用",
+  queued: "准备下载",
+  downloading: "下载中",
+  verifying: "校验中",
+  ready: "已就绪",
+  failed: "下载失败",
+  interrupted: "已中断",
+  cancelled: "已中断",
+};
+const localModelCapabilityLabels = { asr: "语音识别", ocr: "画面文字识别" };
+const localModelNextSteps = {
+  not_installed: "点击“下载”后，才会从官方模型源获取文件。",
+  external_ready: "可以直接使用外部缓存，也可以下载一份由语栖管理的副本。",
+  queued: "下载即将开始；页面会继续显示最新状态。",
+  downloading: "下载进行中，完成校验前不会被任务使用。你可以随时取消。",
+  verifying: "文件正在校验，校验通过后才会发布为可用模型。",
+  ready: "模型已通过校验，相关任务可以使用。",
+  failed: "请检查网络或磁盘空间，然后点击“重新下载”。",
+  interrupted: "上次下载没有完成，点击“重新下载”即可继续尝试。",
+  cancelled: "下载已停止，确认后可以重新下载。",
+};
+const localModelPollDelay = 1200;
+const localModelPollLimit = 300;
+let localModelsSnapshot = null;
+let localModelPollTimer = null;
+let localModelPollCount = 0;
+let localModelRequestToken = 0;
+let localModelDomWarningShown = false;
+const localModelActionsInFlight = new Set();
+
+function findLocalModelPanel() {
+  return document.querySelector(
+    '#local-model-panel, #local-models-panel, #local-models, #local-model, #local, [data-local-model-panel], [data-local-models-panel], [data-settings-panel="local-models"], [data-settings-panel="local"]',
+  );
+}
+
+function findLocalModelList(panel = findLocalModelPanel()) {
+  return panel?.querySelector(
+    '#local-model-list, #local-models-list, #local-model-items, [data-local-model-list], .local-model-list',
+  ) || document.querySelector(
+    '#local-model-list, #local-models-list, #local-model-items, [data-local-model-list]',
+  );
+}
+
+function findLocalModelHome(panel = findLocalModelPanel()) {
+  return panel?.querySelector(
+    '#local-model-home, #local-model-directory, #local-model-path, #model-home, [data-local-model-home], [data-local-model-directory]',
+  ) || document.querySelector(
+    '#local-model-home, #local-model-directory, #local-model-path, #model-home, [data-local-model-home], [data-local-model-directory]',
+  );
+}
+
+function findLocalModelFeedback(panel = findLocalModelPanel()) {
+  return panel?.querySelector(
+    '#local-model-feedback, #local-models-feedback, #local-model-status, [data-local-model-feedback]',
+  ) || document.querySelector(
+    '#local-model-feedback, #local-models-feedback, #local-model-status, [data-local-model-feedback]',
+  );
+}
+
+function localModelDom() {
+  const panel = findLocalModelPanel();
+  const list = findLocalModelList(panel);
+  const home = findLocalModelHome(panel);
+  const feedback = findLocalModelFeedback(panel);
+  if (list) localModelDomWarningShown = false;
+  return { panel, list, home, feedback };
+}
+
+function reportMissingLocalModelDom() {
+  if (localModelDomWarningShown) return;
+  localModelDomWarningShown = true;
+  console.warn("[LearnNest] 本地模型页面尚未提供模型列表容器（建议使用 #local-model-list），跳过模型状态读取。");
+}
+
+function localModelsPanelVisible(panel) {
+  if (!panel) return true;
+  return !panel.hidden && !panel.closest("[hidden]");
+}
+
+function localModelIsActive(model) {
+  return ["queued", "downloading", "verifying"].includes(String(model?.state));
+}
+
+function localModelsAreActive(snapshot = localModelsSnapshot) {
+  return Array.isArray(snapshot?.models) && snapshot.models.some(localModelIsActive);
+}
+
+function stopLocalModelPolling() {
+  window.clearTimeout(localModelPollTimer);
+  localModelPollTimer = null;
+  localModelPollCount = 0;
+}
+
+function scheduleLocalModelPolling(snapshot = localModelsSnapshot) {
+  const { panel } = localModelDom();
+  if (!localModelsAreActive(snapshot) || document.hidden || !localModelsPanelVisible(panel)) {
+    stopLocalModelPolling();
+    return;
+  }
+  if (localModelPollTimer || localModelPollCount >= localModelPollLimit) return;
+  localModelPollTimer = window.setTimeout(() => {
+    localModelPollTimer = null;
+    localModelPollCount += 1;
+    loadLocalModels({ fromPoll: true });
+  }, localModelPollDelay);
+}
+
+function localModelProgress(model) {
+  const declared = model?.progress_percent;
+  const declaredNumber = Number(declared);
+  if (declared !== null && declared !== undefined && declared !== "" && Number.isFinite(declaredNumber)) {
+    return Math.max(0, Math.min(100, Math.round(declaredNumber)));
+  }
+  const downloaded = Number(model?.downloaded_bytes);
+  const expected = Number(model?.expected_bytes);
+  if (Number.isFinite(downloaded) && Number.isFinite(expected) && expected > 0) {
+    return Math.max(0, Math.min(100, Math.round(downloaded * 100 / expected)));
+  }
+  return null;
+}
+
+function localModelState(model) {
+  const state = String(model?.state || "not_installed");
+  if (state === "downloading" && /校验/.test(String(model?.message || ""))) return "verifying";
+  return state === "cancelled" ? "interrupted" : state;
+}
+
+function localModelId(model) {
+  return String(model?.asset_id || model?.package_id || "");
+}
+
+function localModelActionMarkup(model, state) {
+  const assetId = escapeHtml(localModelId(model));
+  if (!assetId) return "";
+  if (model.can_cancel === true || ["queued", "downloading", "verifying"].includes(state)) {
+    return `<button class="btn secondary-button local-model-action" type="button" data-local-model-action="cancel" data-asset-id="${assetId}">取消下载</button>`;
+  }
+  if (model.can_download === true || ["not_installed", "external_ready", "failed", "interrupted"].includes(state)) {
+    const label = ["failed", "interrupted"].includes(state) ? "重新下载" : "下载";
+    return `<button class="btn primary local-model-action" type="button" data-local-model-action="download" data-asset-id="${assetId}">${label}</button>`;
+  }
+  if (state === "ready") return '<button class="btn local-model-action" type="button" disabled>已就绪</button>';
+  return '<button class="btn local-model-action" type="button" disabled>暂不可用</button>';
+}
+
+function renderLocalModel(model) {
+  const state = localModelState(model);
+  const stateLabel = localModelStateLabels[state] || "状态未知";
+  const capability = localModelCapabilityLabels[model.capability] || "本地能力";
+  const progress = localModelProgress(model);
+  const active = localModelIsActive({ ...model, state });
+  const message = model.message || model.error || localModelNextSteps[state] || "请刷新后重试。";
+  const nextStep = localModelNextSteps[state] || "请刷新后查看最新状态。";
+  const assetId = localModelId(model);
+  const progressMarkup = active
+    ? `<div class="local-model-progress" aria-label="下载进度">
+        <div class="local-model-progress-label"><span>下载与校验进度</span><strong>${progress === null ? "进行中" : `${progress}%`}</strong></div>
+        <progress class="local-model-progress-bar" max="100"${progress === null ? "" : ` value="${progress}"`}>${progress === null ? "" : progress}</progress>
+      </div>`
+    : "";
+  return `<article class="model-card local-model-card" data-local-model="${escapeHtml(assetId)}" data-asset-id="${escapeHtml(assetId)}" data-state="${escapeHtml(state)}">
+    <div class="model-main local-model-main">
+      <div class="provider local-model-logo">${model.capability === "ocr" ? "OCR" : "FW"}</div>
+      <div class="local-model-copy"><div class="local-model-title"><b>${escapeHtml(model.name || "本地模型")} · ${escapeHtml(model.version || "")}</b><span class="tag local-model-state local-model-state-${escapeHtml(state)}">${escapeHtml(stateLabel)}</span></div>
+        <span>${escapeHtml(capability)} · ${escapeHtml(model.size_label || "大小未知")}</span>
+        <p class="local-model-message">${escapeHtml(message)}</p>
+        <p class="local-model-next">下一步：${escapeHtml(nextStep)}</p>${progressMarkup}
+      </div>
+    </div>
+    <div class="model-actions local-model-actions">${localModelActionMarkup(model, state)}</div>
+  </article>`;
+}
+
+function renderLocalModels(snapshot) {
+  const { list, home, feedback } = localModelDom();
+  if (!list) {
+    reportMissingLocalModelDom();
+    stopLocalModelPolling();
+    return;
+  }
+  if (home) {
+    const value = snapshot.model_home || "未设置";
+    if ("value" in home) home.value = value;
+    else home.textContent = value;
+  }
+  const models = Array.isArray(snapshot.models) ? snapshot.models : [];
+  list.innerHTML = models.length
+    ? models.map(renderLocalModel).join("")
+    : '<p class="empty">当前没有可管理的本地模型。</p>';
+  if (feedback) {
+    feedback.textContent = localModelsAreActive(snapshot)
+      ? "模型下载状态会自动更新；只有你点击下载按钮后才会联网。"
+      : "只有你点击下载按钮后才会联网；完成校验前的半成品不会被任务使用。";
+  }
+  scheduleLocalModelPolling(snapshot);
+}
+
+function applyLocalModelResponse(payload) {
+  if (Array.isArray(payload?.models)) {
+    localModelsSnapshot = payload;
+    renderLocalModels(payload);
+    return payload;
+  }
+  const payloadId = payload?.asset_id || payload?.package_id;
+  if (payloadId && (!localModelsSnapshot || !Array.isArray(localModelsSnapshot.models))) return null;
+  if (payloadId && Array.isArray(localModelsSnapshot.models)) {
+    const models = localModelsSnapshot.models.map((model) => (
+      localModelId(model) === payloadId ? { ...model, ...payload } : model
+    ));
+    localModelsSnapshot = { ...localModelsSnapshot, models };
+    renderLocalModels(localModelsSnapshot);
+    return localModelsSnapshot;
+  }
+  throw new Error("本地模型状态响应格式无效。");
+}
+
+async function loadLocalModels({ fromPoll = false } = {}) {
+  const dom = localModelDom();
+  if (!dom.list) {
+    reportMissingLocalModelDom();
+    stopLocalModelPolling();
+    return null;
+  }
+  const token = ++localModelRequestToken;
+  try {
+    const snapshot = await api("/api/local-models");
+    if (token !== localModelRequestToken) return snapshot;
+    applyLocalModelResponse(snapshot);
+    return snapshot;
+  } catch (error) {
+    if (token === localModelRequestToken) {
+      if (dom.feedback) dom.feedback.textContent = error.message;
+      if (!fromPoll) notifyLocalModel(error.message);
+      if (fromPoll && localModelsAreActive()) scheduleLocalModelPolling();
+    }
+    return null;
+  }
+}
+
+function notifyLocalModel(message) {
+  if (notice) say(message);
+}
+
+function localModelActionFromButton(button) {
+  const actionValue = button.dataset.localModelAction || button.dataset.modelAction || "";
+  const action = button.hasAttribute("data-local-model-download")
+    ? "download"
+    : button.hasAttribute("data-local-model-cancel")
+      ? "cancel"
+      : actionValue.includes("cancel")
+        ? "cancel"
+        : actionValue.includes("download")
+          ? "download"
+          : actionValue;
+  const assetId = button.dataset.assetId
+    || button.dataset.packageId
+    || button.dataset.modelAssetId
+    || button.dataset.modelId
+    || button.dataset.localModelDownload
+    || button.dataset.localModelCancel
+    || button.dataset.localModelId
+    || button.closest("[data-asset-id]")?.dataset.assetId
+    || button.closest("[data-package-id]")?.dataset.packageId
+    || "";
+  return { action, assetId };
+}
+
+async function actOnLocalModel(button, action, assetId) {
+  if (!assetId || !["download", "cancel"].includes(action) || localModelActionsInFlight.has(assetId)) return;
+  localModelActionsInFlight.add(assetId);
+  const label = button.textContent;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  button.textContent = action === "download" ? "正在开始…" : "正在取消…";
+  try {
+    const result = await api(`/api/local-models/${encodeURIComponent(assetId)}/${action}`, { method: "POST" });
+    if (result?.models || result?.asset_id || result?.package_id) applyLocalModelResponse(result);
+    await loadLocalModels();
+    notifyLocalModel(action === "download" ? "模型下载已开始；页面会显示真实进度。" : "正在取消模型下载。 ");
+  } catch (error) {
+    notifyLocalModel(error.message);
+    if (button.isConnected) {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = label;
+    }
+  } finally {
+    localModelActionsInFlight.delete(assetId);
+  }
+}
 
 function say(message) {
   window.clearTimeout(noticeTimer);
@@ -261,17 +559,20 @@ function renderProviderSettings(settings) {
   overview.classList.toggle("is-ready", allReady);
   overview.classList.toggle("is-partial", !allReady);
   overview.querySelector(".capability-overview-mark").textContent = allReady ? "✓" : "!";
-  providerReadyBadges.innerHTML = capabilities.map((capability) => {
+  const pendingCapabilities = capabilities.filter((capability) => !readyCapabilities.includes(capability));
+  providerReadyBadges.innerHTML = (pendingCapabilities.length ? pendingCapabilities : ["all"]).map((capability) => {
+    if (capability === "all") return '<span class="is-ready">全部能力可用</span>';
     const ready = readyCapabilities.includes(capability);
     return `<span class="${ready ? "is-ready" : "is-pending"}">${capability.toUpperCase()} ${ready ? "已配置" : "待配置"}</span>`;
   }).join("");
-  providerCapabilityList.innerHTML = capabilities.map((capability) => renderProviderCapabilityCard(capability, settings)).join("");
-  providerCapabilityList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", () => requestProviderConnectionCheck(button)));
-  providerCapabilityList.querySelectorAll("button[data-delete-connection]:not(:disabled)").forEach((button) => button.addEventListener("click", () => openDeleteProviderConnection(button)));
-  providerCapabilityList.querySelectorAll("button[data-use-connection]").forEach((button) => button.addEventListener("click", () => setCurrentProviderConnection(button)));
-  providerCapabilityList.querySelectorAll("button[data-select-model]").forEach((button) => button.addEventListener("click", () => openProviderModelDialog(button)));
-  providerCapabilityList.querySelectorAll("button[data-add-capability]").forEach((button) => button.addEventListener("click", () => openConnectionDialog(button.dataset.addCapability)));
-  providerCapabilityList.querySelectorAll("select[data-setup-role-select]").forEach((select) => select.addEventListener("change", () => saveProviderRoleSelection(select)));
+  if (providerCapabilityList) {
+    providerCapabilityList.innerHTML = capabilities.map((capability) => renderProviderCapabilityCard(capability, settings)).join("");
+    providerCapabilityList.querySelectorAll("button[data-check-connection]").forEach((button) => button.addEventListener("click", () => requestProviderConnectionCheck(button)));
+    providerCapabilityList.querySelectorAll("button[data-delete-connection]:not(:disabled)").forEach((button) => button.addEventListener("click", () => openDeleteProviderConnection(button)));
+    providerCapabilityList.querySelectorAll("button[data-select-model]").forEach((button) => button.addEventListener("click", () => openProviderModelDialog(button)));
+    providerCapabilityList.querySelectorAll("button[data-add-capability]").forEach((button) => button.addEventListener("click", () => openConnectionDialog(button.dataset.addCapability)));
+  }
+  renderProviderRoleList(settings);
   renderProviderLimits(settings.limits);
   renderSetupReadiness(settings.readiness);
 }
@@ -293,34 +594,85 @@ function providerLogo(item) {
   return item.capability.toUpperCase();
 }
 
-function renderProviderConnectionRow(item, capability, role) {
+function renderProviderConnectionRow(item, capability) {
   const current = item.bound_roles.length > 0;
   const model = item.voice || item.model || item.provider;
-  const roleBadges = item.bound_roles.map((label) => `<span class="provider-badge is-role">${escapeHtml(label.replace("笔记 ", ""))}</span>`).join("");
+  const boundBadge = current ? '<span class="provider-badge is-role">已分配职责</span>' : "";
   const localBadge = item.local ? '<span class="provider-badge is-local">本地</span>' : "";
   const selectModelButton = capability === "llm" && !item.local
     ? `<button type="button" data-select-model="${escapeHtml(item.name)}">选择模型</button>`
     : "";
-  const useButton = capability === "llm"
-    ? ""
-    : `<button class="provider-use-button" type="button" data-use-connection="${escapeHtml(item.name)}" data-use-role="${escapeHtml(role?.name || "")}"${current ? " disabled" : ""}>${current ? "使用中" : "设为当前"}</button>`;
-  const deleteTitle = item.deletable ? `删除连接 ${item.name}` : item.delete_reason;
+  const deleteTitle = item.deletable
+    ? `删除连接 ${item.name}`
+    : "连接正在被职责使用，请先在职责配置中更换连接。";
   return `<section class="provider-row${current ? " is-current" : ""}" data-connection="${escapeHtml(item.name)}">
     <span class="provider-logo">${escapeHtml(providerLogo(item))}</span>
     <span class="provider-copy"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.provider)} · ${escapeHtml(item.state)}</span></span>
-    <span class="provider-model"><strong>${escapeHtml(model)}</strong><span class="provider-badges">${roleBadges}${localBadge}</span></span>
-    <span class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查连接</button>${selectModelButton}${useButton}<button class="provider-delete-button" type="button" data-delete-connection="${escapeHtml(item.name)}" aria-label="${escapeHtml(deleteTitle)}" title="${escapeHtml(deleteTitle)}"${item.deletable ? "" : " disabled"}>删除</button></span>
+    <span class="provider-model"><strong>${escapeHtml(model)}</strong><span class="provider-badges">${boundBadge}${localBadge}</span></span>
+    <span class="provider-actions"><button type="button" data-check-connection="${escapeHtml(item.name)}">检查连接</button>${selectModelButton}<button class="provider-delete-button" type="button" data-delete-connection="${escapeHtml(item.name)}" aria-label="${escapeHtml(deleteTitle)}" title="${escapeHtml(deleteTitle)}"${item.deletable ? "" : " disabled"}>删除</button></span>
   </section>`;
 }
 
-function renderLlmRoleAssignment(roles) {
-  const bound = roles.filter((role) => role.connection).length;
-  const rows = roles.map((role) => {
-    const options = role.options.map((item) => `<option value="${escapeHtml(item.name)}"${item.name === role.connection ? " selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.provider)}</option>`).join("");
-    const attention = !role.connection || !["连接配置可读取", "本地配置可读取"].includes(role.state);
-    return `<label class="llm-role-row"><span class="llm-role-copy"><strong>${escapeHtml(role.name)}</strong><small>${escapeHtml(providerRoleCopy[role.name] || "选择新任务使用的连接")}</small></span><select data-setup-role-select="${escapeHtml(role.name)}" data-current-connection="${escapeHtml(role.connection || "")}" aria-label="为${escapeHtml(role.name)}选择连接"><option value="">暂不绑定</option>${options}</select><span class="llm-role-state${attention ? " is-attention" : ""}"><strong>${attention ? "等待绑定" : "已绑定"}</strong>${escapeHtml(role.hint || role.state)}</span></label>`;
+function providerRoleOptionLabel(option, settings) {
+  const connection = (settings.connections || []).find((item) => item.name === option.name);
+  const model = connection?.voice || connection?.model || "";
+  return [option.name, model].filter(Boolean).join(" · ");
+}
+
+function renderProviderRoleRow(role, capability, icon, settings) {
+  const presentation = providerRolePresentation[role.name] || { title: role.name, copy: "选择新任务使用的模型或服务" };
+  const options = Array.isArray(role.options) ? role.options : [];
+  const currentConnection = role.connection || "";
+  const currentConnectionItem = (settings.connections || []).find((item) => item.name === currentConnection);
+  const renderedOptions = options.map((item) => `<option value="${escapeHtml(item.name)}"${item.name === currentConnection ? " selected" : ""}>${escapeHtml(providerRoleOptionLabel(item, settings))}</option>`).join("");
+  const implicitLocal = !currentConnection && role.state === "使用内置本地能力";
+  const ready = implicitLocal || (currentConnection && ["连接配置可读取", "本地配置可读取"].includes(role.state));
+  const attention = !ready;
+  const currentLabel = implicitLocal
+    ? presentation.local
+    : currentConnection
+      ? providerRoleOptionLabel({ name: currentConnection }, settings)
+      : "暂无可选模型";
+  const select = options.length
+    ? `<select data-setup-role-select="${escapeHtml(role.name)}" data-current-connection="${escapeHtml(currentConnection)}" aria-label="为${escapeHtml(presentation.title)}选择模型或连接"><option value="">暂不绑定</option>${renderedOptions}</select>`
+    : `<select data-setup-role-select="${escapeHtml(role.name)}" data-current-connection="${escapeHtml(currentConnection)}" aria-label="${escapeHtml(presentation.title)}当前模型或连接" disabled><option value="${escapeHtml(currentConnection)}">${escapeHtml(currentLabel)}</option></select>`;
+  const iconClass = capability === "llm"
+    ? ({ "笔记 Writer": "i-writer", "笔记 Reviewer": "i-review", 播客: "i-podcast" }[role.name] || "i-llm")
+    : `i-${capability}`;
+  const roleClass = capability === "llm" ? "provider-role-llm" : `provider-role-${capability}`;
+  const statusLabel = implicitLocal ? "设备可用" : ready ? "已绑定" : "等待连接";
+  const statusCopy = implicitLocal
+    ? "添加连接后可以切换"
+    : ready
+      ? "新任务将使用此模型"
+      : role.name === "播客"
+        ? "需要单独的播客连接"
+        : "先到 API 连接添加模型";
+  const modelMark = implicitLocal ? (capability === "asr" ? "FW" : "OCR") : currentConnectionItem ? providerLogo(currentConnectionItem) : "—";
+  return `<label class="role-row provider-role-row ${roleClass}" data-provider-role="${escapeHtml(role.name)}"><span class="role-meta provider-role-meta"><span class="role-icon provider-role-icon ${iconClass}" aria-hidden="true">${escapeHtml(icon)}</span><span class="role-copy"><strong>${escapeHtml(presentation.title)}</strong><small>${escapeHtml(presentation.copy)}</small></span></span><span class="role-picker${attention ? " is-attention" : ""}"><span class="role-model-mark" aria-hidden="true">${escapeHtml(modelMark)}</span>${select}<span class="role-state provider-role-state${attention ? " is-attention" : ""}"><strong>${statusLabel}</strong><small>${escapeHtml(statusCopy)}</small></span></span></label>`;
+}
+
+function renderProviderRoleList(settings) {
+  if (!providerRoleList) return;
+  const roleGroups = settings.roles || {};
+  const rolesByName = new Map(
+    Object.entries(roleGroups).flatMap(([capability, roles]) => (
+      Array.isArray(roles) ? roles.map((role) => [role.name, { role, capability }]) : []
+    )),
+  );
+  const rows = providerRoleOrder.map(([capability, name, icon], index) => {
+    const entry = rolesByName.get(name);
+    const divider = index === 2 ? '<div class="role-section-divider"><span>内容生成职责</span><small>可以分别指定不同模型</small></div>' : "";
+    return entry ? divider + renderProviderRoleRow(entry.role, capability, icon, settings) : "";
   }).join("");
-  return `<section class="llm-role-assignment" id="setup-readiness" aria-label="LLM 职责分配"><div class="llm-role-heading"><div><h4>职责分配</h4><p>这是 LLM 独有的子项；保存后只影响尚未开始的新任务。</p></div><span>${bound} / ${roles.length} 已绑定</span></div>${rows}</section>`;
+  providerRoleList.innerHTML = rows || '<p class="empty">正在读取职责配置。</p>';
+  providerRoleList.querySelectorAll("select[data-setup-role-select]").forEach((select) => select.addEventListener("change", () => saveProviderRoleSelection(select)));
+  if (providerRoleFeedback) {
+    const roleRows = [...providerRoleList.querySelectorAll("[data-provider-role]")];
+    const readyCount = roleRows.filter((row) => !row.querySelector(".role-state.is-attention")).length;
+    providerRoleFeedback.textContent = roleRows.length ? `${readyCount} / ${roleRows.length} 项可用` : "暂无职责";
+    providerRoleFeedback.classList.toggle("connected", roleRows.length > 0 && readyCount === roleRows.length);
+  }
 }
 
 function renderProviderCapabilityCard(capability, settings) {
@@ -328,13 +680,11 @@ function renderProviderCapabilityCard(capability, settings) {
   const roles = settings.roles?.[capability] || [];
   const connections = settings.connections.filter((item) => item.capability === capability);
   const ready = providerCapabilityIsReady(capability, roles);
-  const state = capability === "llm" ? `${roles.filter((role) => role.connection).length} 个职责已绑定` : ready ? "已就绪" : "等待选择";
+  const state = ready ? "已就绪" : connections.length ? `${connections.length} 个连接` : "尚未配置";
   const rows = connections.length
-    ? connections.map((item) => renderProviderConnectionRow(item, capability, roles[0])).join("")
+    ? connections.map((item) => renderProviderConnectionRow(item, capability)).join("")
     : `<p class="provider-capability-empty">${escapeHtml(definition.empty)}</p>`;
-  const assignment = capability === "llm" ? renderLlmRoleAssignment(roles) : "";
-  const footer = capability === "llm" ? `${connections.length} 个 LLM 连接` : roles[0]?.connection ? `当前：${roles[0].connection}` : roles[0]?.state || "尚未选择连接";
-  return `<article class="provider-capability-card" data-capability="${capability}"><header class="provider-capability-header"><div class="provider-capability-identity"><span class="provider-capability-icon">${definition.icon}</span><div><div class="provider-capability-title"><h3>${definition.title}</h3><span class="provider-card-state${ready ? "" : " is-attention"}">${escapeHtml(state)}</span></div><p class="provider-capability-copy">${definition.copy}</p></div></div><button class="add-capability-button" type="button" data-add-capability="${capability}" aria-label="添加 ${capability.toUpperCase()} 服务"><strong aria-hidden="true">＋</strong><span>添加服务</span></button></header><p class="provider-list-label">服务连接</p><div class="provider-connection-list">${rows}</div>${assignment}<footer class="capability-card-footer">${escapeHtml(footer)}</footer></article>`;
+  return `<article class="provider-capability-card" data-capability="${capability}"><header class="provider-capability-header"><div class="provider-capability-identity"><span class="provider-capability-icon">${definition.icon}</span><div><div class="provider-capability-title"><h3>${definition.title}</h3><span class="provider-card-state${ready ? "" : " is-attention"}">${escapeHtml(state)}</span></div><p class="provider-capability-copy">${definition.copy}</p></div></div><button class="add-capability-button" type="button" data-add-capability="${capability}" aria-label="添加 ${capability.toUpperCase()} 服务"><strong aria-hidden="true">＋</strong><span>添加服务</span></button></header><p class="provider-list-label">服务连接</p><div class="provider-connection-list">${rows}</div></article>`;
 }
 
 function renderProviderLimits(limits) {
@@ -504,10 +854,6 @@ async function saveProviderModel(event) {
 
 function renderSetupReadiness(readiness) {
   if (!readiness) return;
-  const ready = readiness.state === "可以开始整理";
-  settingsReadiness.classList.toggle("is-ready", ready);
-  settingsReadinessTitle.textContent = ready ? "当前可以完整产出" : readiness.state;
-  settingsReadinessCopy.textContent = readiness.message;
   singleVideoReadiness.textContent = readiness.message;
 }
 
@@ -515,41 +861,31 @@ async function saveProviderRoleSelection(select) {
   const label = select.dataset.setupRoleSelect;
   const previous = select.dataset.currentConnection || "";
   const next = select.value;
-  dirtySettingsForms.add(providerCapabilityList);
+  const roleContainer = providerRoleList || providerCapabilityList;
+  if (roleContainer) dirtySettingsForms.add(roleContainer);
   select.disabled = true;
   try {
     const settings = next
       ? await api(`/api/providers/setup-roles/${encodeURIComponent(label)}`, { method: "POST", body: JSON.stringify({ connection_name: next }) })
       : await api(`/api/providers/setup-roles/${encodeURIComponent(label)}`, { method: "DELETE" });
-    dirtySettingsForms.delete(providerCapabilityList);
+    if (roleContainer) dirtySettingsForms.delete(roleContainer);
     providerSettingsMutationRevision += 1;
     renderProviderSettings(settings);
     await loadAutomationStatus();
-    providerFeedback.textContent = next ? `已更新${label}使用的连接；付费整理许可需要重新确认。` : `已解除${label}的连接；补齐职责后才能完整产出。`;
-    say(providerFeedback.textContent);
+    const message = next ? `已更新${label}使用的连接；付费整理许可需要重新确认。` : `已解除${label}的连接；补齐职责后才能完整产出。`;
+    providerFeedback.textContent = message;
+    say(message);
   } catch (error) {
     select.value = previous;
-    dirtySettingsForms.delete(providerCapabilityList);
+    if (roleContainer) dirtySettingsForms.delete(roleContainer);
+    if (providerRoleFeedback) {
+      providerRoleFeedback.textContent = "保存失败";
+      providerRoleFeedback.classList.remove("connected");
+    }
     showProviderUpdateFailure(error);
   } finally {
     select.disabled = false;
   }
-}
-
-async function setCurrentProviderConnection(button) {
-  const label = button.dataset.useRole;
-  const connectionName = button.dataset.useConnection;
-  const buttonLabel = button.textContent;
-  button.disabled = true;
-  button.textContent = "切换中…";
-  try {
-    const settings = await api(`/api/providers/setup-roles/${encodeURIComponent(label)}`, { method: "POST", body: JSON.stringify({ connection_name: connectionName }) });
-    providerSettingsMutationRevision += 1;
-    renderProviderSettings(settings);
-    await loadAutomationStatus();
-    providerFeedback.textContent = `已将${connectionName}设为${label}的当前连接；付费整理许可需要重新确认。`;
-    say(providerFeedback.textContent);
-  } catch (error) { showProviderUpdateFailure(error); } finally { button.disabled = false; button.textContent = buttonLabel; }
 }
 
 function requestProviderConnectionCheck(button) {
@@ -751,7 +1087,7 @@ async function loadProviderSettings(defaultOutput = null, protectDirty = false) 
     const settings = await api(`/api/providers/settings${defaultOutput ? `?default_output=${encodeURIComponent(defaultOutput)}` : ""}`);
     if (protectDirty && mutationRevision !== providerSettingsMutationRevision) return;
     if (!protectDirty && mutationRevision !== providerSettingsMutationRevision) return;
-    if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(providerCapabilityList))) return;
+    if (protectDirty && (settingsFormNeedsProtection(providerForm) || settingsFormNeedsProtection(providerCapabilityList) || settingsFormNeedsProtection(providerRoleList))) return;
     if (protectDirty && settingsFormNeedsProtection(providerLimitsForm)) return;
     renderProviderSettings(settings);
     await refreshProviderConnectionFields();
@@ -759,12 +1095,13 @@ async function loadProviderSettings(defaultOutput = null, protectDirty = false) 
 }
 
 function settingsFormNeedsProtection(form) {
+  if (!form) return false;
   const active = document.activeElement;
   return form.contains(active) || dirtySettingsForms.has(form);
 }
 
 async function refreshProviderSettingsWhenIdle() {
-  if (!settingsFormNeedsProtection(providerForm) && !settingsFormNeedsProtection(providerCapabilityList) && !settingsFormNeedsProtection(providerLimitsForm)) await loadProviderSettings(automationForm.elements.default_output.value, true);
+  if (!settingsFormNeedsProtection(providerForm) && !settingsFormNeedsProtection(providerCapabilityList) && !settingsFormNeedsProtection(providerRoleList) && !settingsFormNeedsProtection(providerLimitsForm)) await loadProviderSettings(automationForm.elements.default_output.value, true);
 }
 
 function renderList(target, items, empty) {
@@ -775,8 +1112,19 @@ function renderList(target, items, empty) {
   target.innerHTML = items.map((item) => {
     const progress = taskProgress(item);
     const output = item.output_goal === "complete_note_with_audio" ? "笔记 + 音频" : "完整笔记";
+    const failure = item.failure_reason
+      ? `<span class="row-problem"><strong>失败阶段 · ${escapeHtml(item.failure_stage || "处理内容")}</strong><span>${escapeHtml(item.failure_reason)}</span></span>`
+      : "";
+    const contextualAction = item.action && item.action_kind !== "open_note" && learningActionKinds.has(item.action_kind)
+      ? `<button class="task-row-context" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>`
+      : "";
+    const pauseControl = item.can_pause
+      ? `<button class="task-row-pause" type="button" data-pause-item-ref="${escapeHtml(item.item_ref)}" title="只暂停后续调度；已经开始的处理会继续完成">暂停</button>`
+      : "";
+    const deleteDisabled = item.state === "organizing" && !item.manually_paused;
+    const viewDisabled = !item.note_href;
     return `
-    <article class="learning-row" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}" tabindex="0">
+    <article class="learning-row" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}">
       <div class="learning-copy">
         <h3>${escapeHtml(item.title)}</h3>
         <p>${escapeHtml(item.source)}</p>
@@ -784,56 +1132,23 @@ function renderList(target, items, empty) {
       </div>
       <div class="row-progress">
         <span class="progress-ring" aria-label="进度 ${progress}%" style="--task-progress:${progress}%"><strong>${progress}</strong><small>%</small></span>
-        <div class="progress-copy"><span class="learning-state">${escapeHtml(publicStateLabel(item))}</span><span class="task-progress" aria-hidden="true" style="--task-progress:${progress}%"><i></i></span></div>
+        <div class="progress-copy"><span class="learning-state">${escapeHtml(publicStateLabel(item))}</span><span class="task-progress" aria-hidden="true" style="--task-progress:${progress}%"><i></i></span>${failure}</div>
       </div>
       <span class="row-output">${output}</span>
       <span class="row-next">${escapeHtml(item.message)}</span>
-      <button class="open-task-detail" type="button" data-open-item-ref="${escapeHtml(item.item_ref)}" aria-label="查看 ${escapeHtml(item.title)}">查看 <span aria-hidden="true">→</span></button>
+      <div class="row-actions">${contextualAction}${pauseControl}<div class="row-action-pair"><button class="task-row-delete" type="button" data-delete-item-ref="${escapeHtml(item.item_ref)}"${deleteDisabled ? ' disabled title="当前步骤仍在完成，结束后可删除"' : ""}>删除</button><button class="task-row-view" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="open_note"${viewDisabled ? ' disabled title="笔记生成后即可查看"' : ` aria-label="查看 ${escapeHtml(item.title)}的笔记"`}>查看</button></div></div>
     </article>`;
   }).join("");
-  target.querySelectorAll("article[data-item-ref]").forEach((row) => {
-    row.addEventListener("click", (event) => {
-      if (event.target.closest("button")) return;
-      selectTask(row.dataset.itemRef);
-    });
-    row.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectTask(row.dataset.itemRef); }
-    });
-  });
-  target.querySelectorAll("button[data-open-item-ref]").forEach((button) => button.addEventListener("click", () => selectTask(button.dataset.openItemRef)));
-  updateSelectedTaskRows();
+  target.querySelectorAll("button[data-item-ref][data-action]:not(:disabled)").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
+  target.querySelectorAll("button[data-pause-item-ref]").forEach((button) => button.addEventListener("click", () => pauseItem(button.dataset.pauseItemRef)));
+  const itemsByRef = new Map(items.map((item) => [item.item_ref, item]));
+  target.querySelectorAll("button[data-delete-item-ref]:not(:disabled)").forEach((button) => button.addEventListener("click", () => openDeleteTask(itemsByRef.get(button.dataset.deleteItemRef))));
 }
 
 function publicStateLabel(item) {
   if (item.manually_paused) return "已暂停";
   if (item.failure_reason) return "处理已停止";
   return stateLabel[item.state] || "需要检查";
-}
-
-function renderRecentActivity(items) {
-  const recent = items.slice(0, 3);
-  recentActivity.innerHTML = recent.length
-    ? recent.map((item) => `
-      <div class="activity-item" data-filter="${taskFilterFor(item)}">
-        <i aria-hidden="true"></i>
-        <div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(publicStateLabel(item))} · ${escapeHtml(item.message)}</span></div>
-      </div>`).join("")
-    : '<p class="empty">还没有任务动态。</p>';
-}
-
-function renderTaskSystemStatus(status) {
-  const paidAuthorized = Boolean(status.paid_authorized ?? status.enabled);
-  const autoFavorites = Boolean(status.auto_new_favorites_active);
-  const interval = Number(status.check_interval_minutes || 30);
-  const output = status.default_output === "complete_note" ? "完整笔记" : "笔记 + 音频";
-  const rows = [
-    ["默认成品", output, Boolean(status.configured)],
-    ["付费整理", paidAuthorized ? "许可有效" : "尚未许可", paidAuthorized],
-    ["新收藏", autoFavorites ? "自动加入" : "仅手动加入", autoFavorites],
-    ["自动检查", `每 ${interval} 分钟`, Boolean(status.configured)],
-  ];
-  taskSystemStatus.innerHTML = rows.map(([title, copy, ready]) => `
-    <div class="system-status-row ${ready ? "is-ready" : ""}"><i aria-hidden="true"></i><div><strong>${title}</strong><span>${copy}</span></div></div>`).join("");
 }
 
 function renderTrash(items) {
@@ -849,7 +1164,7 @@ function renderTrash(items) {
       <div class="row-progress"><span class="progress-ring" aria-hidden="true" style="--task-progress:0%"><strong>0</strong><small>%</small></span><div class="progress-copy"><span class="learning-state">回收区</span><span class="task-progress" aria-hidden="true"><i></i></span></div></div>
       <span class="row-output">任务记录</span>
       <span class="row-next">移入时间：${escapeHtml(formatSyncTime(item.trashed_at))}</span>
-      <button class="open-task-detail" type="button" data-restore-bundle="${escapeHtml(item.bundle_id)}">恢复任务</button>
+      <div class="row-actions"><button class="task-row-view" type="button" data-restore-bundle="${escapeHtml(item.bundle_id)}">恢复任务</button></div>
     </article>`).join("");
   trashList.querySelectorAll("button[data-restore-bundle]").forEach((button) => button.addEventListener("click", () => restoreTrashItem(button.dataset.restoreBundle)));
 }
@@ -861,7 +1176,6 @@ function render(snapshot) {
   renderList(lists.inbox, snapshot.inbox, "");
   const items = allLearningItems();
   if (!items.length) lists.processing.innerHTML = '<p class="empty">还没有任务。请从来源页添加内容。</p>';
-  if (selectedItemRef && !items.some((item) => item.item_ref === selectedItemRef)) showTaskWorkbench();
   const counts = {
     all: items.length,
     attention: items.filter((item) => taskFilterFor(item) === "attention").length,
@@ -875,10 +1189,8 @@ function render(snapshot) {
   taskCount.textContent = counts.all;
   taskSummary.innerHTML = `<strong>${counts.processing} 项正在处理</strong>，${counts.paused} 项已暂停，${counts.attention} 项需要你处理，${counts.completed} 项已完成。`;
   taskTableCount.textContent = `共 ${counts.all} 项`;
-  renderRecentActivity(items);
   renderActiveTaskFocus(items);
   applyTaskFilter();
-  if (selectedItemRef) renderTaskDetail(items.find((item) => item.item_ref === selectedItemRef));
 }
 
 function renderActiveTaskFocus(items = allLearningItems()) {
@@ -909,8 +1221,11 @@ function renderTaskFocus(items) {
   const filter = taskFilterFor(item);
   const heading = filter === "attention" ? "这项任务需要你处理" : filter === "paused" ? "这项任务已暂停" : filter === "processing" ? "这项任务正在向前推进" : filter === "queued" ? "下一项等待整理的内容" : "最近完成的内容";
   taskFocus.className = `task-focus ${filter}`;
-  taskFocus.innerHTML = `<div class="focus-signal" aria-hidden="true"><span>${taskProgress(item)}</span><small>%</small></div><div class="focus-copy"><p class="panel-kicker">${heading}</p><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.message)}</p></div><button class="focus-open" type="button">查看任务 <span aria-hidden="true">→</span></button>`;
-  taskFocus.querySelector("button").addEventListener("click", () => selectTask(item.item_ref));
+  const noteAction = item.note_href
+    ? `<button class="focus-open" type="button">查看笔记 <span aria-hidden="true">→</span></button>`
+    : "";
+  taskFocus.innerHTML = `<div class="focus-signal" aria-hidden="true"><span>${taskProgress(item)}</span><small>%</small></div><div class="focus-copy"><p class="panel-kicker">${heading}</p><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.message)}</p></div>${noteAction}`;
+  taskFocus.querySelector("button")?.addEventListener("click", () => actOnItem(item.item_ref, "open_note"));
 }
 
 function allLearningItems() {
@@ -946,10 +1261,6 @@ function taskProgress(item) {
   return 34;
 }
 
-function updateSelectedTaskRows() {
-  taskList.querySelectorAll("article[data-item-ref]").forEach((row) => row.classList.toggle("is-selected", row.dataset.itemRef === selectedItemRef));
-}
-
 function applyTaskFilter() {
   const showingTrash = activeTaskFilter === "trash";
   Object.values(lists).forEach((list) => { list.hidden = showingTrash; });
@@ -976,88 +1287,6 @@ function applyTaskFilter() {
     return filterMatches && (!activeTaskQuery || searchable.includes(activeTaskQuery));
   });
   renderActiveTaskFocus(focusItems);
-}
-
-function selectTask(itemRef) {
-  selectedItemRef = itemRef;
-  renderTaskDetail(allLearningItems().find((item) => item.item_ref === itemRef));
-  taskWorkbench.hidden = true;
-  taskDetailView.hidden = false;
-  taskConsole.classList.add("has-detail");
-  updateSelectedTaskRows();
-  window.scrollTo({ top: 0, behavior: "auto" });
-  document.querySelector("#back-to-tasks")?.focus({ preventScroll: true });
-}
-
-function showTaskWorkbench() {
-  selectedItemRef = null;
-  taskDetailView.hidden = true;
-  taskWorkbench.hidden = false;
-  taskConsole.classList.remove("has-detail");
-  updateSelectedTaskRows();
-  window.scrollTo({ top: 0, behavior: "auto" });
-}
-
-function trackSteps(item) {
-  const labels = item.output_goal === "complete_note_with_audio"
-    ? ["获取内容", "准备材料", "生成笔记", "生成音频"]
-    : ["获取内容", "准备材料", "生成笔记"];
-  let completed = 1;
-  const failedCompletedSteps = {
-    source: 0,
-    transcript: 1,
-    frames: 1,
-    ocr: 1,
-    evidence: 1,
-    content_pack: 1,
-    note: 2,
-    publish: 2,
-    podcast_script: 3,
-    tts: 3,
-  };
-  if (item.failure_stage_code && item.failure_stage_code in failedCompletedSteps) completed = failedCompletedSteps[item.failure_stage_code];
-  else {
-    if (["materials_ready", "waiting_setup", "waiting_authorization", "queued", "organizing", "partial_ready", "needs_action", "ready"].includes(item.state)) completed = 2;
-    if (["partial_ready", "ready"].includes(item.state) || item.note_href) completed = 3;
-    if (item.state === "ready") completed = labels.length;
-  }
-  return labels.map((label, index) => ({ label, done: index < completed, current: index === completed && completed < labels.length }));
-}
-
-function renderTaskDetail(item) {
-  if (!item) {
-    taskDetail.classList.remove("has-selection");
-    taskDetail.innerHTML = '<div class="empty-detail"><span aria-hidden="true">⌁</span><h2>还没有任务</h2><p>请从来源页添加第一项内容。</p></div>';
-    return;
-  }
-  taskDetail.classList.add("has-selection");
-  const steps = trackSteps(item);
-  const percent = taskProgress(item);
-  const needsUserAction = ["needs_action", "waiting_setup", "waiting_authorization"].includes(item.state);
-  const actionHeading = item.action ? "下一步" : needsUserAction ? "当前需要你处理" : "当前不需要操作";
-  const actionCopy = item.action || needsUserAction
-    ? item.message
-    : "语栖会根据当前事实更新这里；遇到需要确认的问题时会给出明确操作。";
-  const currentStateLabel = publicStateLabel(item);
-  const pauseControl = item.can_pause
-    ? `<button class="pause-link" type="button" data-pause-item-ref="${escapeHtml(item.item_ref)}" title="只暂停后续调度；已经开始的处理会继续完成">暂停任务</button>`
-    : "";
-  const failureExplanation = item.failure_reason
-    ? `<section class="failure-explanation" aria-label="失败详情"><p>失败阶段</p><strong>${escapeHtml(item.failure_stage || "处理内容")}</strong><p>具体原因</p><strong>${escapeHtml(item.failure_reason)}</strong></section>`
-    : "";
-  taskDetail.innerHTML = `
-    <div class="detail-layout">
-      <div class="detail-main">
-        <div class="detail-heading"><div><p class="panel-kicker">当前任务</p><h2>${escapeHtml(item.title)}</h2><p class="detail-source">${escapeHtml(item.source)}</p></div><span class="detail-status ${escapeHtml(item.manually_paused ? "paused" : item.state)}">${escapeHtml(currentStateLabel)}</span></div>
-        <p class="detail-message">${escapeHtml(item.message)}</p>
-        ${failureExplanation}
-        <section class="production-section"><div class="production-heading"><h3>产出轨道</h3><span>${percent}%</span></div><div class="production-track" style="--track-steps:${steps.length}">${steps.map((step) => `<span class="track-step${step.done ? " is-done" : ""}${step.current ? " is-current" : ""}"><i>${step.done ? "✓" : ""}</i><strong>${step.label}</strong></span>`).join("")}</div></section>
-      </div>
-      <aside class="detail-action"><p class="panel-kicker">${actionHeading}</p><strong>${escapeHtml(currentStateLabel)}</strong><p>${escapeHtml(actionCopy)}</p><div class="detail-action-controls">${item.action && learningActionKinds.has(item.action_kind) ? `<button class="detail-primary-action" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>` : ""}${pauseControl}<button class="danger-link" type="button" data-delete-item-ref="${escapeHtml(item.item_ref)}"${item.state === "organizing" && !item.manually_paused ? ' disabled title="当前步骤仍在完成，结束后可删除"' : ""}>删除任务</button></div>${item.audio_href ? `<audio controls preload="metadata" src="${escapeHtml(item.audio_href)}">音频暂时不能播放。</audio>` : ""}</aside>
-    </div>`;
-  taskDetail.querySelectorAll("button[data-item-ref]").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
-  taskDetail.querySelector("button[data-pause-item-ref]")?.addEventListener("click", () => pauseItem(item.item_ref));
-  taskDetail.querySelector("button[data-delete-item-ref]:not(:disabled)")?.addEventListener("click", () => openDeleteTask(item));
 }
 
 function openDeleteTask(item) {
@@ -1185,7 +1414,6 @@ async function loadFavorites() {
 
 function renderAutomationStatus(status) {
   lastAutomationStatus = status;
-  renderTaskSystemStatus(status);
   const paidAuthorized = status.paid_authorized ?? status.enabled;
   const autoNewFavoritesEnabled = Boolean(status.auto_new_favorites_enabled ?? status.auto_organize_new_favorites);
   const autoNewFavoritesActive = Boolean(status.auto_new_favorites_active);
@@ -1195,10 +1423,6 @@ function renderAutomationStatus(status) {
   const outputLabel = output === "complete_note" ? "完整笔记" : "笔记 + 音频";
   defaultOutputLabel.textContent = outputLabel;
   singleVideoOutput.textContent = outputLabel;
-  settingsSummaryOutput.textContent = outputLabel;
-  settingsSummaryLicense.textContent = paidAuthorized ? "许可有效" : status.needs_authorization ? "需要重新确认" : "尚未许可";
-  settingsSummaryFavorites.textContent = autoNewFavoritesEnabled ? "自动加入" : "仅手动加入";
-  settingsSummaryInterval.textContent = `每 ${Number(status.check_interval_minutes || 30)} 分钟`;
   runtimeState.classList.toggle("is-on", paidAuthorized);
   runtimeTitle.textContent = paidAuthorized ? "付费整理许可已开启" : "付费整理许可未开启";
   runtimeCopy.textContent = paidAuthorized
@@ -1251,13 +1475,13 @@ async function loadStorageStatus(protectDirty = false) {
 function showView(view, updateHash = true) {
   const target = document.querySelector(`[data-view-panel="${view}"]`);
   if (!target) return;
+  if (view !== "settings") stopLocalModelPolling();
   document.querySelectorAll("[data-view-panel]").forEach((panel) => {
     const visible = panel === target;
     panel.hidden = !visible;
     panel.classList.toggle("is-visible", visible);
   });
   document.querySelectorAll(".bookmark[data-view]").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
-  if (view === "tasks") showTaskWorkbench();
   if (updateHash && window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
   window.scrollTo({ top: 0, behavior: "auto" });
 }
@@ -1269,6 +1493,8 @@ function showSettingsPanel(panelName) {
     panel.classList.toggle("is-visible", visible);
   });
   document.querySelectorAll("[data-settings-tab]").forEach((button) => button.classList.toggle("is-active", button.dataset.settingsTab === panelName));
+  if (localModelPanelNames.has(panelName)) loadLocalModels();
+  else stopLocalModelPolling();
 }
 
 function populateProviderPresetOptions(capability, preset = null) {
@@ -1624,7 +1850,6 @@ deleteTaskForm.addEventListener("submit", async (event) => {
   try {
     await api(`/api/learning/items/${encodeURIComponent(taskId)}`, { method: "DELETE" });
     closeDeleteTask();
-    showTaskWorkbench();
     say("任务已移入回收区。");
     await Promise.all([refresh(true), loadSourceJobs()]);
   } catch (error) {
@@ -1846,7 +2071,6 @@ window.addEventListener("hashchange", () => {
 document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => {
   activeTaskFilter = button.dataset.filter;
   document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("is-active", item === button));
-  if (activeTaskFilter === "trash") showTaskWorkbench();
   applyTaskFilter();
 }));
 taskSearch.addEventListener("input", () => {
@@ -1884,12 +2108,20 @@ document.querySelectorAll("[data-go-tasks]").forEach((button) => button.addEvent
 document.querySelectorAll("[data-source-target]").forEach((button) => button.addEventListener("click", () => {
   document.querySelector(`#${CSS.escape(button.dataset.sourceTarget)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }));
+document.addEventListener("click", (event) => {
+  const element = event.target instanceof Element ? event.target : null;
+  const button = element?.closest("[data-local-model-action], [data-local-model-download], [data-local-model-cancel], [data-model-action]");
+  if (!button) return;
+  const { action, assetId } = localModelActionFromButton(button);
+  if (!["download", "cancel"].includes(action) || !assetId) return;
+  event.preventDefault();
+  void actOnLocalModel(button, action, assetId);
+});
 document.querySelectorAll("[data-close-connection]").forEach((button) => button.addEventListener("click", () => connectionDialog.close()));
 document.querySelector("#local-video").addEventListener("change", (event) => {
   selectedVideoName.textContent = event.currentTarget.files[0]?.name || "MP4、MOV、MKV、AVI、MPEG 或 WebM";
 });
 document.querySelector("#refresh-tasks").addEventListener("click", () => refresh(true));
-document.querySelector("#back-to-tasks").addEventListener("click", showTaskWorkbench);
 
 window.fetchProviderModels = fetchProviderModels;
 connectDouyinButton.addEventListener("click", connectDouyin);
@@ -1898,6 +2130,10 @@ cancelDouyinButton.addEventListener("click", cancelDouyin);
 disconnectDouyinButton.addEventListener("click", cancelDouyin);
 syncFavoritesButton.addEventListener("click", syncFavorites);
 document.addEventListener("visibilitychange", () => refresh(true));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopLocalModelPolling();
+  else if (localModelsAreActive()) scheduleLocalModelPolling();
+});
 if ("scrollRestoration" in window.history) window.history.scrollRestoration = "manual";
 window.addEventListener("load", () => window.scrollTo({ top: 0, behavior: "auto" }));
 restoreDouyinLogin();

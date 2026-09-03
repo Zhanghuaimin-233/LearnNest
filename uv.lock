@@ -430,6 +430,7 @@ dependencies = [
     { name = "fastapi", marker = "implementation_name == 'cpython' and sys_platform == 'win32'" },
     { name = "faster-whisper", marker = "implementation_name == 'cpython' and sys_platform == 'win32'" },
     { name = "filelock", marker = "implementation_name == 'cpython' and sys_platform == 'win32'" },
+    { name = "huggingface-hub", marker = "implementation_name == 'cpython' and sys_platform == 'win32'" },
     { name = "markdown-it-py", marker = "implementation_name == 'cpython' and sys_platform == 'win32'" },
     { name = "openai", marker = "implementation_name == 'cpython' and sys_platform == 'win32'" },
     { name = "paddleocr", marker = "implementation_name == 'cpython' and sys_platform == 'win32'" },
@@ -453,6 +454,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.116.0" },
     { name = "faster-whisper", specifier = ">=1.2.1" },
     { name = "filelock", specifier = ">=3.29.7" },
+    { name = "huggingface-hub", specifier = ">=1.2.3" },
     { name = "markdown-it-py", specifier = ">=4.2.0" },
     { name = "openai", specifier = ">=2.45.0" },
     { name = "paddleocr" },
@@ -657,7 +659,7 @@ dependencies = [
     { name = "typing-extensions", marker = "implementation_name == 'cpython' and sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://paddle-whl.bj.bcebos.com/stable/cpu/paddlepaddle/paddlepaddle-3.3.0-cp312-cp312-win_amd64.whl" },
+    { url = "https://paddle-whl.cdn.bcebos.com/stable/cpu/paddlepaddle/paddlepaddle-3.3.0-cp312-cp312-win_amd64.whl" },
 ]
 
 [[package]]

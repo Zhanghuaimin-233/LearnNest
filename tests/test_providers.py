@@ -25,8 +25,11 @@ def install_fake_faster_whisper(
             device: str,
             compute_type: str,
             use_auth_token: bool | None = None,
+            local_files_only: bool = False,
         ) -> None:
-            calls.append((model_name, device, compute_type, use_auth_token))
+            calls.append(
+                (model_name, device, compute_type, use_auth_token, local_files_only)
+            )
 
         def transcribe(
             self, media_path: str, *, language: str, word_timestamps: bool
@@ -121,6 +124,7 @@ def test_run_worker_uses_current_interpreter_and_worker_module(
     assert options["text"] is True
     assert options["check"] is False
     assert options["env"]["HF_HUB_OFFLINE"] == "1"
+    assert options["env"]["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] == "True"
 
 
 def test_run_worker_forwards_cached_models_in_offline_mode(
@@ -201,7 +205,7 @@ def test_asr_worker_writes_transcript_json_from_the_provider(
     ]
     assert output_path.read_text(encoding="utf-8")
     assert calls == [
-        ("tiny", "cuda", "int8_float16", False),
+        ("tiny", "cuda", "int8_float16", False, True),
         (str(tmp_path / "fixture.wav"), "zh", True, "transcribe"),
     ]
 
@@ -219,6 +223,7 @@ def test_asr_worker_does_not_use_an_ambient_huggingface_token(
             device: str,
             compute_type: str,
             use_auth_token: bool | None = None,
+            local_files_only: bool = False,
         ) -> None:
             constructor_arguments.update(
                 {
@@ -226,6 +231,7 @@ def test_asr_worker_does_not_use_an_ambient_huggingface_token(
                     "device": device,
                     "compute_type": compute_type,
                     "use_auth_token": use_auth_token,
+                    "local_files_only": local_files_only,
                 }
             )
 
@@ -254,6 +260,7 @@ def test_asr_worker_does_not_use_an_ambient_huggingface_token(
     worker.run_asr(tmp_path / "fixture.wav", tmp_path / "transcript.json", "large-v3")
 
     assert constructor_arguments["use_auth_token"] is False
+    assert constructor_arguments["local_files_only"] is True
 
 
 def test_asr_worker_splits_long_word_timestamps_without_losing_text(
@@ -414,6 +421,39 @@ def test_ocr_worker_writes_json_and_disables_mkldnn(
     assert constructor_arguments[0]["enable_mkldnn"] is False
 
 
+def test_workers_receive_only_explicit_local_model_directories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    asr_calls = install_fake_faster_whisper(monkeypatch)
+    ocr_arguments = install_fake_paddleocr(monkeypatch)
+    asr_model = tmp_path / "asr"
+    detection = tmp_path / "det"
+    recognition = tmp_path / "rec"
+
+    worker.run_asr(
+        tmp_path / "fixture.wav",
+        tmp_path / "transcript.json",
+        "large-v3",
+        model_path=asr_model,
+    )
+    worker.run_ocr(
+        tmp_path / "fixture.png",
+        tmp_path / "ocr.json",
+        detection_model_path=detection,
+        recognition_model_path=recognition,
+    )
+
+    assert asr_calls[0] == (
+        str(asr_model),
+        "cuda",
+        "int8_float16",
+        False,
+        True,
+    )
+    assert ocr_arguments[0]["text_detection_model_dir"] == str(detection)
+    assert ocr_arguments[0]["text_recognition_model_dir"] == str(recognition)
+
+
 def test_worker_stdout_json_uses_ascii_wire_format_for_cp936_console(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -431,7 +471,15 @@ def test_worker_stdout_json_uses_ascii_wire_format_for_cp936_console(
     monkeypatch.setattr(
         worker, "build_parser", lambda: SimpleNamespace(parse_args=lambda: arguments)
     )
-    monkeypatch.setattr(worker, "run_ocr", lambda image_path, output_path: payload)
+    monkeypatch.setattr(
+        worker,
+        "run_ocr",
+        lambda image_path, output_path, **kwargs: payload,
+    )
+    monkeypatch.setattr(
+        "learnnest.local_models.resolve_ocr_models",
+        lambda: (Path("det-model"), Path("rec-model")),
+    )
     monkeypatch.setattr(sys, "stdout", cp936_stdout)
 
     worker.main()
@@ -444,6 +492,8 @@ def test_doctor_asr_runs_the_provider_against_a_local_fixture_outside_project_cw
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls = install_fake_faster_whisper(monkeypatch)
+    model_path = tmp_path / "large-v3"
+    monkeypatch.setattr("learnnest.local_models.resolve_asr_model", lambda: model_path)
     monkeypatch.chdir(tmp_path)
 
     assert worker.doctor_asr() == {
@@ -451,7 +501,13 @@ def test_doctor_asr_runs_the_provider_against_a_local_fixture_outside_project_cw
         "ok": True,
         "segments": 1,
     }
-    assert calls[0] == ("tiny", "cuda", "int8_float16", False)
+    assert calls[0] == (
+        str(model_path),
+        "cuda",
+        "int8_float16",
+        False,
+        True,
+    )
     assert Path(calls[1][0]).name == "asr-smoke.wav"
 
 
@@ -459,6 +515,12 @@ def test_doctor_ocr_runs_the_provider_against_a_local_fixture(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     constructor_arguments = install_fake_paddleocr(monkeypatch)
+    detection = tmp_path / "det"
+    recognition = tmp_path / "rec"
+    monkeypatch.setattr(
+        "learnnest.local_models.resolve_ocr_models",
+        lambda: (detection, recognition),
+    )
     monkeypatch.chdir(tmp_path)
 
     assert worker.doctor_ocr() == {"provider": "paddleocr", "ok": True, "items": 1}
@@ -479,9 +541,16 @@ def test_doctor_rejects_empty_provider_output(
 ) -> None:
     if doctor is worker.doctor_asr:
         installer(monkeypatch, [])
+        monkeypatch.setattr(
+            "learnnest.local_models.resolve_asr_model", lambda: Path("asr-model")
+        )
         expected = "ASR verification produced no transcript segments"
     else:
         installer(monkeypatch, [])
+        monkeypatch.setattr(
+            "learnnest.local_models.resolve_ocr_models",
+            lambda: (Path("det-model"), Path("rec-model")),
+        )
         expected = "OCR verification produced no recognized text"
 
     with pytest.raises(RuntimeError, match=expected):

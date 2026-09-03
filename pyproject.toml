@@ -6,6 +6,7 @@ dependencies = [
     "faster-whisper>=1.2.1",
     "filelock>=3.29.7",
     "fastapi>=0.116.0",
+    "huggingface-hub>=1.2.3",
     "markdown-it-py>=4.2.0",
     "openai>=2.45.0",
     "paddleocr",

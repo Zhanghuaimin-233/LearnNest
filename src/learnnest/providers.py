@@ -33,7 +33,10 @@ def run_worker(
 def _asset_environment() -> dict[str, str]:
     """Force workers to use locally available model assets only."""
     cache = load_runtime_environment(os.getcwd()).get("HUGGINGFACE_HUB_CACHE", "")
-    environment = {"HF_HUB_OFFLINE": "1"}
+    environment = {
+        "HF_HUB_OFFLINE": "1",
+        "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
+    }
     if cache:
         environment["HUGGINGFACE_HUB_CACHE"] = cache
     return environment

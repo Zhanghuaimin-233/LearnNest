@@ -14,7 +14,6 @@ from typing import Any, Iterator
 
 
 _DEFAULT_ASR_MODEL = "large-v3"
-_ASR_SMOKE_MODEL = "tiny"
 _ASR_SEGMENT_SOFT_MS = 4_000
 _ASR_SEGMENT_HARD_MS = 8_000
 _ASR_BOUNDARY_CHARS = tuple("，,。.!！?？;；:：、")
@@ -164,16 +163,23 @@ def _asr_segments(provider_segments: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
-def run_asr(media_path: Path, output_path: Path, model_name: str) -> dict[str, Any]:
+def run_asr(
+    media_path: Path,
+    output_path: Path,
+    model_name: str,
+    *,
+    model_path: Path | None = None,
+) -> dict[str, Any]:
     """Transcribe a media file inside the CTranslate2-only worker process."""
 
     from faster_whisper import WhisperModel
 
     model = WhisperModel(
-        model_name,
+        str(model_path) if model_path is not None else model_name,
         device="cuda",
         compute_type="int8_float16",
         use_auth_token=False,
+        local_files_only=True,
     )
     segments, info = model.transcribe(
         str(media_path), language="zh", word_timestamps=True
@@ -207,17 +213,32 @@ def _ocr_items(result: Any) -> list[dict[str, Any]]:
     ]
 
 
-def run_ocr(image_path: Path, output_path: Path) -> dict[str, Any]:
+def run_ocr(
+    image_path: Path,
+    output_path: Path,
+    *,
+    detection_model_path: Path | None = None,
+    recognition_model_path: Path | None = None,
+) -> dict[str, Any]:
     """Recognize one selected frame inside the Paddle-only worker process."""
 
     from paddleocr import PaddleOCR
 
+    model_arguments: dict[str, object] = {}
+    if detection_model_path is not None and recognition_model_path is not None:
+        model_arguments = {
+            "text_detection_model_name": "PP-OCRv6_medium_det",
+            "text_detection_model_dir": str(detection_model_path),
+            "text_recognition_model_name": "PP-OCRv6_medium_rec",
+            "text_recognition_model_dir": str(recognition_model_path),
+        }
     ocr = PaddleOCR(
         lang="ch",
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
         enable_mkldnn=False,
+        **model_arguments,
     )
     payload = {
         "schema_version": "1.0",
@@ -252,7 +273,14 @@ def doctor_asr() -> dict[str, Any]:
         TemporaryDirectory(prefix="learnnest-doctor-") as temporary_directory,
     ):
         temporary_output = Path(temporary_directory) / "transcript.json"
-        payload = run_asr(fixture, temporary_output, model_name=_ASR_SMOKE_MODEL)
+        from learnnest.local_models import resolve_asr_model
+
+        payload = run_asr(
+            fixture,
+            temporary_output,
+            model_name=_DEFAULT_ASR_MODEL,
+            model_path=resolve_asr_model(),
+        )
         if not payload["segments"]:
             raise RuntimeError("ASR verification produced no transcript segments")
         return {
@@ -270,7 +298,15 @@ def doctor_ocr() -> dict[str, Any]:
         TemporaryDirectory(prefix="learnnest-doctor-") as temporary_directory,
     ):
         temporary_output = Path(temporary_directory) / "ocr.json"
-        payload = run_ocr(fixture, temporary_output)
+        from learnnest.local_models import resolve_ocr_models
+
+        detection, recognition = resolve_ocr_models()
+        payload = run_ocr(
+            fixture,
+            temporary_output,
+            detection_model_path=detection,
+            recognition_model_path=recognition,
+        )
         if not payload["items"]:
             raise RuntimeError("OCR verification produced no recognized text")
         return {"provider": "paddleocr", "ok": True, "items": len(payload["items"])}
@@ -297,9 +333,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     if args.command == "asr":
-        payload = run_asr(args.media_path, args.output_path, args.model)
+        from learnnest.local_models import resolve_asr_model
+
+        payload = run_asr(
+            args.media_path,
+            args.output_path,
+            args.model,
+            model_path=resolve_asr_model(),
+        )
     elif args.command == "ocr":
-        payload = run_ocr(args.image_path, args.output_path)
+        from learnnest.local_models import resolve_ocr_models
+
+        detection, recognition = resolve_ocr_models()
+        payload = run_ocr(
+            args.image_path,
+            args.output_path,
+            detection_model_path=detection,
+            recognition_model_path=recognition,
+        )
     elif args.command == "doctor-asr":
         payload = doctor_asr()
     else:

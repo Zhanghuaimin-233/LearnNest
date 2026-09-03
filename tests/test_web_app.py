@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import time
 import asyncio
+import json
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,7 @@ from typer.testing import CliRunner
 import learnnest.cli as cli
 import learnnest.learning_workspace as learning_workspace
 import learnnest.web_app as web_app
+from learnnest.local_models import LocalModelCancelled, LocalModelService
 from learnnest.execution import RecoveryPlan
 from learnnest.launcher import load_launcher_config
 from learnnest.automation_models import (
@@ -82,6 +85,88 @@ def _wait_for_job(client: TestClient, job_id: str) -> dict[str, Any]:
             return payload
         time.sleep(0.01)
     raise AssertionError("background job did not complete")
+
+
+def _wait_for_model(client: TestClient, package_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        response = client.get("/api/local-models")
+        model = next(
+            item
+            for item in response.json()["models"]
+            if item["package_id"] == package_id
+        )
+        if model["state"] in {"ready", "failed", "cancelled"}:
+            return model
+        time.sleep(0.01)
+    raise AssertionError("model job did not complete")
+
+
+def test_local_model_api_lists_and_installs_without_exposing_paths(
+    tmp_path: Path,
+) -> None:
+    def installer(spec, staging, progress, cancel) -> None:  # type: ignore[no-untyped-def]
+        component = staging / "model"
+        component.mkdir(parents=True)
+        for name in (
+            "config.json",
+            "model.bin",
+            "preprocessor_config.json",
+            "tokenizer.json",
+            "vocabulary.json",
+        ):
+            (component / name).write_bytes(name.encode())
+
+    models = LocalModelService(
+        tmp_path / "device-models", installer=installer, discover_external=False
+    )
+    client = TestClient(web_app.create_web_app(tmp_path, local_models=models))
+
+    listed = client.get("/api/local-models")
+    accepted = client.post("/api/local-models/faster-whisper-large-v3/download")
+    ready = _wait_for_model(client, "faster-whisper-large-v3")
+
+    assert listed.status_code == 200
+    assert listed.json()["model_home"] == str(models.root)
+    assert accepted.status_code == 202
+    assert ready["state"] == "ready"
+    assert ready["asset_id"] == "faster-whisper-large-v3"
+    assert ready["managed"] is True
+    assert str(tmp_path) not in json.dumps(ready)
+
+
+def test_local_model_api_rejects_unknown_package(tmp_path: Path) -> None:
+    models = LocalModelService(tmp_path / "device-models", discover_external=False)
+    client = TestClient(web_app.create_web_app(tmp_path, local_models=models))
+
+    response = client.post("/api/local-models/not-a-package/download")
+
+    assert response.status_code == 404
+
+
+def test_local_model_api_rejects_duplicate_download_and_accepts_cancel(
+    tmp_path: Path,
+) -> None:
+    started = threading.Event()
+
+    def installer(spec, staging, progress, cancel) -> None:  # type: ignore[no-untyped-def]
+        started.set()
+        assert cancel.wait(timeout=2)
+        raise LocalModelCancelled
+
+    models = LocalModelService(
+        tmp_path / "device-models", installer=installer, discover_external=False
+    )
+    client = TestClient(web_app.create_web_app(tmp_path, local_models=models))
+
+    first = client.post("/api/local-models/faster-whisper-large-v3/download")
+    assert started.wait(timeout=1)
+    duplicate = client.post("/api/local-models/faster-whisper-large-v3/download")
+    cancelled = client.post("/api/local-models/faster-whisper-large-v3/cancel")
+
+    assert first.status_code == 202
+    assert duplicate.status_code == 409
+    assert cancelled.status_code == 202
 
 
 class _RetryableWriter:

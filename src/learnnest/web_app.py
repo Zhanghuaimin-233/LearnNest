@@ -63,6 +63,11 @@ from learnnest.launcher import (
     save_launcher_output_root,
 )
 from learnnest.locks import LockUnavailable, task_lock
+from learnnest.local_models import (
+    LocalModelError,
+    LocalModelNotFoundError,
+    LocalModelService,
+)
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
 from learnnest.provider_profiles import (
@@ -279,6 +284,7 @@ class WebService:
         douyin_favorites: DouyinFavoritesStore | None = None,
         coordinator: AutomationCoordinator | None = None,
         launcher_config_path: Path | None = None,
+        local_models: LocalModelService | None = None,
     ) -> None:
         self.output_root = Path(output_root).resolve()
         self.jobs = WebJobStore(self.output_root)
@@ -290,6 +296,7 @@ class WebService:
         )
         self.coordinator = coordinator
         self.launcher_config_path = launcher_config_path
+        self.local_models = local_models or LocalModelService()
 
     def wake_automation(self) -> None:
         if self.coordinator is not None:
@@ -972,6 +979,7 @@ class WebService:
         return
 
     def shutdown(self) -> None:
+        self.local_models.shutdown()
         self.douyin_login.shutdown()
 
 
@@ -982,6 +990,7 @@ def create_web_app(
     douyin_favorites: DouyinFavoritesStore | None = None,
     coordinator: AutomationCoordinator | None = None,
     launcher_config_path: Path | None = None,
+    local_models: LocalModelService | None = None,
 ) -> FastAPI:
     """Create the loopback WebUI application without starting a server."""
     workspace = LearningWorkspace(output_root)
@@ -992,6 +1001,7 @@ def create_web_app(
         douyin_favorites=douyin_favorites,
         coordinator=coordinator,
         launcher_config_path=launcher_config_path,
+        local_models=local_models,
     )
 
     @asynccontextmanager
@@ -1604,6 +1614,28 @@ syncInitialHashBookmark();
         except PermissionError as error:
             raise HTTPException(status_code=403, detail=str(error)) from error
         except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.get("/api/local-models")
+    def local_models_status() -> dict[str, object]:
+        return service.local_models.snapshot()
+
+    @app.post("/api/local-models/{package_id}/download", status_code=202)
+    def download_local_model(package_id: str) -> dict[str, object]:
+        try:
+            return service.local_models.install(package_id)
+        except LocalModelNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except LocalModelError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/api/local-models/{package_id}/cancel", status_code=202)
+    def cancel_local_model_install(package_id: str) -> dict[str, object]:
+        try:
+            return service.local_models.cancel(package_id)
+        except LocalModelNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except LocalModelError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.put("/api/providers/limits")

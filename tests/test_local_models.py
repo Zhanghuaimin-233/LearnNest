@@ -9,7 +9,7 @@ from types import ModuleType
 
 import pytest
 
-from learnnest import local_model_worker
+from learnnest import local_model_worker, local_models
 from learnnest.local_models import (
     LocalModelCancelled,
     LocalModelError,
@@ -76,7 +76,9 @@ def test_status_query_is_local_and_does_not_start_an_install(tmp_path: Path) -> 
     assert calls == []
 
 
-def test_install_validates_then_atomically_publishes_model(tmp_path: Path) -> None:
+def test_install_validates_then_atomically_publishes_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def installer(spec, staging, progress, cancel) -> None:  # type: ignore[no-untyped-def]
         progress("downloading", 7)
         _write_component_files(staging, spec.package_id)
@@ -85,6 +87,17 @@ def test_install_validates_then_atomically_publishes_model(tmp_path: Path) -> No
     service = LocalModelService(
         tmp_path / "models", installer=installer, discover_external=False
     )
+    publication_had_clean_staging: list[bool] = []
+    atomic_json = local_models._atomic_json
+
+    def checked_atomic_json(path: Path, payload: dict[str, object]) -> None:
+        if path.name == "current.json":
+            publication_had_clean_staging.append(
+                not (service.root / "staging").exists()
+            )
+        atomic_json(path, payload)
+
+    monkeypatch.setattr(local_models, "_atomic_json", checked_atomic_json)
 
     accepted = service.install("faster-whisper-large-v3")
     assert accepted["state"] in {"queued", "downloading", "verifying", "ready"}
@@ -97,6 +110,7 @@ def test_install_validates_then_atomically_publishes_model(tmp_path: Path) -> No
     assert model_path.is_dir()
     assert (model_path / "model.bin").is_file()
     assert not (service.root / "staging").exists()
+    assert publication_had_clean_staging == [True]
 
     pointer = json.loads(
         (

@@ -460,6 +460,14 @@ class LocalModelService:
         staging = self.root / "staging" / job_id / "payload"
         downloaded_bytes = 0
 
+        def cleanup_staging() -> None:
+            shutil.rmtree(self.root / "staging" / job_id, ignore_errors=True)
+            staging_root = self.root / "staging"
+            try:
+                staging_root.rmdir()
+            except OSError:
+                pass
+
         def progress(state: str, current_bytes: int) -> None:
             nonlocal downloaded_bytes
             downloaded_bytes = max(downloaded_bytes, current_bytes)
@@ -489,6 +497,7 @@ class LocalModelService:
             installs.mkdir(parents=True, exist_ok=True)
             os.replace(staging, destination)
             _atomic_json(destination / "receipt.json", receipt)
+            cleanup_staging()
             _atomic_json(
                 self.root / "packages" / package.package_id / "current.json",
                 {
@@ -507,6 +516,7 @@ class LocalModelService:
                 install_source="managed",
             )
         except LocalModelCancelled:
+            cleanup_staging()
             self._write_status(
                 package,
                 state="cancelled",
@@ -517,6 +527,7 @@ class LocalModelService:
                 install_source=None,
             )
         except LocalModelError as error:
+            cleanup_staging()
             self._write_status(
                 package,
                 state="failed",
@@ -527,6 +538,7 @@ class LocalModelService:
                 install_source=None,
             )
         except Exception:
+            cleanup_staging()
             self._write_status(
                 package,
                 state="failed",
@@ -538,12 +550,7 @@ class LocalModelService:
             )
         finally:
             operation_lock.release()
-            shutil.rmtree(self.root / "staging" / job_id, ignore_errors=True)
-            staging_root = self.root / "staging"
-            try:
-                staging_root.rmdir()
-            except OSError:
-                pass
+            cleanup_staging()
             with self._guard:
                 self._cancellations.pop(package.package_id, None)
                 self._threads.pop(package.package_id, None)

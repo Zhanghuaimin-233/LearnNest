@@ -265,10 +265,42 @@ def test_external_ocr_files_require_pinned_revision_provenance(
     assert status["install_source"] == "external_cache"
 
 
-def test_model_store_root_is_device_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
+def test_model_store_root_defaults_to_program_model_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    local_app_data = tmp_path / "local-app-data"
+    program_directory = tmp_path / "LearnNest"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(
+        "learnnest.launcher.application_directory", lambda: program_directory
+    )
 
-    assert model_store_root() == Path(r"C:\Users\Tester\AppData\Local\LearnNest\models")
+    assert model_store_root() == program_directory / "model"
+    service = LocalModelService(discover_external=False)
+    assert service.root == program_directory / "model"
+    assert service.root.is_dir()
+
+
+def test_model_store_root_uses_launcher_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    local_app_data = tmp_path / "local-app-data"
+    config_path = local_app_data / "LearnNest" / "launcher.json"
+    configured = tmp_path / "shared-models"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "output_root": str(tmp_path / "vault"),
+                "model_root": str(configured),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    assert model_store_root() == configured.resolve()
 
 
 def test_download_worker_uses_only_pinned_official_snapshots(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import threading
 import webbrowser
@@ -23,6 +24,7 @@ class LauncherConfigError(ValueError):
 @dataclass(frozen=True)
 class LauncherConfig:
     output_root: str
+    model_root: str | None = None
 
 
 DirectorySelector = Callable[[], Path | None]
@@ -37,6 +39,25 @@ def launcher_config_path() -> Path:
     return Path(local_app_data) / "LearnNest" / "launcher.json"
 
 
+def application_directory() -> Path:
+    """Return the directory that owns the normal LearnNest launcher."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    source_checkout = Path(__file__).resolve().parents[2]
+    if (source_checkout / "pyproject.toml").is_file():
+        return source_checkout
+    return Path.cwd().resolve()
+
+
+def default_model_root(application_root: str | Path | None = None) -> Path:
+    root = (
+        Path(application_root).resolve()
+        if application_root is not None
+        else application_directory()
+    )
+    return root / "model"
+
+
 def load_launcher_config(path: Path | None = None) -> LauncherConfig:
     config_path = path or launcher_config_path()
     try:
@@ -47,10 +68,20 @@ def load_launcher_config(path: Path | None = None) -> LauncherConfig:
         not isinstance(payload, dict)
         or payload.get("schema_version") != "1.0"
         or not isinstance(payload.get("output_root"), str)
+        or (
+            payload.get("model_root") is not None
+            and not isinstance(payload.get("model_root"), str)
+        )
     ):
         raise LauncherConfigError("launcher configuration is invalid")
     root = _validated_output_root(Path(payload["output_root"]))
-    return LauncherConfig(output_root=str(root))
+    model_root = payload.get("model_root")
+    if model_root is not None and not Path(model_root).is_absolute():
+        raise LauncherConfigError("launcher model root is invalid")
+    return LauncherConfig(
+        output_root=str(root),
+        model_root=str(Path(model_root).resolve()) if model_root is not None else None,
+    )
 
 
 def resolve_output_root(
@@ -80,9 +111,38 @@ def save_launcher_output_root(
 ) -> Path:
     """Validate and save the output root used by the next normal WebUI launch."""
     root = _validated_output_root(Path(output_root))
+    path = config_path or launcher_config_path()
+    model_root = None
+    if path.is_file():
+        try:
+            model_root = load_launcher_config(path).model_root
+        except LauncherConfigError:
+            pass
     _write_config(
-        config_path or launcher_config_path(),
-        LauncherConfig(output_root=str(root)),
+        path,
+        LauncherConfig(output_root=str(root), model_root=model_root),
+    )
+    return root
+
+
+def save_launcher_model_root(
+    model_root: str | Path,
+    *,
+    output_root: str | Path,
+    config_path: Path | None = None,
+) -> Path:
+    """Persist one writable model root while preserving the learning output root."""
+    root = _validated_model_root(Path(model_root))
+    path = config_path or launcher_config_path()
+    saved_output_root = _validated_output_root(Path(output_root))
+    if path.is_file():
+        try:
+            saved_output_root = Path(load_launcher_config(path).output_root)
+        except LauncherConfigError:
+            pass
+    _write_config(
+        path,
+        LauncherConfig(output_root=str(saved_output_root), model_root=str(root)),
     )
     return root
 
@@ -126,12 +186,28 @@ def _validated_output_root(value: Path) -> Path:
     return root
 
 
+def _validated_model_root(value: Path) -> Path:
+    if not value.is_absolute():
+        raise LauncherConfigError("模型位置必须是绝对路径")
+    try:
+        root = value.resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(delete=False, dir=root) as stream:
+            probe = Path(stream.name)
+        probe.unlink(missing_ok=True)
+    except OSError as error:
+        raise LauncherConfigError("模型位置不可写") from error
+    return root
+
+
 def _write_config(path: Path, config: LauncherConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": "1.0",
         "output_root": config.output_root,
     }
+    if config.model_root is not None:
+        payload["model_root"] = config.model_root
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", delete=False, dir=path.parent
     ) as stream:

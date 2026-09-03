@@ -221,10 +221,11 @@
 
               <section class="settings-panel" id="local-models-panel" data-settings-panel="local-models" data-local-models-panel hidden>
                 <div class="settings-panel-header"><div><p class="panel-kicker">当前设备</p><h2>本地模型</h2><p>管理语音识别与画面文字识别所需的模型。查看本页不会联网，只有点击下载才会获取文件。</p></div></div>
-                <div class="local-model-location">
-                  <div><strong>模型目录</strong><span>下载缓存与经校验的模型安装位置</span></div>
-                  <strong id="local-model-home" data-local-model-home>正在读取…</strong>
-                </div>
+                <form id="local-model-root-form" class="local-model-location">
+                  <div class="local-model-location-copy"><strong>模型目录</strong><span>下载缓存与经校验的模型安装位置；默认在程序目录的 model 文件夹</span></div>
+                  <div class="local-model-location-control"><input id="local-model-home" name="model_root" required autocomplete="off" spellcheck="false" data-local-model-home aria-label="模型保存位置" /><button type="submit" class="secondary-button">修改位置</button></div>
+                  <small>切换位置不会搬迁或删除旧模型；新目录会立即重新判定模型状态。</small>
+                </form>
                 <p id="local-model-feedback" class="inline-feedback" data-local-model-feedback aria-live="polite">正在读取当前设备的模型状态。</p>
                 <div id="local-model-list" class="local-model-list" data-local-model-list aria-live="polite"><p class="empty">正在读取本地模型。</p></div>
               </section>

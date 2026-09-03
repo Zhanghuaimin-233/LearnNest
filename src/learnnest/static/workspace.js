@@ -118,6 +118,7 @@ const storageForm = document.querySelector("#storage-form");
 const outputRoot = document.querySelector("#output-root");
 const currentOutputRoot = document.querySelector("#current-output-root");
 const storageFeedback = document.querySelector("#storage-feedback");
+const localModelRootForm = document.querySelector("#local-model-root-form");
 const runtimeState = document.querySelector(".runtime-state");
 const runtimeTitle = document.querySelector("#runtime-title");
 const runtimeCopy = document.querySelector("#runtime-copy");
@@ -399,8 +400,11 @@ function renderLocalModels(snapshot) {
   }
   if (home) {
     const value = snapshot.model_home || "未设置";
-    if ("value" in home) home.value = value;
-    else home.textContent = value;
+    if ("value" in home) {
+      if (!localModelRootForm || !settingsFormNeedsProtection(localModelRootForm)) {
+        home.value = value;
+      }
+    } else home.textContent = value;
   }
   const models = Array.isArray(snapshot.models) ? snapshot.models : [];
   list.innerHTML = models.length
@@ -1937,6 +1941,30 @@ storageForm.addEventListener("submit", async (event) => {
   }
 });
 
+localModelRootForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = localModelRootForm.querySelector("button[type=submit]");
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "保存中…";
+  try {
+    const snapshot = await api("/api/local-models/root", {
+      method: "PUT",
+      body: JSON.stringify({ model_root: localModelRootForm.elements.model_root.value.trim() }),
+    });
+    dirtySettingsForms.delete(localModelRootForm);
+    renderLocalModels(snapshot);
+    notifyLocalModel("模型保存位置已修改；旧目录内容保持不变。");
+  } catch (error) {
+    const feedback = findLocalModelFeedback();
+    if (feedback) feedback.textContent = error.message;
+    notifyLocalModel(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+});
+
 providerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const submittedForm = event.currentTarget;
@@ -2023,7 +2051,7 @@ providerLimitsForm.addEventListener("submit", async (event) => {
   }
 });
 
-for (const form of [providerForm, automationForm, providerLimitsForm, storageForm]) {
+for (const form of [providerForm, automationForm, providerLimitsForm, storageForm, localModelRootForm]) {
   form.addEventListener("input", () => dirtySettingsForms.add(form));
   form.addEventListener("change", () => dirtySettingsForms.add(form));
   form.addEventListener("reset", () => {
@@ -2032,7 +2060,8 @@ for (const form of [providerForm, automationForm, providerLimitsForm, storageFor
       if (form === providerForm) loadProviderSettings(automationForm.elements.default_output.value);
       else if (form === automationForm) loadAutomationStatus();
       else if (form === providerLimitsForm) loadProviderSettings(automationForm.elements.default_output.value);
-      else loadStorageStatus();
+      else if (form === storageForm) loadStorageStatus();
+      else loadLocalModels();
     });
   });
 }

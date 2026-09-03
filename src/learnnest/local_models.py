@@ -130,10 +130,22 @@ def package_spec(package_id: str) -> ModelPackage:
 
 
 def model_store_root() -> Path:
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "LearnNest" / "models"
-    return Path.home() / "AppData" / "Local" / "LearnNest" / "models"
+    from learnnest.launcher import (
+        LauncherConfigError,
+        default_model_root,
+        launcher_config_path,
+        load_launcher_config,
+    )
+
+    try:
+        config_path = launcher_config_path()
+        if config_path.is_file():
+            configured = load_launcher_config(config_path).model_root
+            if configured is not None:
+                return Path(configured)
+    except LauncherConfigError:
+        pass
+    return default_model_root()
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -343,6 +355,7 @@ class LocalModelService:
         discover_external: bool = True,
     ) -> None:
         self.root = Path(root or model_store_root()).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
         self._installer = installer or SubprocessModelInstaller()
         self._discover_external = discover_external
         self._guard = threading.RLock()
@@ -448,6 +461,23 @@ class LocalModelService:
             cancel.set()
         for thread in threads:
             thread.join(timeout=6)
+
+    def change_root(
+        self,
+        root: str | Path,
+        *,
+        persist: Callable[[Path], None] | None = None,
+    ) -> None:
+        """Switch model stores only while no install is active."""
+        candidate = Path(root).resolve()
+        with self._guard:
+            if any(model["state"] in _ACTIVE_STATES for model in self.list()):
+                raise LocalModelError("模型下载进行中，暂时不能修改保存位置。")
+            candidate.mkdir(parents=True, exist_ok=True)
+            if persist is not None:
+                persist(candidate)
+            self.root = candidate
+            self._recover_interrupted_jobs()
 
     def _run_install(
         self,

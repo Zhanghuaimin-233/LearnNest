@@ -144,6 +144,70 @@ def test_local_model_api_rejects_unknown_package(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
+def test_local_model_root_can_be_changed_without_moving_old_assets(
+    tmp_path: Path,
+) -> None:
+    current_root = tmp_path / "current-models"
+    next_root = tmp_path / "large-models"
+    config_path = tmp_path / "local-app-data" / "LearnNest" / "launcher.json"
+    models = LocalModelService(current_root, discover_external=False)
+    client = TestClient(
+        web_app.create_web_app(
+            tmp_path / "vault",
+            launcher_config_path=config_path,
+            local_models=models,
+        )
+    )
+
+    response = client.put("/api/local-models/root", json={"model_root": str(next_root)})
+
+    assert response.status_code == 200
+    assert response.json()["model_home"] == str(next_root.resolve())
+    assert client.get("/api/local-models").json()["model_home"] == str(
+        next_root.resolve()
+    )
+    assert models.root == next_root.resolve()
+    assert next_root.is_dir()
+    assert current_root.is_dir()
+    assert load_launcher_config(config_path).model_root == str(next_root.resolve())
+
+
+def test_local_model_root_change_is_rejected_while_download_is_active(
+    tmp_path: Path,
+) -> None:
+    started = threading.Event()
+
+    def installer(spec, staging, progress, cancel) -> None:  # type: ignore[no-untyped-def]
+        started.set()
+        assert cancel.wait(timeout=2)
+        raise LocalModelCancelled
+
+    current_root = tmp_path / "current-models"
+    config_path = tmp_path / "local-app-data" / "LearnNest" / "launcher.json"
+    models = LocalModelService(
+        current_root, installer=installer, discover_external=False
+    )
+    client = TestClient(
+        web_app.create_web_app(
+            tmp_path / "vault",
+            launcher_config_path=config_path,
+            local_models=models,
+        )
+    )
+    client.post("/api/local-models/faster-whisper-large-v3/download")
+    assert started.wait(timeout=1)
+
+    response = client.put(
+        "/api/local-models/root", json={"model_root": str(tmp_path / "next-models")}
+    )
+
+    assert response.status_code == 409
+    assert "下载进行中" in response.json()["detail"]
+    assert models.root == current_root.resolve()
+    assert not config_path.exists()
+    client.post("/api/local-models/faster-whisper-large-v3/cancel")
+
+
 def test_local_model_api_rejects_duplicate_download_and_accepts_cancel(
     tmp_path: Path,
 ) -> None:
@@ -1736,6 +1800,8 @@ def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
         "single-video-output",
         "storage-form",
         "output-root",
+        "local-model-root-form",
+        "local-model-home",
         "provider-key-field",
         "check-connection-dialog",
         "confirm-check-connection",
@@ -1898,6 +1964,8 @@ def test_workspace_script_keeps_local_model_reads_separate_from_explicit_mutatio
 
     assert "async function loadLocalModels" in script
     assert 'api("/api/local-models")' in script
+    assert 'api("/api/local-models/root"' in script
+    assert "model_root: localModelRootForm.elements.model_root.value.trim()" in script
     assert 'data-local-model-action="download"' in script
     assert 'data-local-model-action="cancel"' in script
     assert "`/api/local-models/${encodeURIComponent(assetId)}/${action}`" in script

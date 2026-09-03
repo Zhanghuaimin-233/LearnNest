@@ -8,8 +8,11 @@ from typer.testing import CliRunner
 import learnnest.cli as cli
 from learnnest.launcher import (
     LauncherCancelled,
+    default_model_root,
     load_launcher_config,
     resolve_output_root,
+    save_launcher_model_root,
+    save_launcher_output_root,
 )
 
 
@@ -26,6 +29,35 @@ def test_first_launcher_selection_persists_only_an_absolute_output_root(
     raw = config_path.read_text(encoding="utf-8")
     assert "secret" not in raw.lower()
     assert not list(config_path.parent.glob("*.tmp"))
+
+
+def test_default_model_root_is_program_owned_model_directory(tmp_path: Path) -> None:
+    assert (
+        default_model_root(tmp_path / "LearnNest") == tmp_path / "LearnNest" / "model"
+    )
+
+
+def test_launcher_model_root_is_editable_and_survives_output_root_changes(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "学习资料"
+    next_output_root = tmp_path / "新学习资料"
+    model_root = tmp_path / "large-models"
+    config_path = tmp_path / "local-app-data" / "LearnNest" / "launcher.json"
+    resolve_output_root(config_path, select_directory=lambda: output_root)
+
+    saved = save_launcher_model_root(
+        model_root,
+        output_root=output_root,
+        config_path=config_path,
+    )
+    save_launcher_output_root(next_output_root, config_path)
+    config = load_launcher_config(config_path)
+
+    assert saved == model_root.resolve()
+    assert model_root.is_dir()
+    assert config.output_root == str(next_output_root.resolve())
+    assert config.model_root == str(model_root.resolve())
 
 
 def test_first_launcher_cancel_exits_without_writing_configuration(

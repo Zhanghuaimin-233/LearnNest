@@ -60,6 +60,7 @@ from learnnest.launcher import (
     LauncherConfigError,
     launcher_config_path as default_launcher_config_path,
     load_launcher_config,
+    save_launcher_model_root,
     save_launcher_output_root,
 )
 from learnnest.locks import LockUnavailable, task_lock
@@ -265,6 +266,12 @@ class OutputRootRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     output_root: str = Field(min_length=1, max_length=4096)
+
+
+class ModelRootRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    model_root: str = Field(min_length=1, max_length=4096)
 
 
 class LearningSubmitRequest(BaseModel):
@@ -682,6 +689,30 @@ class WebService:
         except LauncherConfigError as error:
             raise ValueError("无法使用这个保存位置，请选择可写文件夹。") from error
         return self.storage_status()
+
+    def save_model_root(self, request: ModelRootRequest) -> dict[str, object]:
+        candidate = Path(request.model_root)
+        if not candidate.is_absolute():
+            raise ValueError("模型保存位置必须填写绝对路径。")
+        try:
+            config_path = self.launcher_config_path or default_launcher_config_path()
+
+            def persist(root: Path) -> None:
+                save_launcher_model_root(
+                    root,
+                    output_root=self.output_root,
+                    config_path=config_path,
+                )
+
+            self.local_models.change_root(
+                candidate,
+                persist=persist,
+            )
+        except LauncherConfigError as error:
+            raise ValueError("无法使用这个模型保存位置，请选择可写文件夹。") from error
+        except OSError as error:
+            raise ValueError("无法使用这个模型保存位置，请选择可写文件夹。") from error
+        return self.local_models.snapshot()
 
     def provider_settings(
         self,
@@ -1619,6 +1650,15 @@ syncInitialHashBookmark();
     @app.get("/api/local-models")
     def local_models_status() -> dict[str, object]:
         return service.local_models.snapshot()
+
+    @app.put("/api/local-models/root")
+    def save_local_model_root(request: ModelRootRequest) -> dict[str, object]:
+        try:
+            return service.save_model_root(request)
+        except LocalModelError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.post("/api/local-models/{package_id}/download", status_code=202)
     def download_local_model(package_id: str) -> dict[str, object]:

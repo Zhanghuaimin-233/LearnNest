@@ -20,6 +20,7 @@ __pycache__/
 .superpowers/
 artifacts/
 dist/
+/model/
 *.log
 # Audio, image, video and document binaries stay local by default. The public
 # brand icon is the only intentional exception.

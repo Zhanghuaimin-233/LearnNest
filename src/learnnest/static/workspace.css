@@ -2739,6 +2739,33 @@ select:focus {
 .local-model-location {
   margin-top: 12px;
   padding: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(320px, 1.2fr);
+  align-items: center;
+  gap: 8px 18px;
+}
+
+.local-model-location-control { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.local-model-location input#local-model-home {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  margin: 0;
+  padding: 8px 10px;
+  display: block;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: var(--data-font);
+  font-size: 10px;
+}
+.local-model-location-control button { flex: 0 0 auto; }
+.local-model-location > small {
+  grid-column: 1 / -1;
+  color: var(--slate);
+  font-size: 9px;
+  line-height: 1.55;
 }
 
 #local-model-list { margin-top: 12px; }
@@ -2782,4 +2809,8 @@ select:focus {
   .local-model-location,
   #local-model-list,
   .storage-facts { border-radius: 12px; }
+
+  .local-model-location { grid-template-columns: 1fr; }
+  .local-model-location-control { align-items: stretch; flex-direction: column; }
+  .local-model-location-control button { align-self: flex-start; }
 }

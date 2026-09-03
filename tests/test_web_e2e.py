@@ -419,15 +419,19 @@ def _open_view(page: Page, view: str) -> None:
     expect(page.locator(f'[data-view-panel="{view}"]')).to_be_visible()
 
 
-def _open_first_task(page: Page, list_id: str) -> None:
-    page.locator(f"#{list_id} button[data-open-item-ref]").first.click()
-    expect(page.locator("#task-detail-view")).to_be_visible()
+def _first_task_row(page: Page, list_id: str):
+    return page.locator(f"#{list_id} article[data-item-ref]").first
 
 
 def _open_settings_panel(page: Page, panel: str) -> None:
     _open_view(page, "settings")
     page.locator(f'[data-settings-tab="{panel}"]').click()
     expect(page.locator(f'[data-settings-panel="{panel}"]')).to_be_visible()
+
+
+def _open_provider_roles(page: Page) -> None:
+    _open_settings_panel(page, "roles")
+    expect(page.locator("#provider-role-list")).to_be_visible()
 
 
 def test_douyin_folder_rail_filters_compact_cards_and_keeps_cross_folder_selection(
@@ -522,7 +526,7 @@ def test_douyin_login_failure_reason_survives_refresh_in_real_edge(
             expect(page.locator(".source-douyin-panel")).to_contain_text(
                 "同步默认与自建收藏夹"
             )
-            expect(page.locator(".source-connection-card")).to_contain_text(
+            expect(page.locator(".source-connection-guidance")).to_contain_text(
                 "同步会短暂恢复隔离官方页面"
             )
             page.locator("#connect-douyin").click()
@@ -634,16 +638,17 @@ def _add_connection(page: Page, *, name: str, preset: str, key: str) -> None:
 
 def _add_and_bind_local_material_model(page: Page, *, preset: str, role: str) -> None:
     _add_connection(page, name=preset, preset=preset, key="")
-    use_button = page.locator(f'button[data-use-connection="{preset}"]')
-    expect(use_button).to_be_visible()
-    use_button.click()
-    expect(use_button).to_be_disabled()
+    _open_provider_roles(page)
+    role_select = page.locator(f'select[data-setup-role-select="{role}"]')
+    expect(role_select).to_be_visible()
+    role_select.select_option(preset)
     expect(page.locator("#provider-feedback")).to_contain_text(role)
 
 
 def _enable_note_automation(page: Page, *, key: str) -> None:
     _add_connection(page, name="offline-note", preset="mimo", key=key)
     expect(page.get_by_text("offline-note", exact=True)).to_be_visible()
+    _open_provider_roles(page)
     for role in ("\u7b14\u8bb0 Writer", "\u7b14\u8bb0 Reviewer"):
         page.locator(f'select[data-setup-role-select="{role}"]').select_option(
             "offline-note"
@@ -683,14 +688,12 @@ def _enable_audio_automation(page: Page) -> None:
     )
     page.locator("#automation-form button[type=submit]").click()
     expect(page.locator("#automation-state")).to_have_text("等待付费许可")
-    _open_settings_panel(page, "connections")
+    _open_provider_roles(page)
     page.locator('select[data-setup-role-select="播客"]').select_option(
         "offline-podcast"
     )
     expect(page.locator("#provider-feedback")).to_contain_text("播客")
-    tts_button = page.locator('button[data-use-connection="offline-tts"]')
-    tts_button.click()
-    expect(tts_button).to_be_disabled()
+    page.locator('select[data-setup-role-select="TTS"]').select_option("offline-tts")
     _open_settings_panel(page, "output")
     page.locator("#authorize-automation").click()
     expect(page.locator("#automation-authorization-dialog")).to_be_visible()
@@ -897,11 +900,10 @@ def test_goal4_three_sources_reach_a_safe_note_in_real_edge(
         assert page.locator("#library-list article").count() == 3, json.dumps(
             snapshot, ensure_ascii=False
         )
-        _open_first_task(page, "library-list")
-        expect(page.locator(".production-heading span")).to_have_text("100%")
-        expect(page.locator(".production-track .track-step")).to_have_count(3)
+        row = _first_task_row(page, "library-list")
+        expect(row.locator(".progress-ring strong")).to_have_text("100")
         with page.expect_popup() as note:
-            page.locator("#task-detail button[data-action='open_note']").click()
+            row.locator("button[data-action='open_note']").click()
         expect(note.value.locator("article.note-content")).to_contain_text(
             "离线浏览器笔记"
         )
@@ -975,8 +977,12 @@ def test_local_asr_and_ocr_are_visible_bindable_and_persist_in_real_edge(
             "faster-whisper large-v3"
         )
         expect(page.locator('[data-capability="ocr"]')).to_contain_text("PaddleOCR")
+        _open_provider_roles(page)
         expect(page.locator('[data-capability="asr"]')).to_contain_text(
-            "使用内置本地能力"
+            "faster-whisper large-v3"
+        )
+        expect(page.locator('[data-provider-role="语音识别（ASR）"]')).to_contain_text(
+            "设备可用"
         )
         _add_and_bind_local_material_model(
             page, preset="local-asr", role="语音识别（ASR）"
@@ -1022,6 +1028,7 @@ def test_provider_card_protects_bound_connection_and_deletes_idle_connection(
         )
         page.goto(loopback_app.url)
         _add_connection(page, name="mimo-note", preset="mimo", key="note-key")
+        _open_provider_roles(page)
         writer_select = page.locator('select[data-setup-role-select="笔记 Writer"]')
         writer_select.select_option("mimo-note")
         expect(page.locator("#provider-feedback")).to_contain_text("笔记 Writer")
@@ -1074,6 +1081,7 @@ def test_goal4_podcast_role_only_offers_an_isolated_llm_connection(
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
         _add_connection(page, name="mimo-note", preset="mimo", key="same-key")
+        _open_provider_roles(page)
         for role in ("笔记 Writer", "笔记 Reviewer"):
             page.locator(f'select[data-setup-role-select="{role}"]').select_option(
                 "mimo-note"
@@ -1084,11 +1092,12 @@ def test_goal4_podcast_role_only_offers_an_isolated_llm_connection(
         expect(podcast_select).to_be_visible()
         expect(podcast_select.locator('option[value="mimo-note"]')).to_have_count(0)
         expect(podcast_select.locator("option")).to_have_count(1)
-        expect(page.locator("#setup-readiness")).to_contain_text(
-            "播客需要单独的 MiMo/DeepSeek 连接，不能复用笔记连接。"
+        expect(page.locator('[data-provider-role="播客"]')).to_contain_text(
+            "需要单独的播客连接"
         )
 
         _add_connection(page, name="mimo-podcast", preset="mimo", key="same-key")
+        _open_provider_roles(page)
         expect(podcast_select).to_be_visible()
         expect(podcast_select.locator('option[value="mimo-note"]')).to_have_count(0)
         expect(podcast_select.locator('option[value="mimo-podcast"]')).to_have_count(1)
@@ -1104,7 +1113,8 @@ def test_goal4_late_provider_poll_does_not_replace_a_new_role_selection(
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.goto(loopback_app.url)
         _add_connection(page, name="offline-note", preset="mimo", key="test-key")
-        select = page.locator("select[data-setup-role-select]").first
+        _open_provider_roles(page)
+        select = page.locator('select[data-setup-role-select="笔记 Writer"]')
         expect(select).to_be_visible()
         page.evaluate(
             """
@@ -1128,9 +1138,9 @@ def test_goal4_late_provider_poll_does_not_replace_a_new_role_selection(
         page.evaluate("window.__releaseProviderPoll()")
         page.evaluate("window.__providerPoll")
 
-        expect(page.locator("select[data-setup-role-select]").first).to_have_value(
-            "offline-note"
-        )
+        expect(
+            page.locator('select[data-setup-role-select="笔记 Writer"]')
+        ).to_have_value("offline-note")
         browser.close()
 
 
@@ -1155,12 +1165,14 @@ def test_provider_model_picker_fetches_searches_saves_and_persists_on_desktop_an
         page = browser.new_page(viewport={"width": 1280, "height": 800})
         page.goto(loopback_app.url)
         _add_connection(page, name="mimo-model", preset="mimo", key="catalog-key")
+        _open_provider_roles(page)
         for role in ("笔记 Writer", "笔记 Reviewer"):
             page.locator(f'select[data-setup-role-select="{role}"]').select_option(
                 "mimo-model"
             )
         assert fetches == []
 
+        _open_settings_panel(page, "connections")
         row = page.locator('[data-connection="mimo-model"]')
         row.locator("button[data-select-model]").click()
         expect(page.locator("#model-selection-dialog")).to_be_visible()
@@ -1353,11 +1365,13 @@ def test_w32_provider_new_connection_live_curated_atomic_save_on_desktop_and_nar
         assert "kimi-e2e-key" not in page.locator("body").inner_text()
         assert previews == [("kimi", "kimi-e2e-key")]
 
+        _open_provider_roles(page)
         page.locator('select[data-setup-role-select="笔记 Writer"]').select_option(
             "w32-kimi"
         )
         expect(page.locator("#provider-feedback")).to_contain_text("笔记 Writer")
 
+        _open_settings_panel(page, "connections")
         row = page.locator('[data-connection="w32-kimi"]')
         row.locator("button[data-select-model]").click()
         expect(page.locator("#model-selection-dialog")).to_be_visible()
@@ -1528,7 +1542,8 @@ def test_goal4_substantive_setting_change_revokes_browser_authorization(
         _add_connection(
             page, name="replacement-note", preset="mimo", key="second-test-key"
         )
-        page.locator("select[data-setup-role-select]").first.select_option(
+        _open_provider_roles(page)
+        page.locator('select[data-setup-role-select="笔记 Writer"]').select_option(
             "replacement-note"
         )
         expect(page.locator("#automation-state")).to_have_text("需要重新确认付费许可")
@@ -1614,24 +1629,25 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
             """() => {
               const consoleRect = document.querySelector('#task-console').getBoundingClientRect();
               const spineRect = document.querySelector('#task-spine').getBoundingClientRect();
-              const insightRect = document.querySelector('#task-insight-rail').getBoundingClientRect();
+              const canvasRect = document.querySelector('.task-canvas').getBoundingClientRect();
               return {
                 consoleWidth: consoleRect.width,
                 leftMargin: consoleRect.left,
                 rightMargin: window.innerWidth - consoleRect.right,
                 spineWidth: spineRect.width,
-                insightWidth: insightRect.width,
+                canvasWidth: canvasRect.width,
+                hasInsightRail: Boolean(document.querySelector('#task-insight-rail')),
               };
             }"""
         )
-        assert wide_layout["consoleWidth"] >= 2_000
-        assert wide_layout["leftMargin"] <= 250
-        assert wide_layout["rightMargin"] <= 250
-        assert 227 <= wide_layout["spineWidth"] <= 237
-        assert 295 <= wide_layout["insightWidth"] <= 305
-        for view, selector in (
-            ("sources", ".source-workspace"),
-            ("settings", ".settings-workspace"),
+        assert 1_170 <= wide_layout["consoleWidth"] <= 1_190
+        assert abs((wide_layout["leftMargin"] - 220) - wide_layout["rightMargin"]) <= 5
+        assert wide_layout["spineWidth"] == wide_layout["consoleWidth"]
+        assert wide_layout["canvasWidth"] == wide_layout["consoleWidth"]
+        assert wide_layout["hasInsightRail"] is False
+        for view, selector, minimum, maximum in (
+            ("sources", ".source-workspace", 1_170, 1_190),
+            ("settings", ".settings-workspace", 1_170, 1_190),
         ):
             _open_view(page, view)
             page_layout = page.locator(selector).evaluate(
@@ -1644,9 +1660,10 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
                   };
                 }"""
             )
-            assert page_layout["width"] >= 2_000
-            assert page_layout["leftMargin"] <= 250
-            assert page_layout["rightMargin"] <= 250
+            assert minimum <= page_layout["width"] <= maximum
+            assert (
+                abs((page_layout["leftMargin"] - 220) - page_layout["rightMargin"]) <= 5
+            )
         _open_view(page, "tasks")
         expect(page.locator("#processing-list article")).to_have_count(1)
         page.locator("#task-search").fill("does-not-exist")
@@ -1655,40 +1672,33 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
         page.locator("#task-search").fill("safe-paused-input")
         expect(page.locator("#processing-list article")).to_be_visible()
         expect(page.locator("#task-filter-empty")).to_be_hidden()
-        expect(page.locator("#recent-activity .activity-item")).to_have_count(1)
-        _open_first_task(page, "processing-list")
-        expect(page.locator("#task-detail button[data-pause-item-ref]")).to_be_visible()
+        expect(page.locator("#task-focus")).to_be_visible()
+        row = _first_task_row(page, "processing-list")
+        expect(row.locator("button[data-pause-item-ref]")).to_be_visible()
 
         with page.expect_response(
             lambda response: response.url.endswith("/pause")
         ) as paused:
-            page.locator("#task-detail button[data-pause-item-ref]").click()
+            row.locator("button[data-pause-item-ref]").click()
         assert paused.value.status == 200
-        expect(page.locator("#task-detail .detail-action > strong")).to_have_text(
-            "已暂停"
-        )
-        expect(
-            page.locator("#task-detail button[data-action='resume_task']")
-        ).to_be_visible()
-        expect(
-            page.locator("#task-detail button[data-delete-item-ref]")
-        ).to_be_enabled()
+        row = _first_task_row(page, "processing-list")
+        expect(row.locator(".learning-state")).to_have_text("已暂停")
+        expect(row.locator("button[data-action='resume_task']")).to_be_visible()
+        expect(row.locator("button[data-delete-item-ref]")).to_be_enabled()
         found = find_task_by_id(loopback_app.root, task.task_id)
         assert found is not None
         assert load_task_control(found[0], found[1].task_id).manually_paused is True
         assert load_intake(loopback_app.root, task.task_id).status == "pending"
         assert loopback_app.provider_runs == []
 
-        page.locator("#back-to-tasks").click()
         page.locator("button[data-filter='paused']").click()
         expect(page.locator('[data-filter-count="paused"]')).to_have_text("1")
         expect(page.locator('[data-filter-count="processing"]')).to_have_text("0")
         expect(page.locator("#processing-list article")).to_be_visible()
         page.reload()
-        _open_first_task(page, "processing-list")
-        expect(page.locator("#task-detail .detail-action > strong")).to_have_text(
-            "已暂停"
-        )
+        expect(
+            _first_task_row(page, "processing-list").locator(".learning-state")
+        ).to_have_text("已暂停")
         browser.close()
 
         _stop_loopback_server(loopback_app.server, loopback_app.thread)
@@ -1711,10 +1721,9 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
         )
         restored.goto(loopback_app.url)
         expect(restored.locator('[data-filter-count="paused"]')).to_have_text("1")
-        _open_first_task(restored, "processing-list")
-        expect(restored.locator("#task-detail .detail-action > strong")).to_have_text(
-            "已暂停"
-        )
+        expect(
+            _first_task_row(restored, "processing-list").locator(".learning-state")
+        ).to_have_text("已暂停")
 
         _enable_note_automation(restored, key="offline-pause-key")
         assert loopback_app.provider_runs == []
@@ -1722,11 +1731,11 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
         restored.reload()
         expect(restored.locator("#inbox-list article")).to_have_count(1)
         _open_view(restored, "tasks")
-        _open_first_task(restored, "inbox-list")
+        row = _first_task_row(restored, "inbox-list")
         with restored.expect_response(
             lambda response: response.url.endswith("/resume")
         ) as resumed:
-            restored.locator("#task-detail button[data-action='resume_task']").click()
+            row.locator("button[data-action='resume_task']").click()
         assert resumed.value.status == 200
         found_after_resume = find_task_by_id(loopback_app.root, task.task_id)
         assert found_after_resume is not None
@@ -1811,8 +1820,7 @@ def test_goal4_user_can_move_one_stopped_task_to_trash(
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
         _open_view(page, "tasks")
         expect(page.locator("#task-list article")).to_have_count(1)
-        page.locator("#task-list article").click()
-        page.locator("#task-detail button[data-delete-item-ref]").click()
+        page.locator("#task-list article button[data-delete-item-ref]").click()
         expect(page.locator("#delete-task-dialog")).to_be_visible()
         with page.expect_response(
             lambda response: (
@@ -1906,21 +1914,15 @@ def test_w2_failed_source_shows_stage_reason_and_exact_next_step(
         expect(page.locator("#processing-list .learning-state")).to_have_text(
             "处理已停止"
         )
-        _open_first_task(page, "processing-list")
-        expect(page.locator("#task-detail .failure-explanation")).to_contain_text(
-            "失败阶段"
+        row = _first_task_row(page, "processing-list")
+        expect(row.locator(".row-problem")).to_contain_text("失败阶段")
+        expect(row.locator(".row-problem")).to_contain_text("获取内容")
+        expect(row.locator(".row-problem")).to_contain_text("来源链接的视频下载失败")
+        expect(row.locator(".progress-ring strong")).to_have_text("0")
+        expect(row.locator("button[data-action='open_single_video']")).to_have_text(
+            "选择本地视频"
         )
-        expect(page.locator("#task-detail .failure-explanation")).to_contain_text(
-            "获取内容"
-        )
-        expect(page.locator("#task-detail .failure-explanation")).to_contain_text(
-            "来源链接的视频下载失败"
-        )
-        expect(page.locator("#task-detail .production-heading span")).to_have_text("0%")
-        expect(
-            page.locator("#task-detail button[data-action='open_single_video']")
-        ).to_have_text("选择本地视频")
-        page.locator("#task-detail button[data-action='open_single_video']").click()
+        row.locator("button[data-action='open_single_video']").click()
         expect(page.locator("#single-video-dialog")).to_be_visible()
         assert console_issues == []
         browser.close()
@@ -1988,12 +1990,12 @@ def test_goal4_audio_success_is_playable_from_the_real_note_page(
         snapshot = page.evaluate(
             "async () => await (await fetch('/api/learning/snapshot')).json()"
         )
-        _open_first_task(page, "library-list")
-        assert page.locator("#task-detail audio").count() == 1, json.dumps(
+        row = _first_task_row(page, "library-list")
+        assert row.locator("button[data-action='open_note']").is_enabled(), json.dumps(
             {"snapshot": snapshot, "audio_errors": audio_errors}, ensure_ascii=False
         )
         with page.expect_popup() as note:
-            page.locator("#task-detail button[data-action='open_note']").click()
+            row.locator("button[data-action='open_note']").click()
         expect(
             note.value.locator("audio[aria-label='播放本篇笔记的音频']")
         ).to_have_count(1)
@@ -2016,10 +2018,9 @@ def test_goal4_audio_failure_keeps_the_note_readable_and_distinct(
         page.locator('button[form="url-form"]').click()
         expect(page.locator("#library-list article")).to_have_count(1)
         expect(page.locator("#library-list")).to_contain_text("音频仍在处理中")
-        _open_first_task(page, "library-list")
-        assert page.locator("#task-detail audio").count() == 0
+        row = _first_task_row(page, "library-list")
         with page.expect_popup() as note:
-            page.locator("#task-detail button[data-action='open_note']").click()
+            row.locator("button[data-action='open_note']").click()
         expect(note.value.locator("article.note-content")).to_contain_text(
             "离线浏览器笔记"
         )
@@ -2042,15 +2043,13 @@ def test_goal4_retryable_writer_failure_retries_the_same_task_record(
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator('button[form="url-form"]').click()
         expect(page.locator("#processing-list")).to_contain_text("处理已停止")
-        _open_first_task(page, "processing-list")
-        expect(
-            page.locator("#task-detail button[data-action='retry_automation']")
-        ).to_have_count(1)
+        row = _first_task_row(page, "processing-list")
+        expect(row.locator("button[data-action='retry_automation']")).to_have_count(1)
         task_id = next(
             (loopback_app.root / ".learnnest" / "automation" / "intake").glob("*.json")
         ).stem
         loopback_app.clock[0] = datetime.now(UTC)
-        page.locator("#task-detail button[data-action='retry_automation']").click()
+        row.locator("button[data-action='retry_automation']").click()
         expect(page.locator("#library-list article")).to_have_count(1)
         status = load_status(loopback_app.root)
         assert status is not None
@@ -2110,18 +2109,15 @@ def test_goal4_unknown_and_permanent_automation_failures_hide_retry_and_stop_fac
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator('button[form="url-form"]').click()
         expect(page.locator("#processing-list")).to_contain_text("处理已停止")
-        _open_first_task(page, "processing-list")
-        reason = page.locator("#task-detail .failure-explanation")
+        row = _first_task_row(page, "processing-list")
+        reason = row.locator(".row-problem")
         expect(reason).to_be_visible()
         expect(reason).to_contain_text("失败阶段")
         expect(reason).to_contain_text("生成笔记初稿")
         expect(reason).to_contain_text(
             "返回结果无法确认" if failure == "timeout" else "模型服务返回 HTTP 400"
         )
-        assert (
-            page.locator("#task-detail button[data-action='retry_automation']").count()
-            == 0
-        )
+        assert row.locator("button[data-action='retry_automation']").count() == 0
         assert len(loopback_app.provider_runs) == 1
         status = load_status(loopback_app.root)
         assert status is not None

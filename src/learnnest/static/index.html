@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light" />
     <title>语栖 · 本地产出控制台</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/workspace.css?v=20260831-1" />
-    <script src="/static/workspace.js?v=20260831-1" defer></script>
+    <link rel="stylesheet" href="/static/workspace.css?v=20260903-3" />
+    <script src="/static/workspace.js?v=20260903-3" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -59,6 +59,9 @@
             </aside>
 
             <div class="task-canvas">
+              <section class="task-focus" id="task-focus" aria-live="polite">
+                <div class="focus-copy"><p class="panel-kicker">现在最值得关注</p><h2>正在整理任务</h2><p>语栖会把需要你处理的内容放在最前面。</p></div>
+              </section>
               <div id="task-workbench">
                 <section class="task-table-shell" aria-labelledby="task-list-title">
                   <header class="task-table-toolbar">
@@ -84,35 +87,7 @@
                   <button class="text-button" data-go-sources type="button">打开来源 <span aria-hidden="true">→</span></button>
                 </section>
               </div>
-
-              <section class="task-detail-view" id="task-detail-view" hidden>
-                <button class="back-to-tasks" id="back-to-tasks" type="button"><span aria-hidden="true">←</span> 返回工作台概览</button>
-                <section class="task-detail-panel" id="task-detail" aria-live="polite">
-                  <div class="empty-detail"><span aria-hidden="true">⌁</span><h2>任务暂时不可用</h2><p>从左侧重新选择任务，或返回工作台概览。</p></div>
-                </section>
-              </section>
             </div>
-
-            <aside class="task-insight-rail" id="task-insight-rail" aria-label="任务态势">
-              <section class="task-focus" id="task-focus" aria-live="polite">
-                <div class="focus-copy"><p class="panel-kicker">现在最值得关注</p><h2>正在整理任务</h2><p>语栖会把需要你处理的内容放在最前面。</p></div>
-              </section>
-              <section class="insight-card">
-                <div class="insight-heading"><h2>最近活动</h2><span>按当前任务顺序</span></div>
-                <div class="recent-activity" id="recent-activity"><p class="empty">正在读取任务动态。</p></div>
-              </section>
-              <section class="insight-card quick-nav-card">
-                <div class="insight-heading"><h2>快速前往</h2></div>
-                <div class="quick-nav-grid">
-                  <button type="button" data-go-sources><span aria-hidden="true">＋</span><strong>添加内容</strong><small>本地、链接、收藏</small></button>
-                  <button type="button" data-go-settings><span aria-hidden="true">◌</span><strong>调整设置</strong><small>产出、连接与许可</small></button>
-                </div>
-              </section>
-              <section class="insight-card">
-                <div class="insight-heading"><h2>运行状态</h2><span>真实设置</span></div>
-                <div class="task-system-status" id="task-system-status"><p class="empty">正在读取运行设置。</p></div>
-              </section>
-            </aside>
           </div>
         </section>
 
@@ -158,9 +133,10 @@
 
               <section class="source-douyin-panel" id="source-douyin">
                 <header class="source-panel-toolbar source-douyin-toolbar">
-                  <div><p class="panel-kicker">已连接的内容库</p><h2>抖音收藏</h2><span>同步默认与自建收藏夹，再选择要加入任务的内容。</span></div>
+                  <div><p class="panel-kicker">已连接的内容库</p><div class="source-douyin-title"><h2>抖音收藏</h2><span id="douyin-connection-state" class="status-pill">未连接</span></div><span>同步默认与自建收藏夹，再选择要加入任务的内容。</span><small id="favorites-status" aria-live="polite">连接抖音后，收藏会出现在这里。</small></div>
                   <div class="source-actions"><button id="connect-douyin" class="secondary-button" type="button">打开抖音验证窗口</button><button id="sync-favorites" class="secondary-button" type="button">手动同步</button><button id="disconnect-douyin" class="secondary-button" type="button" hidden>断开连接</button></div>
                 </header>
+                <p class="source-connection-guidance">请在同一个抖音官方窗口完成手机号验证码和抖音 App 扫码确认；语栖验证收藏访问，通过后才显示已连接。验证与收藏环境只由当前 Windows 用户加密保存；同步会短暂恢复隔离官方页面，不会突然打开可见窗口。</p>
 
                 <div id="douyin-login-panel" class="login-panel" hidden>
                   <img id="douyin-qr" class="qr-image" alt="抖音登录二维码" hidden />
@@ -183,24 +159,6 @@
               </section>
               <section id="source-jobs" class="source-jobs" hidden></section>
             </div>
-
-            <aside class="source-insight-rail" id="source-insight-rail" aria-label="来源状态">
-              <section class="insight-card source-connection-card">
-                <div class="insight-heading"><h2>抖音连接</h2><span id="douyin-connection-state" class="status-pill">未连接</span></div>
-                <p id="favorites-status" aria-live="polite">连接抖音后，收藏会出现在这里。</p>
-                <p>请在同一个抖音官方窗口完成手机号验证码和抖音 App 扫码确认；语栖随后验证收藏访问，通过后才显示已连接。</p>
-                <p class="source-security-note">验证与收藏环境只由当前 Windows 用户加密保存；同步会短暂恢复隔离官方页面，不会突然打开可见窗口。</p>
-              </section>
-              <section class="insight-card source-flow-card">
-                <div class="insight-heading"><h2>加入路径</h2><span>统一任务事实</span></div>
-                <ol class="source-flow"><li><strong>添加内容</strong><span>选择文件、粘贴链接或勾选收藏</span></li><li><strong>准备材料</strong><span>字幕、画面和文字按来源处理</span></li><li><strong>回到任务</strong><span>查看进度、问题和最终成品</span></li></ol>
-              </section>
-              <section class="insight-card source-next-card">
-                <div class="insight-heading"><h2>添加后</h2></div>
-                <p>来源页不复制后续操作。任务创建后，到任务工作台继续查看。</p>
-                <button class="text-button" data-go-tasks type="button">打开任务工作台 <span aria-hidden="true">→</span></button>
-              </section>
-            </aside>
           </div>
         </section>
 
@@ -216,15 +174,17 @@
           <div class="settings-workspace">
             <aside class="settings-nav" aria-label="设置分类">
               <p class="rail-label">设置分类</p>
-              <button class="is-active" data-settings-tab="output" type="button"><span>产出与自动处理</span><small>默认成品与来源范围</small></button>
-              <button data-settings-tab="connections" type="button"><span>模型与服务</span><small>能力、连接与职责</small></button>
-              <button data-settings-tab="safety" type="button"><span>调用安全</span><small>重试与每日上限</small></button>
-              <button data-settings-tab="storage" type="button"><span>本地存储</span><small>输出位置与空间</small></button>
+              <button class="is-active" data-settings-tab="output" type="button"><span>处理与产出</span><small>默认成品与来源范围</small></button>
+              <button data-settings-tab="roles" type="button"><span>职责配置</span><small>为工作流分配连接</small></button>
+              <button data-settings-tab="connections" type="button"><span>API 连接</span><small>云端与本地服务</small></button>
+              <button data-settings-tab="local-models" type="button"><span>本地模型</span><small>当前设备上的模型资产</small></button>
+              <button data-settings-tab="safety" type="button"><span>调用与限额</span><small>重试与每日上限</small></button>
+              <button data-settings-tab="storage" type="button"><span>存储</span><small>输出位置与空间</small></button>
             </aside>
 
             <div class="settings-content">
               <section class="settings-panel is-visible" data-settings-panel="output">
-                <div class="settings-panel-header"><div><p class="panel-kicker">默认行为</p><h2>产出与自动处理</h2><p id="automation-summary">先完成模型连接和职责绑定，再保存默认成品。</p></div><span id="automation-state" class="status-pill">等待设置</span></div>
+                <div class="settings-panel-header"><div><p class="panel-kicker">默认行为</p><h2>处理与产出</h2><p id="automation-summary">先完成模型连接和职责绑定，再保存默认成品。</p></div><span id="automation-state" class="status-pill">等待设置</span></div>
                 <form id="automation-form" class="settings-form">
                   <label>默认成品<select name="default_output"><option value="complete_note">完整笔记</option><option value="complete_note_with_audio" selected>完整笔记 + 播客音频</option></select><small>新任务会冻结提交时的默认成品。</small></label>
                   <label>检查间隔（分钟）<input name="check_interval_minutes" type="number" min="1" max="60" value="30" /></label>
@@ -239,8 +199,16 @@
                 </section>
               </section>
 
+              <section class="settings-panel" id="roles-panel" data-settings-panel="roles" hidden>
+                <div class="settings-panel-header roles-panel-header">
+                  <div><p class="panel-kicker">工作流分工</p><h2>职责配置</h2><p>为每项工作职责选择已保存的模型或服务连接。这里只改变职责绑定，不会新增或修改 API 连接。</p></div>
+                  <span id="provider-role-feedback" class="status-pill" aria-live="polite">正在读取</span>
+                </div>
+                <div id="provider-role-list" class="provider-role-list" aria-live="polite"><p class="empty">正在读取职责配置。</p></div>
+              </section>
+
               <section class="settings-panel" data-settings-panel="connections" hidden>
-                <div class="settings-panel-header"><div><p class="panel-kicker">产出能力与服务连接</p><h2>模型与服务</h2><p>每类能力在自己的卡片中维护服务；只有 LLM 需要额外分配多个职责。</p></div></div>
+                <div class="settings-panel-header"><div><p class="panel-kicker">API 与服务</p><h2>API 连接</h2><p>配置和检查 API 与本地服务连接；每个连接提供一个可用的模型、语音或本地能力。</p></div></div>
                 <section class="capability-overview" aria-live="polite" aria-label="能力准备情况">
                   <span class="capability-overview-mark" aria-hidden="true">✓</span>
                   <div class="capability-overview-copy"><strong id="provider-ready-count">0 / 4</strong><span>项能力已经准备</span></div>
@@ -251,8 +219,18 @@
                 <div id="provider-capability-list" class="provider-capability-list"><p class="empty">正在读取模型与服务。</p></div>
               </section>
 
+              <section class="settings-panel" id="local-models-panel" data-settings-panel="local-models" data-local-models-panel hidden>
+                <div class="settings-panel-header"><div><p class="panel-kicker">当前设备</p><h2>本地模型</h2><p>管理语音识别与画面文字识别所需的模型。查看本页不会联网，只有点击下载才会获取文件。</p></div></div>
+                <div class="local-model-location">
+                  <div><strong>模型目录</strong><span>下载缓存与经校验的模型安装位置</span></div>
+                  <strong id="local-model-home" data-local-model-home>正在读取…</strong>
+                </div>
+                <p id="local-model-feedback" class="inline-feedback" data-local-model-feedback aria-live="polite">正在读取当前设备的模型状态。</p>
+                <div id="local-model-list" class="local-model-list" data-local-model-list aria-live="polite"><p class="empty">正在读取本地模型。</p></div>
+              </section>
+
               <section class="settings-panel" data-settings-panel="safety" hidden>
-                <div class="settings-panel-header"><div><p class="panel-kicker">有限且可观察</p><h2>调用安全</h2><p>限制自动重试和每日服务调用次数。保存后需要重新确认自动处理。</p></div></div>
+                <div class="settings-panel-header"><div><p class="panel-kicker">有限且可观察</p><h2>调用与限额</h2><p>限制自动重试和每日服务调用次数。保存后需要重新确认自动处理。</p></div></div>
                 <form id="provider-limits-form" class="settings-form limits-form">
                   <label>每个职责自动重试次数<input name="retries_per_role" type="number" min="0" max="3" value="1" /></label>
                   <label>每日调用总上限<input name="global_calls_per_day" type="number" min="0" max="800" value="80" /></label>
@@ -263,7 +241,7 @@
               </section>
 
               <section class="settings-panel" data-settings-panel="storage" hidden>
-                <div class="settings-panel-header"><div><p class="panel-kicker">只在这台设备</p><h2>本地存储</h2><p>查看当前真实路径，并设置下次正常启动时使用的学习内容位置。</p></div></div>
+                <div class="settings-panel-header"><div><p class="panel-kicker">只在这台设备</p><h2>存储</h2><p>查看当前真实路径，并设置下次正常启动时使用的学习内容位置。</p></div></div>
                 <form id="storage-form" class="storage-form">
                   <label for="output-root">学习内容保存位置<input id="output-root" name="output_root" required autocomplete="off" spellcheck="false" /><small id="current-output-root">正在读取当前路径。</small></label>
                   <aside class="storage-change-note"><strong>切换位置不会搬迁旧任务</strong><p>保存后请关闭并重新启动语栖。当前进程继续使用原位置；旧任务仍保留在原文件夹。</p></aside>
@@ -274,20 +252,6 @@
               </section>
             </div>
 
-            <aside class="settings-insight-rail" id="settings-insight-rail" aria-label="设置状态">
-              <section class="insight-card">
-                <div class="insight-heading"><h2>准备情况</h2><span>按默认成品检查</span></div>
-                <div class="settings-readiness"><i></i><span><strong id="settings-readiness-title">正在检查设置</strong><small id="settings-readiness-copy">根据默认成品检查所需职责</small></span></div>
-              </section>
-              <section class="insight-card">
-                <div class="insight-heading"><h2>当前设置</h2><span>真实保存值</span></div>
-                <dl class="settings-summary-list"><div><dt>默认成品</dt><dd id="settings-summary-output">读取中</dd></div><div><dt>付费整理</dt><dd id="settings-summary-license">读取中</dd></div><div><dt>新收藏</dt><dd id="settings-summary-favorites">读取中</dd></div><div><dt>自动检查</dt><dd id="settings-summary-interval">读取中</dd></div></dl>
-              </section>
-              <section class="insight-card settings-sequence-card">
-                <div class="insight-heading"><h2>开始整理</h2><span>按顺序完成</span></div>
-                <ol class="settings-sequence"><li><strong>保存设置</strong><span>确定默认成品、连接与限制</span></li><li><strong>确认许可</strong><span>需要付费服务时由你明确开启</span></li><li><strong>添加内容</strong><span>新任务使用保存后的设置</span></li></ol>
-              </section>
-            </aside>
           </div>
         </section>
       </main>

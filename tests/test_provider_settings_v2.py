@@ -1473,8 +1473,10 @@ def test_webui_renders_capability_cards_with_inline_feedback(
     }
     assert 'id="provider-capability-list"' in page
     assert 'id="provider-feedback"' in page
+    assert 'id="provider-role-list"' in page
     assert "provider-capability-card" in script
-    assert "llm-role-assignment" in script
+    assert "function renderProviderRoleList(settings)" in script
+    assert "llm-role-assignment" not in script
     assert "连接库" not in page
     assert '"windows-tts": "windows-tts"' in script
     assert "function startProviderSave(event)" in script

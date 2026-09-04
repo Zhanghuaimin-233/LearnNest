@@ -1672,7 +1672,7 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
         page.locator("#task-search").fill("safe-paused-input")
         expect(page.locator("#processing-list article")).to_be_visible()
         expect(page.locator("#task-filter-empty")).to_be_hidden()
-        expect(page.locator("#task-focus")).to_be_visible()
+        expect(page.locator("#task-focus")).to_have_count(0)
         row = _first_task_row(page, "processing-list")
         expect(row.locator("button[data-pause-item-ref]")).to_be_visible()
 

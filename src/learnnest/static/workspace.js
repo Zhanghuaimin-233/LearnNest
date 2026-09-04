@@ -73,7 +73,6 @@ const trashList = document.querySelector("#trash-list");
 const taskSearch = document.querySelector("#task-search");
 const taskTableCount = document.querySelector("#task-table-count");
 const taskFilterEmpty = document.querySelector("#task-filter-empty");
-const taskFocus = document.querySelector("#task-focus");
 const workbenchNote = document.querySelector("#workbench-note");
 const taskSummary = document.querySelector("#task-summary");
 const taskCount = document.querySelector("#task-count");
@@ -1193,43 +1192,7 @@ function render(snapshot) {
   taskCount.textContent = counts.all;
   taskSummary.innerHTML = `<strong>${counts.processing} 项正在处理</strong>，${counts.paused} 项已暂停，${counts.attention} 项需要你处理，${counts.completed} 项已完成。`;
   taskTableCount.textContent = `共 ${counts.all} 项`;
-  renderActiveTaskFocus(items);
   applyTaskFilter();
-}
-
-function renderActiveTaskFocus(items = allLearningItems()) {
-  if (activeTaskFilter === "trash") {
-    taskFocus.className = `task-focus ${currentTrash.length ? "attention" : "is-empty"}`;
-    taskFocus.innerHTML = currentTrash.length
-      ? `<div class="focus-copy"><p class="panel-kicker">任务生命周期</p><h2>回收站有 ${currentTrash.length} 项任务</h2><p>恢复会把原任务事实和已生成内容放回当前任务列表，不覆盖已有任务。</p></div>`
-      : '<div class="focus-copy"><p class="panel-kicker">任务生命周期</p><h2>回收站为空</h2><p>移入回收区的任务会显示在这里，并可安全恢复。</p></div>';
-    workbenchNote.hidden = true;
-    return;
-  }
-  workbenchNote.hidden = !items.length;
-  renderTaskFocus(items);
-}
-
-function renderTaskFocus(items) {
-  const priority = { attention: 0, paused: 1, processing: 2, queued: 3, completed: 4 };
-  const item = [...items].sort((left, right) => priority[taskFilterFor(left)] - priority[taskFilterFor(right)])[0];
-  if (!item) {
-    taskFocus.className = "task-focus is-empty";
-    const filtering = activeTaskFilter !== "all" || Boolean(activeTaskQuery);
-    taskFocus.innerHTML = filtering
-      ? '<div class="focus-copy"><p class="panel-kicker">当前视图</p><h2>没有匹配的任务</h2><p>清除搜索或切换任务状态，可以查看其他任务。</p></div>'
-      : `<div class="focus-copy"><p class="panel-kicker">工作台已准备好</p><h2>从“来源”添加第一项内容</h2><p>本地视频、公开链接和收藏进入任务后，进度与问题会持续保留在这里。</p></div><button class="focus-open" type="button">打开来源 <span aria-hidden="true">→</span></button>`;
-    taskFocus.querySelector("button")?.addEventListener("click", () => showView("sources"));
-    return;
-  }
-  const filter = taskFilterFor(item);
-  const heading = filter === "attention" ? "这项任务需要你处理" : filter === "paused" ? "这项任务已暂停" : filter === "processing" ? "这项任务正在向前推进" : filter === "queued" ? "下一项等待整理的内容" : "最近完成的内容";
-  taskFocus.className = `task-focus ${filter}`;
-  const noteAction = item.note_href
-    ? `<button class="focus-open" type="button">查看笔记 <span aria-hidden="true">→</span></button>`
-    : "";
-  taskFocus.innerHTML = `<div class="focus-signal" aria-hidden="true"><span>${taskProgress(item)}</span><small>%</small></div><div class="focus-copy"><p class="panel-kicker">${heading}</p><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.message)}</p></div>${noteAction}`;
-  taskFocus.querySelector("button")?.addEventListener("click", () => actOnItem(item.item_ref, "open_note"));
 }
 
 function allLearningItems() {
@@ -1284,13 +1247,7 @@ function applyTaskFilter() {
   const total = showingTrash ? currentTrash.length : allLearningItems().length;
   taskFilterEmpty.hidden = visibleCount !== 0 || total === 0;
   taskTableCount.textContent = activeTaskQuery || activeTaskFilter !== "all" ? `显示 ${visibleCount} / ${total} 项` : `共 ${total} 项`;
-  const focusItems = allLearningItems().filter((item) => {
-    if (showingTrash) return false;
-    const filterMatches = activeTaskFilter === "all" || taskFilterFor(item) === activeTaskFilter;
-    const searchable = `${item.title} ${item.source} ${item.message} ${publicStateLabel(item)}`.toLocaleLowerCase("zh-CN");
-    return filterMatches && (!activeTaskQuery || searchable.includes(activeTaskQuery));
-  });
-  renderActiveTaskFocus(focusItems);
+  workbenchNote.hidden = showingTrash || visibleCount === 0;
 }
 
 function openDeleteTask(item) {

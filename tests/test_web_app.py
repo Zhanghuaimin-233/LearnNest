@@ -1794,7 +1794,6 @@ def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
         "task-filter-empty",
         "task-table-heading",
         "task-workbench",
-        "task-focus",
         "task-list",
         "single-video-dialog",
         "single-video-output",
@@ -1866,7 +1865,11 @@ def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
     assert "api(`/api/learning/uploads?name=${encodeURIComponent(file.name)}`" in script
     assert 'api("/api/learning/submit"' in script
     assert 'class="app-header"' in page
-    assert "function renderTaskFocus(items)" in script
+    assert 'id="task-focus"' not in page
+    assert "function renderTaskFocus" not in script
+    assert "function renderActiveTaskFocus" not in script
+    assert "最近完成的内容" not in script
+    assert "任务生命周期" not in script
     assert 'id="task-insight-rail"' not in page
     assert "activeTaskQuery" in script
     assert "没有匹配的任务" in page
@@ -1875,7 +1878,7 @@ def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
     assert 'id="back-to-tasks"' not in page
     assert "function renderTaskDetail" not in script
     assert "function selectTask" not in script
-    assert ".task-focus {" in stylesheet
+    assert ".task-focus" not in stylesheet
     assert ".row-problem {" in stylesheet
     assert ".task-row-delete {" in stylesheet
     for element_id in (
@@ -1888,8 +1891,8 @@ def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
         assert f'id="{element_id}"' in page
     assert 'id="source-insight-rail"' not in page
     assert 'id="settings-insight-rail"' not in page
-    assert "/static/workspace.css?v=20260903-3" in page
-    assert "/static/workspace.js?v=20260903-3" in page
+    assert "/static/workspace.css?v=20260904-1" in page
+    assert "/static/workspace.js?v=20260904-1" in page
     assert ".source-console {" in stylesheet
     assert ".task-console," in stylesheet
     assert "grid-template-columns: minmax(0, 1fr);" in stylesheet

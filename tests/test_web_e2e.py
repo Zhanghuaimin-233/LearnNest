@@ -1857,6 +1857,106 @@ def test_goal4_user_can_move_one_stopped_task_to_trash(
         browser.close()
 
 
+def test_task_workspace_can_batch_move_and_permanently_delete_tasks(
+    loopback_app: _LoopbackApp,
+) -> None:
+    first = _task(
+        loopback_app.root,
+        "https://www.bilibili.com/video/BV1batch001",
+        8901,
+    )
+    second = _task(
+        loopback_app.root,
+        "https://www.bilibili.com/video/BV1batch002",
+        8902,
+    )
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    console_issues: list[str] = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 720})
+        page.on(
+            "console",
+            lambda message: (
+                console_issues.append(message.text)
+                if message.type in {"error", "warning"}
+                else None
+            ),
+        )
+        page.goto(loopback_app.url)
+        expect(page.locator("#task-list article[data-item-ref]")).to_have_count(2)
+        page.locator("#task-select-visible").check()
+        expect(page.locator("#task-selection-count")).to_have_text("已选 2 项")
+        expect(page.locator('[data-batch-task-action="trash"]')).to_be_visible()
+        page.locator('[data-batch-task-action="trash"]').click()
+        expect(page.locator("#batch-task-dialog")).to_be_visible()
+        expect(page.locator("#batch-task-title")).to_have_text("移入 2 项任务？")
+        page.locator("#confirm-batch-task").click()
+        expect(page.locator("#task-list article[data-item-ref]")).to_have_count(0)
+        expect(page.locator("#notice")).to_contain_text("2 项任务已移入回收区")
+
+        page.locator("button[data-filter='trash']").click()
+        expect(page.locator("#trash-list article")).to_have_count(2)
+        expect(page.locator("#trash-list button[data-purge-bundle]")).to_have_count(2)
+        page.locator("#task-select-visible").check()
+        expect(page.locator("#task-selection-count")).to_have_text("已选 2 项")
+        page.locator('[data-batch-task-action="purge"]').click()
+        expect(page.locator("#batch-task-dialog")).to_be_visible()
+        expect(page.locator("#batch-task-title")).to_have_text("永久删除 2 项任务？")
+        expect(page.locator("#batch-task-copy")).to_contain_text("无法恢复")
+        page.locator("#confirm-batch-task").click()
+        expect(page.locator("#trash-list article")).to_have_count(0)
+        expect(page.locator("#notice")).to_contain_text("已永久删除 2 项任务")
+        assert not list(
+            (loopback_app.root / ".learnnest" / "trash" / "tasks").glob("*")
+        )
+        assert first.task_id != second.task_id
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth"
+        )
+        assert console_issues == []
+        browser.close()
+
+
+def test_task_workspace_can_batch_pause_and_resume_tasks(
+    loopback_app: _LoopbackApp,
+) -> None:
+    first = _task(
+        loopback_app.root,
+        "https://www.bilibili.com/video/BV1batchpause1",
+        8911,
+    )
+    second = _task(
+        loopback_app.root,
+        "https://www.bilibili.com/video/BV1batchpause2",
+        8912,
+    )
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 720})
+        page.goto(loopback_app.url)
+        page.locator("#task-select-visible").check()
+        expect(page.locator('[data-batch-task-action="pause"]')).to_be_visible()
+        page.locator('[data-batch-task-action="pause"]').click()
+        expect(page.locator("#notice")).to_contain_text("已暂停 2 项任务")
+        expect(page.locator('[data-filter-count="paused"]')).to_have_text("2")
+
+        page.locator("button[data-filter='paused']").click()
+        page.locator("#task-select-visible").check()
+        expect(page.locator('[data-batch-task-action="resume"]')).to_be_visible()
+        page.locator('[data-batch-task-action="resume"]').click()
+        expect(page.locator("#notice")).to_contain_text("已恢复 2 项任务")
+        expect(page.locator('[data-filter-count="paused"]')).to_have_text("0")
+        for task in (first, second):
+            found = find_task_by_id(loopback_app.root, task.task_id)
+            assert found is not None
+            assert (
+                load_task_control(found[0], found[1].task_id).manually_paused is False
+            )
+        browser.close()
+
+
 def test_w2_failed_source_shows_stage_reason_and_exact_next_step(
     loopback_app: _LoopbackApp,
 ) -> None:

@@ -73,6 +73,9 @@ const trashList = document.querySelector("#trash-list");
 const taskSearch = document.querySelector("#task-search");
 const taskTableCount = document.querySelector("#task-table-count");
 const taskFilterEmpty = document.querySelector("#task-filter-empty");
+const taskSelectVisible = document.querySelector("#task-select-visible");
+const taskSelectionBar = document.querySelector("#task-selection-bar");
+const taskSelectionCount = document.querySelector("#task-selection-count");
 const workbenchNote = document.querySelector("#workbench-note");
 const taskSummary = document.querySelector("#task-summary");
 const taskCount = document.querySelector("#task-count");
@@ -84,6 +87,13 @@ const singleVideoDialog = document.querySelector("#single-video-dialog");
 const deleteTaskDialog = document.querySelector("#delete-task-dialog");
 const deleteTaskForm = document.querySelector("#delete-task-form");
 const deleteTaskTitle = document.querySelector("#delete-task-title");
+const batchTaskDialog = document.querySelector("#batch-task-dialog");
+const batchTaskForm = document.querySelector("#batch-task-form");
+const batchTaskKicker = document.querySelector("#batch-task-kicker");
+const batchTaskTitle = document.querySelector("#batch-task-title");
+const batchTaskCopy = document.querySelector("#batch-task-copy");
+const batchTaskNote = document.querySelector("#batch-task-note");
+const confirmBatchTask = document.querySelector("#confirm-batch-task");
 const selectedVideoName = document.querySelector("#selected-video-name");
 const connectionDialog = document.querySelector("#connection-dialog");
 const connectionDialogTitle = document.querySelector("#connection-dialog-title");
@@ -123,6 +133,7 @@ const runtimeTitle = document.querySelector("#runtime-title");
 const runtimeCopy = document.querySelector("#runtime-copy");
 let windowsVoicesLoaded = false;
 let pendingDeleteItemRef = null;
+let pendingBatchTask = null;
 const stateLabel = {
   materials_ready: "材料已准备",
   waiting_setup: "等待设置",
@@ -179,6 +190,7 @@ let currentSnapshot = { inbox: [], processing: [], library: [] };
 let currentTrash = [];
 let activeTaskFilter = "all";
 let activeTaskQuery = "";
+let selectedTaskKeys = new Set();
 let noticeTimer = null;
 let lastAutomationStatus = { configured: false, enabled: false };
 const providerConnectionNameDefaults = {
@@ -1126,12 +1138,12 @@ function renderList(target, items, empty) {
       : "";
     const deleteDisabled = item.state === "organizing" && !item.manually_paused;
     const viewDisabled = !item.note_href;
+    const selected = selectedTaskKeys.has(item.item_ref);
     return `
-    <article class="learning-row" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}">
+    <article class="learning-row${selected ? " is-selected" : ""}" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}">
       <div class="learning-copy">
-        <h3>${escapeHtml(item.title)}</h3>
-        <p>${escapeHtml(item.source)}</p>
-        <small>ID · ${escapeHtml(item.item_ref)}</small>
+        <input class="task-row-check" data-task-select="${escapeHtml(item.item_ref)}" type="checkbox" aria-label="选择任务 ${escapeHtml(item.title)}"${selected ? " checked" : ""} />
+        <div class="learning-copy-text"><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.source)}</p><small>ID · ${escapeHtml(item.item_ref)}</small></div>
       </div>
       <div class="row-progress">
         <span class="progress-ring" aria-label="进度 ${progress}%" style="--task-progress:${progress}%"><strong>${progress}</strong><small>%</small></span>
@@ -1146,6 +1158,7 @@ function renderList(target, items, empty) {
   target.querySelectorAll("button[data-pause-item-ref]").forEach((button) => button.addEventListener("click", () => pauseItem(button.dataset.pauseItemRef)));
   const itemsByRef = new Map(items.map((item) => [item.item_ref, item]));
   target.querySelectorAll("button[data-delete-item-ref]:not(:disabled)").forEach((button) => button.addEventListener("click", () => openDeleteTask(itemsByRef.get(button.dataset.deleteItemRef))));
+  bindTaskSelectionInputs(target);
 }
 
 function publicStateLabel(item) {
@@ -1161,15 +1174,20 @@ function renderTrash(items) {
     trashList.innerHTML = '<p class="empty">回收站为空。移入这里的任务会保留，直到恢复。</p>';
     return;
   }
-  trashList.innerHTML = items.map((item) => `
-    <article class="learning-row trash-row" data-trash-bundle="${escapeHtml(item.bundle_id)}" data-filter="trash">
-      <div class="learning-copy"><h3>${escapeHtml(item.title)}</h3><p>任务已从当前列表移出</p></div>
+  trashList.innerHTML = items.map((item) => {
+    const selected = selectedTaskKeys.has(item.bundle_id);
+    return `
+    <article class="learning-row trash-row${selected ? " is-selected" : ""}" data-trash-bundle="${escapeHtml(item.bundle_id)}" data-filter="trash">
+      <div class="learning-copy"><input class="task-row-check" data-task-select="${escapeHtml(item.bundle_id)}" type="checkbox" aria-label="选择回收任务 ${escapeHtml(item.title)}"${selected ? " checked" : ""} /><div class="learning-copy-text"><h3>${escapeHtml(item.title)}</h3><p>任务已从当前列表移出</p></div></div>
       <div class="row-progress"><span class="progress-ring" aria-hidden="true" style="--task-progress:0%"><strong>0</strong><small>%</small></span><div class="progress-copy"><span class="learning-state">回收区</span><span class="task-progress" aria-hidden="true"><i></i></span></div></div>
       <span class="row-output">任务记录</span>
       <span class="row-next">移入时间：${escapeHtml(formatSyncTime(item.trashed_at))}</span>
-      <div class="row-actions"><button class="task-row-view" type="button" data-restore-bundle="${escapeHtml(item.bundle_id)}">恢复任务</button></div>
-    </article>`).join("");
+      <div class="row-actions"><div class="row-action-pair"><button class="task-row-delete" type="button" data-purge-bundle="${escapeHtml(item.bundle_id)}">永久删除</button><button class="task-row-view" type="button" data-restore-bundle="${escapeHtml(item.bundle_id)}">恢复任务</button></div></div>
+    </article>`;
+  }).join("");
   trashList.querySelectorAll("button[data-restore-bundle]").forEach((button) => button.addEventListener("click", () => restoreTrashItem(button.dataset.restoreBundle)));
+  trashList.querySelectorAll("button[data-purge-bundle]").forEach((button) => button.addEventListener("click", () => openBatchTaskDialog("purge", [button.dataset.purgeBundle])));
+  bindTaskSelectionInputs(trashList);
 }
 
 function render(snapshot) {
@@ -1228,6 +1246,60 @@ function taskProgress(item) {
   return 34;
 }
 
+function bindTaskSelectionInputs(target) {
+  target.querySelectorAll("input[data-task-select]").forEach((input) => input.addEventListener("change", () => {
+    if (input.checked) selectedTaskKeys.add(input.dataset.taskSelect);
+    else selectedTaskKeys.delete(input.dataset.taskSelect);
+    input.closest(".learning-row")?.classList.toggle("is-selected", input.checked);
+    updateTaskSelectionUI();
+  }));
+}
+
+function selectedTaskEntries() {
+  if (activeTaskFilter === "trash") return currentTrash.filter((item) => selectedTaskKeys.has(item.bundle_id));
+  return allLearningItems().filter((item) => selectedTaskKeys.has(item.item_ref));
+}
+
+function batchActionApplies(action, entries) {
+  if (!entries.length) return false;
+  if (activeTaskFilter === "trash") return ["restore", "purge"].includes(action);
+  if (action === "pause") return entries.every((item) => item.can_pause);
+  if (action === "resume") return entries.every((item) => item.manually_paused);
+  if (action === "continue") return entries.every((item) => item.action_kind === "continue");
+  if (action === "start") return entries.every((item) => item.action_kind === "start_automation");
+  if (action === "retry") return entries.every((item) => item.action_kind === "retry_automation");
+  if (action === "trash") return entries.every((item) => item.state !== "organizing" || item.manually_paused);
+  return false;
+}
+
+function updateTaskSelectionUI() {
+  const availableKeys = new Set(activeTaskFilter === "trash"
+    ? currentTrash.map((item) => item.bundle_id)
+    : allLearningItems().map((item) => item.item_ref));
+  selectedTaskKeys = new Set([...selectedTaskKeys].filter((key) => availableKeys.has(key)));
+  const visibleInputs = [...taskList.querySelectorAll("article[data-filter]:not([hidden]) input[data-task-select]")];
+  const selectedVisible = visibleInputs.filter((input) => selectedTaskKeys.has(input.dataset.taskSelect));
+  taskSelectVisible.disabled = visibleInputs.length === 0;
+  taskSelectVisible.checked = visibleInputs.length > 0 && selectedVisible.length === visibleInputs.length;
+  taskSelectVisible.indeterminate = selectedVisible.length > 0 && selectedVisible.length < visibleInputs.length;
+  visibleInputs.forEach((input) => {
+    input.checked = selectedTaskKeys.has(input.dataset.taskSelect);
+    input.closest(".learning-row")?.classList.toggle("is-selected", input.checked);
+  });
+  const entries = selectedTaskEntries();
+  taskSelectionBar.hidden = entries.length === 0;
+  taskSelectionCount.textContent = `已选 ${entries.length} 项`;
+  taskSelectionBar.querySelectorAll("button[data-batch-task-action]").forEach((button) => {
+    button.hidden = !batchActionApplies(button.dataset.batchTaskAction, entries);
+  });
+}
+
+function clearTaskSelection() {
+  selectedTaskKeys.clear();
+  taskList.querySelectorAll("input[data-task-select]").forEach((input) => { input.checked = false; });
+  updateTaskSelectionUI();
+}
+
 function applyTaskFilter() {
   const showingTrash = activeTaskFilter === "trash";
   Object.values(lists).forEach((list) => { list.hidden = showingTrash; });
@@ -1248,6 +1320,7 @@ function applyTaskFilter() {
   taskFilterEmpty.hidden = visibleCount !== 0 || total === 0;
   taskTableCount.textContent = activeTaskQuery || activeTaskFilter !== "all" ? `显示 ${visibleCount} / ${total} 项` : `共 ${total} 项`;
   workbenchNote.hidden = showingTrash || visibleCount === 0;
+  updateTaskSelectionUI();
 }
 
 function openDeleteTask(item) {
@@ -1260,6 +1333,88 @@ function openDeleteTask(item) {
 function closeDeleteTask() {
   pendingDeleteItemRef = null;
   if (deleteTaskDialog.open) deleteTaskDialog.close();
+}
+
+function openBatchTaskDialog(action, keys = [...selectedTaskKeys]) {
+  if (!keys.length || !["trash", "purge"].includes(action)) return;
+  const count = keys.length;
+  pendingBatchTask = { action, keys: [...keys] };
+  if (action === "purge") {
+    batchTaskKicker.textContent = "永久删除";
+    batchTaskTitle.textContent = `永久删除 ${count} 项任务？`;
+    batchTaskCopy.textContent = "任务记录和已生成内容会从回收站永久删除，无法恢复。";
+    batchTaskNote.textContent = "不会删除你原来的视频。删除开始后若遇到文件占用，会停止并报告已完成范围。";
+    confirmBatchTask.textContent = "永久删除";
+  } else {
+    batchTaskKicker.textContent = "移入语栖回收区";
+    batchTaskTitle.textContent = `移入 ${count} 项任务？`;
+    batchTaskCopy.textContent = "任务记录和已生成内容会移入回收区，之后仍可恢复。";
+    batchTaskNote.textContent = "不会删除你原来的视频。状态变化中的任务会停止批量操作并保留未处理项。";
+    confirmBatchTask.textContent = "移入回收区";
+  }
+  batchTaskDialog.showModal();
+  window.requestAnimationFrame(() => confirmBatchTask.focus({ preventScroll: true }));
+}
+
+function closeBatchTaskDialog() {
+  pendingBatchTask = null;
+  if (batchTaskDialog.open) batchTaskDialog.close();
+}
+
+async function requestTaskBatchAction(action, key) {
+  if (action === "pause") return api(`/api/learning/items/${encodeURIComponent(key)}/pause`, { method: "POST" });
+  if (action === "resume") return api(`/api/learning/items/${encodeURIComponent(key)}/resume`, { method: "POST" });
+  if (action === "continue") return api(`/api/learning/items/${encodeURIComponent(key)}/continue`, { method: "POST" });
+  if (action === "start") return api(`/api/learning/items/${encodeURIComponent(key)}/start-automation`, { method: "POST" });
+  if (action === "retry") return api(`/api/learning/items/${encodeURIComponent(key)}/retry-automation`, { method: "POST" });
+  if (action === "trash") return api(`/api/learning/items/${encodeURIComponent(key)}`, { method: "DELETE" });
+  if (action === "restore") return api(`/api/learning/trash/${encodeURIComponent(key)}/restore`, { method: "POST" });
+  if (action === "purge") return api(`/api/learning/trash/${encodeURIComponent(key)}`, { method: "DELETE" });
+  throw new Error("当前批量操作不可用。请刷新后重试。");
+}
+
+function taskBatchSuccessMessage(action, count) {
+  if (action === "pause") return `已暂停 ${count} 项任务的后续调度。`;
+  if (action === "resume") return `已恢复 ${count} 项任务的后续调度。`;
+  if (action === "continue") return `已继续处理 ${count} 项任务。`;
+  if (action === "start") return `${count} 项任务已加入整理队列。`;
+  if (action === "retry") return `${count} 项任务已重新加入整理队列。`;
+  if (action === "trash") return `${count} 项任务已移入回收区。`;
+  if (action === "restore") return `已恢复 ${count} 项任务。`;
+  return `已永久删除 ${count} 项任务。`;
+}
+
+async function executeTaskBatch(action, keys = [...selectedTaskKeys]) {
+  const entries = selectedTaskEntries();
+  if (!keys.length || (keys.length === selectedTaskKeys.size && !batchActionApplies(action, entries))) {
+    say("所选任务不能共同执行这项操作。请刷新或重新选择。");
+    return;
+  }
+  const controls = [...taskSelectionBar.querySelectorAll("button[data-batch-task-action]")];
+  controls.forEach((button) => { button.disabled = true; });
+  confirmBatchTask.disabled = true;
+  const originalConfirmText = confirmBatchTask.textContent;
+  if (batchTaskDialog.open) confirmBatchTask.textContent = "正在处理…";
+  let completed = 0;
+  let failure = null;
+  for (const key of keys) {
+    try {
+      await requestTaskBatchAction(action, key);
+      completed += 1;
+    } catch (error) {
+      failure = error;
+      break;
+    }
+  }
+  if (batchTaskDialog.open) batchTaskDialog.close();
+  pendingBatchTask = null;
+  selectedTaskKeys.clear();
+  await refresh(true);
+  if (failure) say(`${completed} 项已完成，剩余 ${keys.length - completed} 项未处理：${failure.message}`);
+  else say(taskBatchSuccessMessage(action, completed));
+  controls.forEach((button) => { button.disabled = false; });
+  confirmBatchTask.disabled = false;
+  confirmBatchTask.textContent = originalConfirmText;
 }
 
 function thumbnailHref(relativePath) {
@@ -1898,6 +2053,13 @@ storageForm.addEventListener("submit", async (event) => {
   }
 });
 
+batchTaskForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!pendingBatchTask) return;
+  const { action, keys } = pendingBatchTask;
+  await executeTaskBatch(action, keys);
+});
+
 localModelRootForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = localModelRootForm.querySelector("button[type=submit]");
@@ -2055,20 +2217,37 @@ window.addEventListener("hashchange", () => {
 });
 
 document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => {
+  clearTaskSelection();
   activeTaskFilter = button.dataset.filter;
   document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("is-active", item === button));
   applyTaskFilter();
 }));
 taskSearch.addEventListener("input", () => {
+  clearTaskSelection();
   activeTaskQuery = taskSearch.value.trim().toLocaleLowerCase("zh-CN");
   applyTaskFilter();
 });
+taskSelectVisible.addEventListener("change", () => {
+  const visibleInputs = [...taskList.querySelectorAll("article[data-filter]:not([hidden]) input[data-task-select]")];
+  visibleInputs.forEach((input) => {
+    if (taskSelectVisible.checked) selectedTaskKeys.add(input.dataset.taskSelect);
+    else selectedTaskKeys.delete(input.dataset.taskSelect);
+  });
+  updateTaskSelectionUI();
+});
+document.querySelectorAll("button[data-batch-task-action]").forEach((button) => button.addEventListener("click", () => {
+  const action = button.dataset.batchTaskAction;
+  if (["trash", "purge"].includes(action)) openBatchTaskDialog(action);
+  else executeTaskBatch(action);
+}));
 document.querySelectorAll("[data-settings-tab]").forEach((button) => button.addEventListener("click", () => showSettingsPanel(button.dataset.settingsTab)));
 document.querySelectorAll("[data-open-single-video]").forEach((button) => button.addEventListener("click", () => singleVideoDialog.showModal()));
 document.querySelectorAll("[data-close-single-video]").forEach((button) => button.addEventListener("click", () => singleVideoDialog.close()));
 document.querySelectorAll("[data-close-automation-authorization]").forEach((button) => button.addEventListener("click", closeAutomationAuthorization));
 document.querySelectorAll("[data-close-delete-task]").forEach((button) => button.addEventListener("click", closeDeleteTask));
 deleteTaskDialog.addEventListener("close", () => { pendingDeleteItemRef = null; });
+document.querySelectorAll("[data-close-batch-task]").forEach((button) => button.addEventListener("click", closeBatchTaskDialog));
+batchTaskDialog.addEventListener("close", () => { pendingBatchTask = null; });
 confirmCheckConnection.addEventListener("click", confirmProviderConnectionCheck);
 document.querySelectorAll("[data-close-check-connection]").forEach((button) => button.addEventListener("click", () => checkConnectionDialog.close()));
 checkConnectionDialog.addEventListener("close", () => { pendingCheckConnection = null; });

@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light" />
     <title>语栖 · 本地产出控制台</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/workspace.css?v=20260904-1" />
-    <script src="/static/workspace.js?v=20260904-1" defer></script>
+    <link rel="stylesheet" href="/static/workspace.css?v=20260904-2" />
+    <script src="/static/workspace.js?v=20260904-2" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -63,9 +63,23 @@
                 <section class="task-table-shell" aria-labelledby="task-list-title">
                   <header class="task-table-toolbar">
                     <div class="task-table-title"><h2 id="task-list-title">全部任务</h2><span id="task-table-count">共 0 项</span></div>
+                    <label class="task-select-control"><input id="task-select-visible" type="checkbox" /><span>全选当前结果</span></label>
                     <label class="task-search"><span aria-hidden="true">⌕</span><input id="task-search" type="search" placeholder="搜索任务标题、来源或状态" autocomplete="off" /></label>
                     <button class="icon-button" id="refresh-tasks" type="button" aria-label="刷新任务">↻</button>
                   </header>
+                  <div class="task-selection-bar" id="task-selection-bar" hidden>
+                    <strong id="task-selection-count">已选 0 项</strong>
+                    <div class="task-selection-actions" aria-label="批量操作">
+                      <button data-batch-task-action="pause" type="button" hidden>暂停后续</button>
+                      <button data-batch-task-action="resume" type="button" hidden>继续任务</button>
+                      <button data-batch-task-action="continue" type="button" hidden>继续处理</button>
+                      <button data-batch-task-action="start" type="button" hidden>开始整理</button>
+                      <button data-batch-task-action="retry" type="button" hidden>重试整理</button>
+                      <button class="danger-button" data-batch-task-action="trash" type="button" hidden>移入回收区</button>
+                      <button data-batch-task-action="restore" type="button" hidden>恢复任务</button>
+                      <button class="danger-button" data-batch-task-action="purge" type="button" hidden>永久删除</button>
+                    </div>
+                  </div>
                   <div class="task-table-heading" id="task-table-heading" aria-hidden="true">
                     <span>任务信息</span><span>进度与状态</span><span>产出目标</span><span>当前说明</span><span>操作</span>
                   </div>
@@ -287,6 +301,14 @@
         <div class="dialog-heading"><div><p class="eyebrow">移入语栖回收区</p><h2>删除这个任务？</h2><p><strong id="delete-task-title">当前任务</strong>的任务记录和已生成文件会移入回收区，不会删除你原来的视频。</p></div><button class="dialog-close" data-close-delete-task type="button" aria-label="关闭">×</button></div>
         <p class="dialog-note">正在运行的任务不能删除。移入回收区后，它会从任务列表和来源处理记录中消失。</p>
         <div class="dialog-actions"><button class="secondary-button" data-close-delete-task type="button">取消</button><button id="confirm-delete-task" class="danger-button" type="submit">移入回收区</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="batch-task-dialog" class="app-dialog danger-dialog" aria-labelledby="batch-task-title" aria-describedby="batch-task-copy">
+      <form id="batch-task-form" class="dialog-shell compact-dialog">
+        <div class="dialog-heading"><div><p class="eyebrow" id="batch-task-kicker">批量操作</p><h2 id="batch-task-title">处理已选任务？</h2><p id="batch-task-copy">请确认本次操作范围。</p></div><button class="dialog-close" data-close-batch-task type="button" aria-label="关闭">×</button></div>
+        <p class="dialog-note" id="batch-task-note">操作只作用于当前明确选择的任务。</p>
+        <div class="dialog-actions"><button class="secondary-button" data-close-batch-task type="button">取消</button><button id="confirm-batch-task" class="danger-button" type="submit">确认操作</button></div>
       </form>
     </dialog>
 

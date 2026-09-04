@@ -109,6 +109,7 @@ from learnnest.task_store import find_task_by_id, load_task
 from learnnest.task_trash import (
     TaskTrashError,
     list_trashed_tasks,
+    purge_trashed_task,
     restore_trashed_task,
     trash_task,
 )
@@ -1361,6 +1362,16 @@ syncInitialHashBookmark();
         except TaskTrashError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {"status": "restored", "task_id": restored.task_id}
+
+    @app.delete("/api/learning/trash/{bundle_id}")
+    def purge_learning_trash(bundle_id: str) -> dict[str, str]:
+        try:
+            task_id = purge_trashed_task(service.output_root, bundle_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="回收任务不存在。") from error
+        except TaskTrashError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"status": "purged", "task_id": task_id}
 
     @app.post("/api/learning/items/{item_ref}/retry-automation", status_code=202)
     def retry_learning_automation(item_ref: str) -> Response:

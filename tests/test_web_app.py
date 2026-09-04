@@ -830,6 +830,24 @@ def test_learning_api_moves_one_task_to_the_internal_trash(tmp_path: Path) -> No
     )
 
 
+def test_learning_api_permanently_deletes_one_exact_trash_bundle(
+    tmp_path: Path,
+) -> None:
+    _task_dir, task = _task(tmp_path)
+    client = _client(tmp_path)
+    assert client.delete(f"/api/learning/items/{task.task_id}").status_code == 200
+    trashed = client.get("/api/learning/trash").json()["items"][0]
+
+    deleted = client.delete(f"/api/learning/trash/{trashed['bundle_id']}")
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {"status": "purged", "task_id": task.task_id}
+    assert client.get("/api/learning/trash").json() == {"items": []}
+    assert (
+        client.delete(f"/api/learning/trash/{trashed['bundle_id']}").status_code == 404
+    )
+
+
 def test_skipped_provider_stages_are_not_a_paid_execution_trace(tmp_path: Path) -> None:
     _task_dir, task = _task(tmp_path)
     task = task.model_copy(
@@ -1891,8 +1909,8 @@ def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
         assert f'id="{element_id}"' in page
     assert 'id="source-insight-rail"' not in page
     assert 'id="settings-insight-rail"' not in page
-    assert "/static/workspace.css?v=20260904-1" in page
-    assert "/static/workspace.js?v=20260904-1" in page
+    assert "/static/workspace.css?v=20260904-2" in page
+    assert "/static/workspace.js?v=20260904-2" in page
     assert ".source-console {" in stylesheet
     assert ".task-console," in stylesheet
     assert "grid-template-columns: minmax(0, 1fr);" in stylesheet
@@ -2032,6 +2050,14 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
     assert ".row-action-pair {" in stylesheet
     assert "overflow-wrap: anywhere" in stylesheet
     assert 'data-delete-item-ref="${escapeHtml(item.item_ref)}"' in script
+    assert 'data-task-select="${escapeHtml(item.item_ref)}"' in script
+    assert 'data-batch-task-action="trash"' in client.get("/").text
+    assert 'data-batch-task-action="purge"' in client.get("/").text
+    assert 'id="task-select-visible"' in client.get("/").text
+    assert 'id="task-selection-bar"' in client.get("/").text
+    assert 'id="batch-task-dialog"' in client.get("/").text
+    assert 'data-purge-bundle="${escapeHtml(item.bundle_id)}"' in script
+    assert "async function executeTaskBatch" in script
     assert 'data-action="open_note"' in script
     assert 'data-pause-item-ref="${escapeHtml(item.item_ref)}"' in script
     assert 'if (item.manually_paused) return "已暂停"' in script
@@ -2041,6 +2067,10 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
     assert "/api/learning/items/${encodeURIComponent(itemRef)}/resume" in script
     assert "/api/learning/trash" in script
     assert "/restore" in script
+    assert (
+        'api(`/api/learning/trash/${encodeURIComponent(key)}`, { method: "DELETE" })'
+        in script
+    )
     assert 'method: "DELETE"' in script
     assert "移入回收区" in client.get("/").text
     assert 'data-filter="paused"' in client.get("/").text

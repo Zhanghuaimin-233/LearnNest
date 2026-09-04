@@ -8,6 +8,11 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from learnnest.douyin_url import (
+    DouyinUrlError,
+    ShortUrlResolver,
+    canonicalize_douyin_url,
+)
 from learnnest.note_types import ConcreteNoteType, normalize_note_type
 from learnnest.source_models import SourceItem
 from learnnest.util import source_fingerprint, url_source_fingerprint
@@ -37,15 +42,31 @@ class _SourceOverrides(BaseModel):
         return value
 
 
-def parse_source(value: str, *, base_dir: Path | None = None) -> SourceItem:
-    """Normalize one URL or existing local video without side effects."""
+def parse_source(
+    value: str,
+    *,
+    base_dir: Path | None = None,
+    douyin_short_resolver: ShortUrlResolver | None = None,
+) -> SourceItem:
+    """Normalize one URL or existing local video without side effects.
+
+    Douyin links pass the shared admission boundary first: accepted shapes
+    become one canonical ``www.douyin.com/video/<id>`` URL; rejected shapes
+    raise :class:`SourceParseError` with a specific, actionable message.
+    """
     candidate = value.strip()
     if not candidate:
         raise SourceParseError("source input must not be empty")
     parsed = urlsplit(candidate)
     if parsed.scheme.lower() in {"http", "https"}:
+        try:
+            canonical = canonicalize_douyin_url(
+                candidate, resolver=douyin_short_resolver
+            )
+        except DouyinUrlError as error:
+            raise SourceParseError(str(error)) from error
         return SourceItem(
-            input=_normalize_url(parsed),
+            input=canonical or _normalize_url(parsed),
             input_type="url",
         )
     if parsed.scheme and len(parsed.scheme) > 1:
@@ -65,7 +86,9 @@ def parse_source(value: str, *, base_dir: Path | None = None) -> SourceItem:
     return SourceItem(input=str(resolved), input_type="local_file")
 
 
-def parse_tasks_file(path: Path) -> list[SourceItem]:
+def parse_tasks_file(
+    path: Path, *, douyin_short_resolver: ShortUrlResolver | None = None
+) -> list[SourceItem]:
     """Parse TXT or JSONL inputs relative to the task file directory."""
     task_path = path.resolve(strict=True)
     if not task_path.is_file():
@@ -83,11 +106,23 @@ def parse_tasks_file(path: Path) -> list[SourceItem]:
             continue
         if task_path.suffix.lower() == ".jsonl":
             sources.append(
-                _parse_jsonl_line(task_path, line_number, line, task_path.parent)
+                _parse_jsonl_line(
+                    task_path,
+                    line_number,
+                    line,
+                    task_path.parent,
+                    douyin_short_resolver=douyin_short_resolver,
+                )
             )
         else:
             try:
-                sources.append(parse_source(line, base_dir=task_path.parent))
+                sources.append(
+                    parse_source(
+                        line,
+                        base_dir=task_path.parent,
+                        douyin_short_resolver=douyin_short_resolver,
+                    )
+                )
             except SourceParseError as error:
                 raise SourceParseError(
                     f"{task_path.name}:{line_number}: {error}"
@@ -124,6 +159,7 @@ def collect_sources(
     tasks_path: Path | None = None,
     input_dir: Path | None = None,
     recursive: bool = False,
+    douyin_short_resolver: ShortUrlResolver | None = None,
 ) -> list[SourceItem]:
     """Resolve exactly one CLI input mode into normalized SourceItems."""
     selected = sum(value is not None for value in (input_value, tasks_path, input_dir))
@@ -132,9 +168,9 @@ def collect_sources(
             "exactly one of INPUT, --tasks, or --input-dir is required"
         )
     if input_value is not None:
-        return [parse_source(input_value)]
+        return [parse_source(input_value, douyin_short_resolver=douyin_short_resolver)]
     if tasks_path is not None:
-        return parse_tasks_file(tasks_path)
+        return parse_tasks_file(tasks_path, douyin_short_resolver=douyin_short_resolver)
     assert input_dir is not None
     return scan_input_directory(input_dir, recursive=recursive)
 
@@ -151,11 +187,17 @@ def _parse_jsonl_line(
     line_number: int,
     line: str,
     base_dir: Path,
+    *,
+    douyin_short_resolver: ShortUrlResolver | None = None,
 ) -> SourceItem:
     try:
         payload = json.loads(line)
         overrides = _SourceOverrides.model_validate(payload)
-        normalized = parse_source(overrides.input, base_dir=base_dir)
+        normalized = parse_source(
+            overrides.input,
+            base_dir=base_dir,
+            douyin_short_resolver=douyin_short_resolver,
+        )
     except (json.JSONDecodeError, ValidationError, SourceParseError) as error:
         raise SourceParseError(f"{task_path.name}:{line_number}: {error}") from error
     if (

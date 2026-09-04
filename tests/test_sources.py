@@ -186,3 +186,55 @@ def test_collect_sources_requires_exactly_one_input_mode(tmp_path: Path) -> None
         collect_sources(input_value=str(video), tasks_path=tasks)
 
     assert collect_sources(input_value=str(video))[0].input == str(video.resolve())
+
+
+def test_parse_source_canonicalizes_douyin_video_links() -> None:
+    from learnnest.sources import parse_source
+
+    for raw in (
+        "https://www.douyin.com/video/123/",
+        "https://www.douyin.com/video/123?previous_page=app_code_link#watch",
+        "https://douyin.com/video/123",
+    ):
+        source = parse_source(raw)
+        assert source.input_type == "url"
+        assert source.input == "https://www.douyin.com/video/123"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://www.douyin.com/",
+        "https://www.douyin.com/user/MS4wLjABAAAA",
+        "https://live.douyin.com/123",
+        "https://www.douyin.com/collection/456",
+        "https://www.douyin.com/video/abc",
+        "https://www.douyin.com/video/123?modal_id=456",
+        "http://www.douyin.com/video/123",
+        "https://douyin.com.evil.com/video/123",
+    ],
+)
+def test_parse_source_rejects_disallowed_douyin_links(raw: str) -> None:
+    from learnnest.sources import SourceParseError, parse_source
+
+    with pytest.raises(SourceParseError, match=r"抖音|视频|数字|多个|https|官方域名"):
+        parse_source(raw)
+
+
+def test_same_douyin_video_id_reduces_to_one_fingerprint() -> None:
+    from learnnest.sources import parse_source
+    from learnnest.util import url_source_fingerprint
+
+    fingerprints = {
+        url_source_fingerprint(parse_source(raw).input)
+        for raw in (
+            "https://www.douyin.com/video/123/",
+            "https://www.douyin.com/video/123?from=search#frag",
+            "https://www.douyin.com/?modal_id=123",
+            "https://www.douyin.com/video/123?modal_id=123",
+            "https://douyin.com/video/123",
+        )
+    }
+
+    assert fingerprints == {url_source_fingerprint("https://www.douyin.com/video/123")}
+    assert len(fingerprints) == 1

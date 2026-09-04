@@ -2218,6 +2218,217 @@ def test_learning_snapshot_observes_external_atomic_task_update(tmp_path: Path) 
     )
 
 
+def _job_file(root: Path, job_id: str) -> Path:
+    return root / ".learnnest" / "web" / "jobs" / f"{job_id}.json"
+
+
+def test_web_job_submits_douyin_short_link_as_canonical_public_url(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _, task = _task(tmp_path)
+    observed: dict[str, Any] = {}
+
+    def fake_process_source(
+        source_item: Any, output_root: Path, profile: str, **_: Any
+    ) -> TaskRecord:
+        del output_root, profile
+        observed["input"] = source_item.input
+        return task
+
+    monkeypatch.setattr(web_app, "process_source", fake_process_source)
+    client = TestClient(
+        web_app.create_web_app(
+            tmp_path,
+            douyin_short_resolver=lambda _short: (
+                "https://www.douyin.com/video/987654321"
+            ),
+        )
+    )
+
+    response = client.post(
+        "/api/jobs/process", json={"source": "https://v.douyin.com/shortcode/"}
+    )
+    job = _wait_for_job(client, response.json()["job_id"])
+
+    assert response.status_code == 202
+    assert job["status"] == "completed"
+    assert job["task_id"] == task.task_id
+    assert observed["input"] == "https://www.douyin.com/video/987654321"
+    persisted = json.loads(
+        _job_file(tmp_path, response.json()["job_id"]).read_text(encoding="utf-8")
+    )
+    assert persisted["source_input"] == "https://www.douyin.com/video/987654321"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://www.douyin.com/",
+        "https://www.douyin.com/user/MS4wLjABAAAA",
+        "https://live.douyin.com/123",
+        "https://www.douyin.com/collection/456",
+        "https://www.douyin.com/video/abc",
+        "https://www.douyin.com/video/123?modal_id=456",
+        "http://www.douyin.com/video/123",
+        "https://douyin.com.evil.com/video/123",
+    ],
+)
+def test_web_job_rejects_disallowed_douyin_links_without_job_or_task(
+    tmp_path: Path, monkeypatch: Any, source: str
+) -> None:
+    called = False
+
+    def fail_process(*_: Any, **__: Any) -> TaskRecord:
+        nonlocal called
+        called = True
+        raise AssertionError("disallowed douyin link reached the pipeline")
+
+    monkeypatch.setattr(web_app, "process_source", fail_process)
+    client = _client(tmp_path)
+
+    response = client.post("/api/jobs/process", json={"source": source})
+
+    assert response.status_code == 400
+    assert "抖音" in response.json()["detail"]
+    assert called is False
+    jobs_dir = tmp_path / ".learnnest" / "web" / "jobs"
+    assert not jobs_dir.exists() or not list(jobs_dir.glob("*.json"))
+    assert not (tmp_path / "视频学习素材").exists()
+
+
+def test_web_job_short_link_failure_is_actionable_and_redacts_the_source(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    called = False
+
+    def fail_process(*_: Any, **__: Any) -> TaskRecord:
+        nonlocal called
+        called = True
+        raise AssertionError("failed short link reached the pipeline")
+
+    monkeypatch.setattr(web_app, "process_source", fail_process)
+
+    def failing_resolver(_short: str) -> str:
+        raise RuntimeError("ACCT_SENTINEL boom")
+
+    client = TestClient(
+        web_app.create_web_app(tmp_path, douyin_short_resolver=failing_resolver)
+    )
+
+    response = client.post(
+        "/api/jobs/process", json={"source": "https://v.douyin.com/ACCT_SENTINEL"}
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "短链接解析失败" in detail
+    assert "ACCT_SENTINEL" not in detail
+    assert "boom" not in detail
+    assert called is False
+    jobs_dir = tmp_path / ".learnnest" / "web" / "jobs"
+    assert not jobs_dir.exists() or not list(jobs_dir.glob("*.json"))
+
+
+def _persisted_texts(root: Path) -> list[str]:
+    texts: list[str] = []
+    for path in root.rglob("*"):
+        if path.is_file():
+            try:
+                texts.append(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError):
+                continue
+    return texts
+
+
+_ACCOUNT_AND_SIGNATURE_MARKERS = (
+    "ACCT_SENTINEL",
+    "USER_SENTINEL",
+    "SIG_SENTINEL",
+    "BOGUS_SENTINEL",
+    "COOKIE_SENTINEL",
+)
+
+
+def test_douyin_account_and_signature_markers_never_persist(
+    tmp_path: Path, monkeypatch: Any, caplog: Any
+) -> None:
+    _, task = _task(tmp_path)
+    observed: dict[str, Any] = {}
+
+    def fake_process_source(
+        source_item: Any, output_root: Path, profile: str, **_: Any
+    ) -> TaskRecord:
+        del output_root, profile
+        observed["input"] = source_item.input
+        return task
+
+    monkeypatch.setattr(web_app, "process_source", fake_process_source)
+    client = _client(tmp_path)
+    source = (
+        "https://www.douyin.com/video/123"
+        "?sec_uid=ACCT_SENTINEL&user=USER_SENTINEL"
+        "&signature=SIG_SENTINEL&a_bogus=BOGUS_SENTINEL#COOKIE_SENTINEL"
+    )
+
+    response = client.post("/api/jobs/process", json={"source": source})
+    job = _wait_for_job(client, response.json()["job_id"])
+
+    assert response.status_code == 202
+    assert job["status"] == "completed"
+    assert observed["input"] == "https://www.douyin.com/video/123"
+    api_text = client.get(f"/api/jobs/{response.json()['job_id']}").text
+    job_text = _job_file(tmp_path, response.json()["job_id"]).read_text(
+        encoding="utf-8"
+    )
+    assert all(marker not in job_text for marker in _ACCOUNT_AND_SIGNATURE_MARKERS)
+    assert all(marker not in api_text for marker in _ACCOUNT_AND_SIGNATURE_MARKERS)
+    assert all(
+        marker not in text
+        for text in _persisted_texts(tmp_path)
+        for marker in _ACCOUNT_AND_SIGNATURE_MARKERS
+    )
+    assert all(marker not in caplog.text for marker in _ACCOUNT_AND_SIGNATURE_MARKERS)
+
+
+def test_douyin_pipeline_failure_message_redacts_account_markers(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    def fail_process(*_: Any, **__: Any) -> TaskRecord:
+        raise PipelineError("download failed for ACCT_SENTINEL source")
+
+    monkeypatch.setattr(web_app, "process_source", fail_process)
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/jobs/process",
+        json={"source": "https://www.douyin.com/video/123?user=ACCT_SENTINEL"},
+    )
+    job = _wait_for_job(client, response.json()["job_id"])
+
+    assert job["status"] == "failed"
+    assert job["error"] is not None
+    assert "ACCT_SENTINEL" not in job["error"]
+
+
+def test_learning_api_rejects_disallowed_douyin_link_actionably(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/learning/items",
+        json={
+            "source": "https://www.douyin.com/user/MS4wLjABAAAA",
+            "desired_output": "readable_note",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "抖音" in response.json()["detail"]
+    jobs_dir = tmp_path / ".learnnest" / "web" / "jobs"
+    assert not jobs_dir.exists() or not list(jobs_dir.glob("*.json"))
+
+
 def test_learning_note_rejects_escaped_or_unreferenced_images(tmp_path: Path) -> None:
     _, escaped = _published_learning_task(
         tmp_path, name="escaped-image", markdown="![x](../../outside.png)"

@@ -140,6 +140,35 @@ def test_ytdlp_downloader_explains_when_douyin_requires_fresh_cookies(
     )
 
 
+def test_ytdlp_downloader_only_explains_fresh_cookies_for_canonical_douyin_urls(
+    tmp_path: Path,
+) -> None:
+    from learnnest.downloader import DownloaderError, YtDlpDownloader
+
+    class FreshCookieYdl(FakeYdl):
+        def extract_info(self, url: str, *, download: bool) -> dict[str, object]:
+            del url, download
+            raise RuntimeError(
+                "ERROR: [Douyin] Fresh cookies (not necessarily logged in) are needed"
+            )
+
+    source = SourceItem(
+        input="https://v.douyin.com/shortcode",
+        input_type="url",
+    )
+
+    with pytest.raises(DownloaderError) as captured:
+        YtDlpDownloader(ydl_factory=FreshCookieYdl).acquire(
+            source,
+            tmp_path,
+            source_fingerprint="a1b2c3d4",
+        )
+
+    message = str(captured.value)
+    assert "URL 下载失败" in message
+    assert "抖音下载需要有效登录" not in message
+
+
 def test_ytdlp_downloader_rejects_local_source_items(tmp_path: Path) -> None:
     from learnnest.downloader import YtDlpDownloader
 

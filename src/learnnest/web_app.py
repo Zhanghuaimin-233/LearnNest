@@ -49,6 +49,12 @@ from learnnest.douyin_favorites import (
 from learnnest.douyin_cookie_store import DouyinCookieStore
 from learnnest.douyin_login import DouyinLoginError, DouyinLoginSessionManager
 from learnnest.downloader import YtDlpDownloader
+from learnnest.douyin_url import (
+    DouyinUrlError,
+    ShortUrlResolver,
+    canonicalize_douyin_url,
+    is_douyin_canonical_url,
+)
 from learnnest.execution import plan_recovery
 from learnnest.learning_workspace import (
     LearningItem,
@@ -293,6 +299,7 @@ class WebService:
         coordinator: AutomationCoordinator | None = None,
         launcher_config_path: Path | None = None,
         local_models: LocalModelService | None = None,
+        douyin_short_resolver: ShortUrlResolver | None = None,
     ) -> None:
         self.output_root = Path(output_root).resolve()
         self.jobs = WebJobStore(self.output_root)
@@ -305,6 +312,7 @@ class WebService:
         self.coordinator = coordinator
         self.launcher_config_path = launcher_config_path
         self.local_models = local_models or LocalModelService()
+        self._douyin_short_resolver = douyin_short_resolver
 
     def wake_automation(self) -> None:
         if self.coordinator is not None:
@@ -350,7 +358,17 @@ class WebService:
         | None = None,
     ) -> WebJob:
         try:
-            source_item = collect_sources(input_value=source)[0]
+            canonical = canonicalize_douyin_url(
+                source, resolver=self._douyin_short_resolver
+            )
+        except DouyinUrlError as error:
+            raise ValueError(str(error)) from error
+        candidate = canonical if canonical is not None else source
+        try:
+            source_item = collect_sources(
+                input_value=candidate,
+                douyin_short_resolver=self._douyin_short_resolver,
+            )[0]
             if source_item.input_type == "url":
                 validate_public_web_url(source_item.input)
         except (LearningWorkspaceError, SourceParseError) as error:
@@ -409,10 +427,28 @@ class WebService:
             ) from error
         return YtDlpDownloader(cookie=cookie)
 
+    def _runtime_cookie_downloader(self) -> YtDlpDownloader | None:
+        """Return a logged-in downloader only when a live session is connected.
+
+        Re-read every attempt so a retry can reuse the login state without
+        falling back to any original URL.
+        """
+        session = self.douyin_login.current_session()
+        session_id = session.get("session_id") if isinstance(session, dict) else None
+        if session.get("status") != "connected" or not isinstance(session_id, str):
+            return None
+        try:
+            return YtDlpDownloader(cookie=self.douyin_login.cookie_for(session_id))
+        except DouyinLoginError:
+            return None
+
     def _process_job_runner(self, job: WebJob) -> Callable[[], None]:
         def runner() -> None:
             self.jobs.start(job.job_id)
-            sources = collect_sources(input_value=job.source_input)
+            sources = collect_sources(
+                input_value=job.source_input,
+                douyin_short_resolver=self._douyin_short_resolver,
+            )
             if len(sources) != 1:
                 raise ValueError("source job input is invalid")
             source_item = sources[0]
@@ -433,6 +469,13 @@ class WebService:
                     self.output_root,
                     "evidence",
                     downloader=self._douyin_runtime_downloader(),
+                )
+            elif is_douyin_canonical_url(source_item.input):
+                task = process_source(
+                    source_item,
+                    self.output_root,
+                    "evidence",
+                    downloader=self._runtime_cookie_downloader(),
                 )
             else:
                 task = process_source(source_item, self.output_root, "evidence")
@@ -1023,6 +1066,7 @@ def create_web_app(
     coordinator: AutomationCoordinator | None = None,
     launcher_config_path: Path | None = None,
     local_models: LocalModelService | None = None,
+    douyin_short_resolver: ShortUrlResolver | None = None,
 ) -> FastAPI:
     """Create the loopback WebUI application without starting a server."""
     workspace = LearningWorkspace(output_root)
@@ -1034,6 +1078,7 @@ def create_web_app(
         coordinator=coordinator,
         launcher_config_path=launcher_config_path,
         local_models=local_models,
+        douyin_short_resolver=douyin_short_resolver,
     )
 
     @asynccontextmanager

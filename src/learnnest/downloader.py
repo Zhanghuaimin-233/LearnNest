@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 from yt_dlp import YoutubeDL
 
+from learnnest.douyin_url import is_douyin_canonical_url
 from learnnest.source_models import AcquiredSource, SourceItem
 from learnnest.sources import VIDEO_EXTENSIONS
 
@@ -133,8 +133,8 @@ def _optional_text(value: object) -> str | None:
 
 
 def _douyin_requires_fresh_cookies(source: str, error: Exception) -> bool:
-    host = (urlsplit(source).hostname or "").casefold()
-    return (host == "douyin.com" or host.endswith(".douyin.com")) and (
+    """Only canonical video URLs claim the douyin login explanation."""
+    return is_douyin_canonical_url(source) and (
         "fresh cookies" in str(error).casefold()
     )
 

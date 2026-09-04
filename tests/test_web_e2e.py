@@ -340,6 +340,7 @@ def _start_loopback_server(
     clock: Callable[[], datetime] | None = None,
     douyin_login: object | None = None,
     douyin_favorites: object | None = None,
+    douyin_short_resolver: object | None = None,
 ) -> tuple[str, uvicorn.Server, threading.Thread]:
     coordinator = AutomationCoordinator(  # type: ignore[arg-type]
         root, run_tasks=run_tasks, clock=clock or (lambda: datetime.now(UTC))
@@ -352,6 +353,7 @@ def _start_loopback_server(
                 coordinator=coordinator,
                 douyin_login=douyin_login,  # type: ignore[arg-type]
                 douyin_favorites=douyin_favorites or _HistoricalFavorites(),  # type: ignore[arg-type]
+                douyin_short_resolver=douyin_short_resolver,  # type: ignore[arg-type]
             ),
             host="127.0.0.1",
             port=port,
@@ -2232,3 +2234,85 @@ def test_goal4_unknown_and_permanent_automation_failures_hide_retry_and_stop_fac
         )
         assert load_intake(loopback_app.root, task_id).status == "needs_attention"
         browser.close()
+
+
+def test_douyin_url_admission_reaches_tasks_or_actionable_error_in_real_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import learnnest.web_app as web_app
+
+    created = [0]
+
+    def fake_process(
+        source_item: object, root: Path, profile: str, **_: object
+    ) -> object:
+        del profile
+        created[0] += 1
+        return _task(root, "douyin-input", created[0])
+
+    monkeypatch.setattr(web_app, "process_source", fake_process)
+
+    def failing_resolver(_short: str) -> str:
+        raise RuntimeError("ACCT_SENTINEL unreachable")
+
+    url, server, thread = _start_loopback_server(
+        tmp_path,
+        lambda *_args, **_kwargs: [],
+        douyin_short_resolver=failing_resolver,
+    )
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(edge), headless=True
+            )
+            for viewport in (
+                {"width": 1440, "height": 1000},
+                {"width": 390, "height": 844},
+            ):
+                console_issues: list[str] = []
+
+                def record_console(message: object) -> None:
+                    # Rejected douyin submissions are an expected 400 contract; the
+                    # browser logs those failed fetches as network noise, not app
+                    # errors. Only real JS console errors/warnings count here.
+                    if message.type in {
+                        "error",
+                        "warning",
+                    } and not message.text.startswith("Failed to load resource"):
+                        console_issues.append(message.text)
+
+                page = browser.new_page(viewport=viewport)
+                page.on("console", record_console)
+                page.goto(url)
+                _open_view(page, "sources")
+
+                def submit(raw: str) -> None:
+                    page.locator("#public-url").fill(raw)
+                    page.locator('button[form="url-form"]').click()
+
+                submit("https://www.douyin.com/user/MS4wLjABAAAA")
+                expect(page.locator("#notice")).to_contain_text("视频 ID")
+
+                submit("https://v.douyin.com/ACCT_SENTINEL")
+                expect(page.locator("#notice")).to_contain_text("短链接解析失败")
+
+                submit("https://douyin.com.evil.com/video/123")
+                expect(page.locator("#notice")).to_contain_text("官方域名")
+
+                submit("https://www.douyin.com/video/987654321?from=search#frag")
+                expect(page.locator("#notice")).to_have_text(
+                    "已加入收件箱，正在整理材料。"
+                )
+                expect(page.locator('[data-view-panel="tasks"]')).to_be_visible()
+                expect(page.locator(".source-jobs .source-job")).to_have_count(1)
+
+                assert "ACCT_SENTINEL" not in page.locator("body").inner_text()
+                assert page.evaluate(
+                    "document.documentElement.scrollWidth <= window.innerWidth"
+                )
+                assert console_issues == []
+                page.close()
+            browser.close()
+    finally:
+        _stop_loopback_server(server, thread)

@@ -652,6 +652,56 @@ def test_public_web_url_validation_accepts_public_hosts(source: str) -> None:
     learning_workspace.validate_public_web_url(source)
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://www.douyin.com/user/MS4wLjABAAAA",
+        "https://www.douyin.com/video/123?modal_id=456",
+        "http://www.douyin.com/video/123",
+        "https://douyin.com.evil.com/video/123",
+    ],
+)
+def test_add_content_rejects_disallowed_douyin_links_actionably(
+    tmp_path: Path, monkeypatch: Any, source: str
+) -> None:
+    called = False
+
+    def fail_process(*_: Any, **__: Any) -> TaskRecord:
+        nonlocal called
+        called = True
+        raise AssertionError("disallowed douyin link reached the pipeline")
+
+    monkeypatch.setattr(learning_workspace, "process_source", fail_process)
+
+    with pytest.raises(learning_workspace.LearningWorkspaceError, match="抖音"):
+        learning_workspace.LearningWorkspace(tmp_path).add_content(
+            source, desired_output="readable_note"
+        )
+
+    assert called is False
+
+
+def test_add_content_canonicalizes_douyin_video_link_before_pipeline(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    task_dir, task = _task(tmp_path, "douyin-item")
+    observed: list[str] = []
+
+    def fake_process(source_item: Any, output_root: Path, profile: str) -> TaskRecord:
+        del output_root, profile
+        observed.append(source_item.input)
+        return task
+
+    monkeypatch.setattr(learning_workspace, "process_source", fake_process)
+    learning_workspace.LearningWorkspace(tmp_path).add_content(
+        "https://www.douyin.com/video/123?from=search#fragment",
+        desired_output="readable_note",
+    )
+
+    assert observed == ["https://www.douyin.com/video/123"]
+    assert not (task_dir / "下载中").exists()
+
+
 def test_continue_item_runs_only_deterministic_recovery(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

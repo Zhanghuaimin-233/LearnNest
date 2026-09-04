@@ -28,6 +28,7 @@ from learnnest.locks import LockUnavailable, task_lock
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.pipeline import PipelineError, process_source, process_video, rerun_task
 from learnnest.publication import note_belongs_to_task, read_audio_ownership_marker
+from learnnest.douyin_url import DouyinUrlError, canonicalize_douyin_url
 from learnnest.sources import SourceParseError, collect_sources
 from learnnest.task_control import CONTROL_FILENAME, load_task_control, set_manual_pause
 from learnnest.task_store import find_task_by_id, parse_task_bytes
@@ -294,7 +295,11 @@ class LearningWorkspace:
 
     def _source_item(self, source: str):
         try:
-            items = collect_sources(input_value=source)
+            canonical = canonicalize_douyin_url(source)
+        except DouyinUrlError as error:
+            raise LearningWorkspaceError(str(error)) from error
+        try:
+            items = collect_sources(input_value=canonical or source)
         except SourceParseError as error:
             raise LearningWorkspaceError(
                 "无法添加内容，请提供一个本地视频或公开链接。"

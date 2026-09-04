@@ -5,29 +5,38 @@
 <h1 align="center">语栖 · LearnNest</h1>
 
 <p align="center">
-  把本地视频和公开内容整理成可阅读的完整笔记，并按需生成可播放的播客音频。
+  在 Windows 本机把视频整理成可追溯的 Markdown 笔记，并按需生成播客音频。
 </p>
 
-LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面和 OCR 整理成可追溯材料，再生成学习笔记；需要时，笔记还可以继续变成播客稿和音频。数据和运行产物默认留在用户指定的本地目录。
+LearnNest 是面向个人学习场景的本地优先工具。它把字幕、语音、关键帧和 OCR 整理成带来源关系的材料包，再生成完整笔记；需要时，还能继续生成播客稿和音频。任务事实、凭据和内容默认保存在用户选择的本地目录中。
 
-项目已经跑通“视频 → 完整笔记 → 播客音频”的核心技术路线，完成了不稳定路线收敛以及 Provider 与工作流解耦。WebUI 已作为普通用户入口进入产品闭环收口阶段，但当前版本还不能把页面可用等同于完整日常流程已经验收。
+项目已经跑通“视频 → 材料包 → 完整笔记 → 播客音频”的核心路线，当前仍处于产品可用性收敛阶段。普通用户优先使用本地 WebUI；CLI/API 保留给 Agent、自动化和高级用户。
 
-## 当前能做什么
+## 主要能力
 
-| 能力 | 当前状态 |
-| --- | --- |
-| 本地视频 | 支持单个文件、目录和可恢复任务处理 |
-| 公开 URL | 通过本机 `yt-dlp` 尽力下载视频与平台字幕 |
-| 抖音收藏 | 支持隔离官方登录、默认及自建收藏夹同步、待下载队列与本地缩略图；自动新增范围仍只覆盖默认收藏 |
-| 材料提取 | 支持 ASR、关键帧、OCR、evidence 和 `content_pack.json` |
-| 学习笔记 | 效率笔记是唯一默认产品路线；质量模式保留为开发调试链路 |
-| 播客与音频 | 已能从笔记生成播客稿、`speech.txt`，并通过 Windows 系统语音或可选 MiMo TTS 生成音频 |
-| WebUI | W2 已完成任务工作台与单视频主路径；W3 已完成职责绑定、连接选择、设置页收敛和本地 ASR/OCR 模型显式下载，并通过 fake/offline 机器与正式 Edge 功能复核；当前进入 W4 三类来源统一 |
-| 恢复与事实 | 任务/批次 JSON 保存事实，SQLite 作为可重建查询投影 |
+- **三类内容入口：** 本地视频、公开 URL，以及经过用户登录授权的抖音收藏。
+- **多模态材料提取：** 字幕、faster-whisper ASR、关键帧、PaddleOCR、稳定 `evidence_id` 与 `content_pack.json`。
+- **完整学习笔记：** 默认使用 `assisted-note` 的 Writer + Reviewer 效率路线；`quality-note` 仍是开发调试模式。
+- **播客与音频：** 从已验证的播客稿和 `speech.txt` 生成音频，支持 Windows System.Speech 和可选 MiMo TTS。
+- **本地任务工作台：** 在任务行中查看进度、失败原因和下一步，支持持久暂停、继续、重试、阅读笔记与播放音频。
+- **本地模型管理：** 在 WebUI 中显式下载、取消和检查 faster-whisper large-v3 与 PaddleOCR 检测/识别模型；默认使用程序目录旁的 `model`，也可切换到其他可写绝对路径。
+- **BYOK Provider 设置：** 提供 17 个 LLM 预设，新增连接必须先获取支持目录并由用户明确选择模型，不会静默使用默认模型或跨供应商回退。
+- **可恢复事实：** TaskRecord/BatchManifest JSON 保存任务事实，SQLite 只作为可重建的查询投影。
 
-抖音图文目前只下载为本地素材和 `image_text.json`，尚未进入视频的 ASR、关键帧、证据包和笔记流程。
+当前 LLM 预设包括 MiMo、DeepSeek、OpenAI、Kimi、智谱 GLM、阿里云百炼/Qwen、火山方舟/豆包、腾讯混元、MiniMax、LongCat、蚂蚁百灵、xAI、OpenRouter、ModelScope、NVIDIA NIM、Anthropic 和 Gemini。
 
-## 核心流程
+> [!IMPORTANT]
+> 17 个预设的设置流程已通过 fake/offline 机器验证和 WebUI 功能复核；除 MiMo、DeepSeek 外，新增的 15 个 Provider 尚未逐项完成真实目录、真实连接和成品调用验收。配置成功不代表对应账号、模型或最终产出已经验证。
+
+## 当前边界
+
+- 目前只正式面向 Windows 与 Python 3.12；WebUI 仅监听 `127.0.0.1`，不是云服务或局域网服务。
+- 抖音图文目前只保存本地素材和 `image_text.json`，尚未接入视频的 ASR、证据包与笔记流程。
+- 本地模型只覆盖现有 ASR/OCR adapter 所需资产，不包含本地 LLM、Ollama 或新的 TTS 引擎。
+- 页面加载、启动、测试、`doctor` 与任务执行不会隐式下载模型，也不会隐式发起付费 Provider 调用。
+- 请只处理你有权访问、下载和使用的内容，并遵守来源平台规则与适用法律。
+
+## 工作流程
 
 ```text
 本地视频 / 公开 URL / 抖音收藏
@@ -45,41 +54,46 @@ LearnNest 是面向个人使用的本地学习产品。它先把字幕、画面�
                 └── TTS 音频
 ```
 
-`content_pack.json` 和稳定 `evidence_id` 是生成阶段的共享输入合同。笔记策略、播客稿和 TTS 是不同模块；付费 Provider 阶段必须显式触发或先获得独立的付费整理许可。
-
-## 当前路线说明
-
-- **效率模式**：`assisted-note` 的 Writer + Reviewer 路线，后续作为默认笔记产品路径。
-- **质量模式**：`quality-note`，仍处于开发调试阶段，成功率较低，不属于稳定承诺。
-- **严格生成路线**：已退出运行时；历史 V2/V3 产物只保留必要的只读兼容，不应反向影响标准笔记合同。
-- **Provider 范围**：WebUI 可维护 MiMo、DeepSeek 与 W3.2 的 15 个官方/多模型平台 LLM 预设，以及 MiMo TTS、Windows 系统语音、本地 faster-whisper large-v3 和 PaddleOCR。17 个 LLM 预设的设置流程已完成机器与用户功能验收；W3.2 新增 Provider 的真实目录、连接和成品调用仍待后续逐项授权验收。ASR/OCR 未显式绑定时沿用内置本地默认，显式绑定后会冻结进新任务；当前不承诺其他 ASR/OCR 服务。
-- **TTS 边界**：Windows System.Speech 是默认本地方案，可在设置页选择并保存精确 voice；MiMo TTS 是独立的可选云端连接、密钥引用、预算和失败域。
-
-阶段 0–5.5 已完成共享内核、Provider/TTS、自动收件箱以及三类来源的 fake/offline 浏览器产品门禁。
-后续真实单视频纵向验证确认生产基座可行；W2 又把任务工作台、单视频日常路径、持久暂停/继续、
-明确失败与恢复、跨页面设计和正式进程体验收敛到主 WebUI。W3 已完成职责绑定、授权、LLM
-连接/模型选择、设置页 UI 与本地 ASR/OCR 模型下载；当前 W4 继续统一三类来源的生产与恢复语义，
-之后再依次收敛成品与回收生命周期、统一应用服务和完整非付费门禁，最后进行受限真实 Provider、多来源稳定性与
-人工成品质量验收。本机维护者若配置了 `LOCAL-RECORDS.md`，应以其中指向的现役实施 Plan 和唯一
-State 为准。
+`content_pack.json` 和稳定 `evidence_id` 是生成阶段的共享输入合同。笔记、播客稿和 TTS 是可独立配置、失败和重跑的阶段。
 
 ## 快速开始
 
-### 环境
+### 1. 准备环境
 
 - Windows
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
 - FFmpeg 与 FFprobe
-- 真实 ASR/OCR 所需的本地模型；可以在 WebUI 中显式下载
 
 ```powershell
-git clone <你的 LearnNest 仓库地址>
+git clone https://github.com/Zhanghuaimin-233/LearnNest.git
 Set-Location .\LearnNest
 uv sync
 ```
 
-处理一个本地视频：
+### 2. 启动 WebUI
+
+日常使用可直接双击仓库根目录的 `启动语栖.bat`，或运行：
+
+```powershell
+uv run learnnest web launch
+```
+
+首次启动会让你选择学习内容的保存位置；以后会复用该位置。页面打开在 `http://127.0.0.1:8765`。关闭启动进程后，本地 Web 服务和前台自动整理协调器随之停止。
+
+进入“设置”后可以：
+
+1. 在“本地存储”查看当前输出目录，或保存下次启动使用的新目录；
+2. 在“本地模型”确认模型目录，显式下载 ASR/OCR 模型；
+3. 在“API 连接”新增云端连接、获取模型目录并选择具体模型；
+4. 在“职责配置”把连接绑定到 Writer、Reviewer、Podcast 或 TTS；
+5. 在“调用与限额”检查预算，最后显式开启付费整理许可。
+
+切换输出目录需要重启才会生效，不会搬迁或删除旧目录。切换模型目录即时生效，但下载进行中会被拒绝，旧模型也不会自动搬迁或删除。
+
+### 3. 使用 CLI
+
+只运行确定性材料管线：
 
 ```powershell
 uv run learnnest process `
@@ -88,75 +102,32 @@ uv run learnnest process `
   '.\lesson.mp4'
 ```
 
-日常启动本地 WebUI，可直接双击仓库根目录的 `启动语栖.bat`。首次启动会让用户选择学习内容
-保存位置，以后直接复用同一位置；启动配置可保存输出根和用户选择的本地模型目录，不保存密钥。等价命令为：
-
-```powershell
-uv run learnnest web launch
-```
-
-在“设置 → 本地存储”中可以查看当前运行使用的完整路径，并保存下次正常启动要使用的新位置。
-切换位置需要重启语栖才会生效，不会搬迁或删除原位置中的任务。
-
-在“设置 → 本地模型”中可以查看、下载和取消当前 ASR/OCR 模型。默认模型目录是程序本体旁的
-`model` 文件夹；也可以即时切换到其他可写绝对路径。下载进行中不能切换目录，切换后不会自动搬迁
-或删除旧目录中的模型。页面加载、启动、测试、`doctor` 和任务执行都不会隐式下载模型。
-
-维护者也可以显式指定输出根：
-
-```powershell
-uv run learnnest web serve --output-root .\learnnest-output
-```
-
-页面会打开 `http://127.0.0.1:8765`。服务只监听本机回环地址，不提供云端账号、后台服务或
-局域网托管；关闭启动进程后，前台自动整理协调器随之停止。
-
-查看当前 CLI：
+查看完整命令：
 
 ```powershell
 uv run learnnest --help
 uv run learnnest doctor
-```
-
-`doctor` 不应下载模型或产生付费调用；完整检查需要本机 ASR/OCR 环境以及 `src/learnnest/fixtures/README.md` 说明的本地 fixture。
-
-## 生成阶段与付费边界
-
-基础材料管线不需要付费 LLM。当前代码中的笔记、播客与 TTS 命令分别显式运行；`process`、`queue run` 和本地恢复不得暗中调用付费 Provider。
-
-```powershell
 uv run learnnest assisted-note --help
 uv run learnnest podcast --help
 uv run learnnest tts --help
 ```
 
-17 个 LLM Provider 预设、MiMo TTS、Windows TTS、本地 faster-whisper large-v3 和 PaddleOCR 连接都可通过 WebUI 维护；云端 LLM 新连接必须先获取目录并显式选择模型，再一次性保存连接、DPAPI secret 与模型。Windows TTS 可选择精确 voice。本地 ASR/OCR 不需要 API Key；未显式绑定时继续使用内置本地能力，显式绑定后与其他职责一样在任务开始时冻结，设置变化不会改写运行中任务。
-设置页的“检查连接”会实际验证对应能力：本地 ASR/OCR/Windows TTS 只在本机执行；云端连接必须由用户明确确认，每次只发送一个最小真实请求且不自动重试，可能产生少量 Provider 费用。诊断调用会留下审计记录，但不占用任务每日调用限额，也不会保存 Provider 返回的测试内容。
-`.env` 只保留显式旧 CLI 的迁移兼容入口，具体参数以命令帮助和
-[`.env.example`](.env.example) 为准。
+`doctor` 只检查本机 ASR/OCR worker，不应下载模型或产生付费调用。完整检查需要本地模型以及 [`src/learnnest/fixtures/README.md`](src/learnnest/fixtures/README.md) 中说明的 fixture。
 
-付费整理许可默认关闭，并由用户显式确认。许可与“自动加入新收藏”是两个独立状态：手动加入的内容只要求有效付费许可，自动出现的新收藏还要求单独开启来源开关。许可冻结重试、全局预算和
-note/podcast/TTS/ASR/OCR 五组任务预算；所有远程调用在构造 Provider 前先写入
-running 调用事实。自动重试只能处理明确的临时错误，普通任务的所有尝试必须可见并计数；
-结果为 `unknown` 时停止，不能跨 Provider 自动切换。收藏同步会短暂恢复无窗口的隔离抖音官方页面，
-由官方运行时生成当次动态请求校验、默认收藏首批响应及自建收藏夹稳定身份，随后后端沿同一请求模板完成默认收藏游标分页；
-本次页面内登录成功后自动同步一次，手动同步用于重试。程序不保存签名参数、请求头或请求正文。
-本地视频、公开 URL 与用户选择的历史收藏在确定性来源任务成功后进入同一持久化收件箱；
-首次收藏同步只建立历史基线；周期检查以分钟配置，默认 30 分钟。默认收藏中的新增内容只有在来源开关开启且付费许可有效时才自动加入。
+## Provider、费用与隐私
 
-## 本地优先与安全
+- API Key 使用 Windows CurrentUser DPAPI 加密，按输出根保存；页面、设置 API、任务、日志和 SQLite 不保存或回显明文。
+- 云端“检查连接”是一次显式诊断：必须确认可能付费，每次只发送一个最小真实请求，不自动重试，也不保存 Provider 返回正文。
+- 付费整理许可默认关闭。保存设置、授予许可和开始整理是三个独立动作，LearnNest 不会替用户完成确认。
+- 重试仅覆盖明确的临时错误；`unknown`、永久错误和配置错误立即停止。所有真实尝试都会持久化并计数。
+- Provider、模型、重试次数、预算或自动来源范围发生实质变化时，旧授权会失效。
+- API Key、Cookie、原始 Provider 请求、模型、媒体和运行产物不得提交到 Git。
 
-- API Key、Cookie、原始 Provider 请求、模型、媒体和运行产物不进入 Git。
-- Provider API Key 使用 Windows 当前用户 DPAPI 加密在对应输出根下；设置 API、任务、日志和页面只保存或显示状态与引用，不回显 Key。
-- WebUI 将隔离官方窗口的 Cookie 与页面存储环境作为一个登录态，使用 Windows 当前用户 DPAPI 加密，保存在对应输出根的 `.learnnest/douyin/session.dpapi`；后续同步只需短暂恢复该环境生成新鲜请求校验，不要求每次重新登录。
-- 程序不读取日常浏览器配置，不把解密 Cookie 或页面存储写回 `.env`、任务、日志或 SQLite。旧版本只保存 Cookie 的登录态需要重新验证一次完成升级。
-- 请只处理你有权访问、下载和使用的内容，并遵守目标平台规则和适用法律。
+`.env` 只保留旧 CLI 的显式迁移兼容入口，参数见 [`.env.example`](.env.example)。
 
-不同版本可能使用不同锁目录；切换代码版本前，先停止正在访问同一输出根的旧进程。
+## 开发与验证
 
-## 开发
-
-主要模块边界：
+维护代码前请阅读 [AGENTS.md](AGENTS.md)；兼容入口见 [AGENT.md](AGENT.md)。主要模块按以下边界协作：
 
 ```text
 来源适配
@@ -166,10 +137,9 @@ running 调用事实。自动重试只能处理明确的临时错误，普通任
   → 标准笔记
   → 播客稿 / speech.txt
   → TTS
+  → 应用服务
   → WebUI / CLI
 ```
-
-WebUI 应调用应用服务，不直接拼接底层 CLI 或 Provider。ASR、OCR、LLM 和 TTS 按能力注册；笔记和播客按工作流职责引用 LLM Provider。
 
 常用验证：
 
@@ -182,8 +152,6 @@ uv run learnnest doctor
 git diff --check
 ```
 
-维护代码前请阅读 [AGENTS.md](AGENTS.md)；兼容入口见 [AGENT.md](AGENT.md)。
-
 ## 许可证
 
-许可证将在首次正式公开发布前确定。
+本项目采用 [MIT License](LICENSE)。

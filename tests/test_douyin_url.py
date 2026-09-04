@@ -84,7 +84,9 @@ def test_non_douyin_urls_pass_through_untouched() -> None:
     [
         ("https://www.douyin.com/", "视频 ID"),
         ("https://www.douyin.com/user/MS4wLjABAAAA", "视频 ID"),
-        ("https://live.douyin.com/123", "视频 ID"),
+        ("https://live.douyin.com/123", "视频页"),
+        ("https://m.douyin.com/video/123", "视频页"),
+        ("https://share.douyin.com/video/123", "视频页"),
         ("https://www.douyin.com/collection/123", "视频 ID"),
         ("https://www.douyin.com/search/abc", "视频 ID"),
         ("https://www.douyin.com/video/", "视频 ID"),
@@ -211,6 +213,9 @@ def test_short_link_resolution_never_uses_cookies(
     [
         ("https://www.douyin.com/video/123", True),
         ("https://www.douyin.com/video/123/", False),
+        ("https://www.douyin.com/video/123?from=search", False),
+        ("https://www.douyin.com/video/123#fragment", False),
+        ("https://douyin.com/video/123", False),
         ("https://v.douyin.com/AbC123", False),
         ("https://www.douyin.com/user/123", False),
         ("http://www.douyin.com/video/123", False),
@@ -219,3 +224,40 @@ def test_short_link_resolution_never_uses_cookies(
 )
 def test_canonical_douyin_marker(value: str, expected: bool) -> None:
     assert is_douyin_canonical_url(value) is expected
+
+
+# ------------------------------------------- production transport hop contract
+
+
+def test_http_fetch_never_follows_a_redirect_itself() -> None:
+    import http.server
+    import threading
+
+    from learnnest.douyin_url import _http_fetch
+
+    class _HopServer(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/start":
+                self.send_response(302)
+                self.send_header("Location", "/final")
+                self.end_headers()
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HopServer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        assert _http_fetch(f"{base}/start", 5.0) == (302, "/final")
+        assert _http_fetch(f"{base}/final", 5.0) == (200, None)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

@@ -2252,13 +2252,18 @@ def test_douyin_url_admission_reaches_tasks_or_actionable_error_in_real_edge(
 
     monkeypatch.setattr(web_app, "process_source", fake_process)
 
-    def failing_resolver(_short: str) -> str:
+    def fail_everything_short_resolver(_short: str) -> str:
+        raise RuntimeError("ACCT_SENTINEL unreachable")
+
+    def dispatch_short_resolver(short: str) -> str:
+        if short == "https://v.douyin.com/SuccessCode":
+            return "https://www.douyin.com/video/987654321"
         raise RuntimeError("ACCT_SENTINEL unreachable")
 
     url, server, thread = _start_loopback_server(
         tmp_path,
         lambda *_args, **_kwargs: [],
-        douyin_short_resolver=failing_resolver,
+        douyin_short_resolver=dispatch_short_resolver,
     )
     edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
     try:
@@ -2271,6 +2276,7 @@ def test_douyin_url_admission_reaches_tasks_or_actionable_error_in_real_edge(
                 {"width": 390, "height": 844},
             ):
                 console_issues: list[str] = []
+                jobs_so_far = [0]
 
                 def record_console(message: object) -> None:
                     # Rejected douyin submissions are an expected 400 contract; the
@@ -2300,12 +2306,16 @@ def test_douyin_url_admission_reaches_tasks_or_actionable_error_in_real_edge(
                 submit("https://douyin.com.evil.com/video/123")
                 expect(page.locator("#notice")).to_contain_text("官方域名")
 
-                submit("https://www.douyin.com/video/987654321?from=search#frag")
+                submit("https://v.douyin.com/SuccessCode")
                 expect(page.locator("#notice")).to_have_text(
                     "已加入收件箱，正在整理材料。"
                 )
                 expect(page.locator('[data-view-panel="tasks"]')).to_be_visible()
-                expect(page.locator(".source-jobs .source-job")).to_have_count(1)
+                expect(page.locator(".source-jobs .source-job")).to_have_count(
+                    jobs_so_far[0] + 1
+                )
+                jobs_so_far[0] += 1
+                assert created[0] >= jobs_so_far[0]
 
                 assert "ACCT_SENTINEL" not in page.locator("body").inner_text()
                 assert page.evaluate(

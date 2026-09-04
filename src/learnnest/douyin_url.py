@@ -18,8 +18,9 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 ShortUrlResolver = Callable[[str], str]
 HopFetch = Callable[[str, float], tuple[int, str | None]]
@@ -30,11 +31,16 @@ class DouyinUrlError(ValueError):
 
 
 _VIDEO_PATH = re.compile(r"^/video/([0-9]+)/?$")
-_CANONICAL_VIDEO_PATH = re.compile(r"^/video/([0-9]+)$")
+# The frozen accept matrix admits exactly these official hosts; any other
+# ``*.douyin.com`` subdomain (live/m/share/...) is out of scope and rejected.
+_PAGE_HOSTS = frozenset({"douyin.com", "www.douyin.com"})
+_SHORT_LINK_HOST = "v.douyin.com"
+_HOP_ALLOWLIST = frozenset({"douyin.com", "www.douyin.com", "v.douyin.com"})
+_CANONICAL_DOUYIN_URL = re.compile(r"^https://www\.douyin\.com/video/([0-9]+)$")
 
 
-def _is_official_host(host: str) -> bool:
-    """True for ``douyin.com`` and its official subdomains only."""
+def _is_official_subdomain(host: str) -> bool:
+    """True for ``douyin.com`` and any other official ``*.douyin.com`` subdomain."""
     return host == "douyin.com" or host.endswith(".douyin.com")
 
 
@@ -59,32 +65,29 @@ def canonicalize_douyin_url(
             "抖音链接无法解析；请复制网页地址栏中的完整链接后重试。"
         ) from error
     host = (parsed.hostname or "").rstrip(".").lower()
-    if _is_official_host(host):
+    if host in _PAGE_HOSTS or host == _SHORT_LINK_HOST:
         if parsed.username is not None or parsed.password is not None:
             raise DouyinUrlError(
                 "抖音链接不能包含账户信息；请只复制地址栏中干净的网页链接。"
             )
         if parsed.scheme.lower() != "https":
             raise DouyinUrlError("抖音链接必须使用 https；请复制地址栏中的官方链接。")
+    elif _is_official_subdomain(host):
+        raise DouyinUrlError(
+            "无法识别为可添加的抖音视频页；请打开视频页复制 douyin.com/video/<数字> 形式的视频地址后重试。"
+        )
     elif "douyin" in host:
         raise DouyinUrlError("无法确认是抖音官方域名；请只使用 douyin.com 官方链接。")
     else:
         return None
-    if host == "v.douyin.com":
+    if host == _SHORT_LINK_HOST:
         return _resolve_short_link(candidate, resolver)
     return _extract_official_id(parsed)
 
 
 def is_douyin_canonical_url(value: str) -> bool:
     """True only for the exact canonical video URL used by download and facts."""
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return False
-    host = (parsed.hostname or "").rstrip(".").lower()
-    if parsed.scheme.lower() != "https" or host != "www.douyin.com":
-        return False
-    return bool(_CANONICAL_VIDEO_PATH.match(parsed.path))
+    return bool(_CANONICAL_DOUYIN_URL.match(str(value).strip()))
 
 
 class HttpShortUrlResolver:
@@ -107,7 +110,7 @@ class HttpShortUrlResolver:
 
     def resolve(self, short_url: str) -> str:
         parsed = self._check_hop_url(short_url, kind="短链接")
-        if parsed.hostname != "v.douyin.com":
+        if (parsed.hostname or "").lower() != _SHORT_LINK_HOST:
             raise DouyinUrlError("抖音短链接只能使用 v.douyin.com 官方域名。")
         current = short_url
         started = time.monotonic()
@@ -161,7 +164,7 @@ class HttpShortUrlResolver:
         host = (parsed.hostname or "").rstrip(".").lower()
         if parsed.scheme.lower() != "https":
             raise DouyinUrlError(f"抖音短链接{kind}必须使用 https。")
-        if not _is_official_host(host):
+        if host not in _HOP_ALLOWLIST:
             raise DouyinUrlError(
                 f"抖音短链接{kind}不在允许的抖音官方域名内；请只使用 douyin.com 官方链接。"
             )
@@ -230,11 +233,24 @@ def _default_resolver() -> ShortUrlResolver:
     return _DEFAULT_RESOLVER
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """Refuse every redirect so the resolver validates each hop itself."""
+
+    def redirect_request(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirect())
+
+
 def _http_fetch(url: str, timeout: float) -> tuple[int, str | None]:
-    """One HTTPS GET that never reads or persists the response body."""
+    """One HTTPS GET that never follows, reads, or persists a redirect."""
     request = Request(url, headers={"User-Agent": "LearnNest/1.0"})
-    with urlopen(request, timeout=timeout) as response:
-        return response.status, response.headers.get("Location")
+    try:
+        with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
+            return response.status, response.headers.get("Location")
+    except HTTPError as error:
+        return error.code, error.headers.get("Location")
 
 
 _DEFAULT_RESOLVER = HttpShortUrlResolver()

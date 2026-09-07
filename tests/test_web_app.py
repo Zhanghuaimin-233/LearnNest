@@ -1909,8 +1909,8 @@ def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
         assert f'id="{element_id}"' in page
     assert 'id="source-insight-rail"' not in page
     assert 'id="settings-insight-rail"' not in page
-    assert "/static/workspace.css?v=20260907-1" in page
-    assert "/static/workspace.js?v=20260907-1" in page
+    assert "/static/workspace.css?v=20260907-2" in page
+    assert "/static/workspace.js?v=20260907-2" in page
     assert ".source-console {" in stylesheet
     assert ".task-console," in stylesheet
     assert "grid-template-columns: minmax(0, 1fr);" in stylesheet
@@ -2053,6 +2053,10 @@ def test_workspace_script_uses_explicit_action_kinds_for_all_public_states(
     assert 'data-task-select="${escapeHtml(item.item_ref)}"' in script
     assert 'data-batch-task-action="trash"' in client.get("/").text
     assert 'data-batch-task-action="purge"' in client.get("/").text
+    page = client.get("/").text
+    assert page.index('data-batch-task-action="purge"') < page.index(
+        'data-batch-task-action="restore"'
+    )
     assert 'id="task-select-visible"' in client.get("/").text
     assert 'id="task-selection-bar"' in client.get("/").text
     assert 'id="batch-task-dialog"' in client.get("/").text

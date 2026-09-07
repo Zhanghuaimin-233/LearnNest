@@ -1916,6 +1916,16 @@ def test_task_workspace_can_batch_move_and_permanently_delete_tasks(
         expect(page.locator("#trash-list button[data-purge-bundle]")).to_have_count(2)
         page.locator("#task-select-visible").check()
         expect(page.locator("#task-selection-count")).to_have_text("已选 2 项")
+        batch_actions = page.locator(
+            "#task-selection-bar .task-selection-actions button:visible"
+        )
+        expect(batch_actions).to_have_count(2)
+        expect(batch_actions.nth(0)).to_have_attribute(
+            "data-batch-task-action", "purge"
+        )
+        expect(batch_actions.nth(1)).to_have_attribute(
+            "data-batch-task-action", "restore"
+        )
         page.locator('[data-batch-task-action="purge"]').click()
         expect(page.locator("#batch-task-dialog")).to_be_visible()
         expect(page.locator("#batch-task-title")).to_have_text("永久删除 2 项任务？")

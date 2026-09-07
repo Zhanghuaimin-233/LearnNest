@@ -28,6 +28,8 @@ def _task(**changes: object) -> TaskRecord:
         "source_path": "C:/videos/lesson.mp4",
         "source_fingerprint": "a1b2c3d4",
         "title": "lesson",
+        "created_at": datetime(2026, 7, 12, 9, 0, tzinfo=UTC),
+        "updated_at": datetime(2026, 7, 12, 9, 0, tzinfo=UTC),
     }
     payload.update(changes)
     return TaskRecord(**payload)

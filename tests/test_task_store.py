@@ -460,7 +460,6 @@ def test_task_store_rejects_rewriting_frozen_created_or_completed_time(
     )
 
     for mutation, match in (
-        ({"created_at": None}, "created_at"),
         ({"created_at": datetime(2026, 9, 7, 2, 31, tzinfo=UTC)}, "created_at"),
         ({"completed_at": None}, "completed_at"),
         ({"completed_at": datetime(2026, 9, 7, 4, 0, tzinfo=UTC)}, "completed_at"),
@@ -475,6 +474,24 @@ def test_task_store_rejects_rewriting_frozen_created_or_completed_time(
         assert persisted.updated_at == completed
         assert persisted.created_at == created
         assert persisted.completed_at == completed
+
+
+def test_task_store_later_write_reuses_the_frozen_created_at_when_omitted(
+    tmp_path: Path,
+) -> None:
+    created = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+    later = datetime(2026, 9, 7, 3, 0, tzinfo=UTC)
+    write_task_atomic(tmp_path, _base_create(now=created), now=created)
+
+    write_task_atomic(
+        tmp_path,
+        load_task(tmp_path).model_copy(update={"created_at": None}),
+        now=later,
+    )
+
+    persisted = load_task(tmp_path)
+    assert persisted.created_at == created
+    assert persisted.updated_at == later
 
 
 def test_task_store_rejects_updated_at_moving_backwards(tmp_path: Path) -> None:
@@ -493,3 +510,37 @@ def test_task_store_rejects_updated_at_moving_backwards(tmp_path: Path) -> None:
 
     persisted = load_task(tmp_path)
     assert persisted.updated_at == newer
+
+
+def test_task_store_first_write_stamps_created_at_for_new_task(
+    tmp_path: Path,
+) -> None:
+    created = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+    bare = task_store.TaskRecord(
+        task_id="20260907-nocreated01",
+        source_path="C:/videos/lesson.mp4",
+        source_fingerprint="nocreated",
+        title="no created",
+    )
+
+    write_task_atomic(tmp_path, bare, now=created)
+
+    persisted = load_task(tmp_path)
+    assert persisted.created_at == created
+    assert persisted.updated_at == created
+
+
+def test_task_store_failed_existing_fact_read_preserves_original_bytes(
+    tmp_path: Path,
+) -> None:
+    created = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+    write_task_atomic(tmp_path, _base_create(now=created), now=created)
+    destination = tmp_path / "task.json"
+    destination.write_bytes(b"{corrupted-json")
+
+    # The read of the authoritative fact happens inside write_task_atomic; it
+    # must fail closed instead of overwriting the previous bytes.
+    with pytest.raises((OSError, ValueError)):
+        write_task_atomic(tmp_path, _base_create(now=created), now=created)
+
+    assert destination.read_bytes() == b"{corrupted-json"

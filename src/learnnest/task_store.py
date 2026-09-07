@@ -99,12 +99,18 @@ def _assert_lifecycle_facts_unchanged(
     """Enforce the frozen lifecycle time contract at the single write boundary.
 
     A task's first ``created_at``/``completed_at`` are frozen facts: any later
-    write that drops or mutates them is rejected. ``updated_at`` is monotonic
-    and must never move backwards against the already persisted fact. Tasks
-    without persisted time facts (historical records, ruled out of scope) are
-    left untouched.
+    write that rewrites them to a different instant is rejected. Omitted
+    ``created_at`` on a later write reuses the already persisted creation
+    instant (the task keeps its identity). Dropping or rewriting a frozen
+    ``completed_at`` is rejected. ``updated_at`` is monotonic and must never
+    move backwards against the already persisted fact. Tasks without persisted
+    time facts (historical records, ruled out of scope) are left untouched.
     """
-    if previous.created_at is not None and incoming.created_at != previous.created_at:
+    if (
+        previous.created_at is not None
+        and incoming.created_at is not None
+        and incoming.created_at != previous.created_at
+    ):
         raise ValueError("created_at is frozen and must never change")
     if (
         previous.completed_at is not None
@@ -129,22 +135,33 @@ def write_task_atomic(
 
     Every successful write advances ``updated_at`` on both the persisted fact
     and the in-memory record. The frozen lifecycle facts are validated against
-    the already persisted record before anything touches the disk. Failed or
-    invalid writes never fabricate a success time.
+    the already persisted record before anything touches the disk. A brand-new
+    task record without a ``created_at`` is frozen at the creation instant by
+    the same injectable clock (``create_task`` already does this; this covers
+    the first write of a bare record), so no persisted new task fact can lack
+    a trustworthy creation time. A previous fact that is corrupt or
+    momentarily unreadable fails the write instead of being overwritten.
+    Failed or invalid writes never fabricate a success time.
     """
     stamp = _utc_stamp(now)
     stamped = task.model_copy(update={"updated_at": stamp})
-    validated = TaskRecord.model_validate(stamped.model_dump(mode="python"))
     directory = Path(task_dir)
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / "task.json"
     if destination.exists():
-        try:
-            previous = parse_task_bytes(destination.read_bytes(), base_dir=directory)
-        except (OSError, ValueError):
-            previous = None
-        if previous is not None:
-            _assert_lifecycle_facts_unchanged(previous, validated)
+        validated = TaskRecord.model_validate(stamped.model_dump(mode="python"))
+        previous = parse_task_bytes(destination.read_bytes(), base_dir=directory)
+        _assert_lifecycle_facts_unchanged(previous, validated)
+        if previous.created_at is not None and validated.created_at is None:
+            # Reuse the already frozen creation instant when a later write omits it.
+            stamped = stamped.model_copy(
+                update={"created_at": previous.created_at}
+            )
+            validated = TaskRecord.model_validate(stamped.model_dump(mode="python"))
+    else:
+        if stamped.created_at is None:
+            stamped = stamped.model_copy(update={"created_at": stamp})
+        validated = TaskRecord.model_validate(stamped.model_dump(mode="python"))
     serialized = json.dumps(
         validated.model_dump(mode="json"), ensure_ascii=False, indent=2, sort_keys=True
     )
@@ -174,6 +191,10 @@ def write_task_atomic(
                 pass
         raise
     task.updated_at = validated.updated_at
+    if validated.created_at is not None:
+        # Keep the in-memory record aligned with the persisted fact, including
+        # the first-write creation stamp for bare records (load == written).
+        task.created_at = validated.created_at
     return destination
 
 

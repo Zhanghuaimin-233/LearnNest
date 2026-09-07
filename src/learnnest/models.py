@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from learnnest.execution_models import SourceIdentities, TaskAttempt
 from learnnest.note_types import ConcreteNoteType
@@ -86,6 +87,41 @@ class TaskRecord(BaseModel):
     duplicate_of_task_id: str | None = Field(default=None, min_length=1)
     active_attempt_id: str | None = Field(default=None, min_length=1)
     attempts: list[TaskAttempt] = Field(default_factory=list)
+    # Task lifecycle time facts. All timestamps are timezone-aware UTC; the
+    # frontend renders them in the browser's local timezone. created_at is
+    # frozen when the task is created; updated_at advances on every successful
+    # atomic write; completed_at is written exactly once when the frozen output
+    # goal is reached and must never be overwritten by a later re-run.
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    completed_at: datetime | None = None
+
+    @field_validator("created_at", "updated_at", "completed_at")
+    @classmethod
+    def task_times_must_be_timezone_aware(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("task lifecycle timestamps must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def task_times_must_not_run_backwards(self) -> TaskRecord:
+        if (
+            self.created_at is not None
+            and self.updated_at is not None
+            and self.updated_at < self.created_at
+        ):
+            raise ValueError("updated_at must not precede created_at")
+        if (
+            self.created_at is not None
+            and self.completed_at is not None
+            and self.completed_at < self.created_at
+        ):
+            raise ValueError("completed_at must not precede created_at")
+        return self
 
     @model_validator(mode="after")
     def artifact_lists_must_be_declared(self) -> TaskRecord:

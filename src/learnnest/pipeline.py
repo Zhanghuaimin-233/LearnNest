@@ -55,6 +55,7 @@ from learnnest.source_models import AcquiredSource, SourceItem
 from learnnest.stages import STAGES, stage_artifacts
 from learnnest.subtitles import SubtitleError, parse_subtitle_file
 from learnnest.task_store import (
+    complete_task_goal,
     create_task,
     find_task_by_id,
     find_task_by_identities,
@@ -1243,10 +1244,13 @@ def _complete_stage(
 ) -> None:
     stages = {**task.stages, stage: StageStatus.COMPLETED}
     stage_artifacts = {**task.artifacts, stage: artifacts}
-    write_task_atomic(
-        task_dir,
-        task.model_copy(update={"stages": stages, "artifacts": stage_artifacts}),
-    )
+    updated = task.model_copy(update={"stages": stages, "artifacts": stage_artifacts})
+    # Publishing a note completes the frozen note-only output goal for the
+    # pipeline route, which never runs podcast/TTS stages afterwards. The
+    # first publish write is the one and only time completed_at is stamped.
+    if stage == "publish":
+        updated = complete_task_goal(updated)
+    write_task_atomic(task_dir, updated)
     _write_report(task_dir)
 
 

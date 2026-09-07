@@ -11,11 +11,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from learnnest.automation_store import find_intake
 from learnnest.models import ContentPack, StageStatus, TaskRecord
 from learnnest.publication import (
     atomic_replace_bytes,
 )
-from learnnest.task_store import load_task, write_task_atomic
+from learnnest.task_store import (
+    complete_task_goal,
+    load_task,
+    write_task_atomic,
+)
 
 _SHA256 = r"^[0-9a-f]{64}$"
 
@@ -169,6 +174,31 @@ def load_active_standard_note(task_dir: Path) -> StandardNoteBundle:
         ) from error
 
 
+def _task_frozen_goal_is_audio(
+    task_dir: Path, task: TaskRecord, output_root: Path
+) -> bool:
+    """Return whether the task's frozen output goal requires playable audio.
+
+    The goal is authoritative on the automation intake; tasks without an intake
+    (manual notes and the CLI) freeze a note-only goal at creation.
+    """
+    del task_dir
+    try:
+        intake = find_intake(output_root, task.task_id)
+    except ValueError:
+        return False
+    return intake is not None and intake.default_output == "complete_note_with_audio"
+
+
+def _note_unless_audio_goal_stamp(
+    task_dir: Path, task: TaskRecord, output_root: Path, updated: TaskRecord
+) -> TaskRecord:
+    """Stamp completion for note-only goals; audio goals freeze at TTS publish."""
+    if _task_frozen_goal_is_audio(task_dir, task, output_root):
+        return updated
+    return complete_task_goal(updated)
+
+
 def publish_standard_note(
     task_dir: Path,
     bundle_dir: Path,
@@ -256,6 +286,7 @@ def publish_standard_note(
             },
         }
     )
+    completed = _note_unless_audio_goal_stamp(root, updated, output_root, completed)
     write_task_atomic(root, completed)
     return completed
 
@@ -329,6 +360,7 @@ def reconcile_standard_note_publication(
             "error_summary": None,
         }
     )
+    completed = _note_unless_audio_goal_stamp(root, task, output_root, completed)
     write_task_atomic(root, completed)
     return completed
 

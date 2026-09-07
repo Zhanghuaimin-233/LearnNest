@@ -7,13 +7,19 @@ from learnnest.execution import (
     begin_attempt,
     begin_persisted_attempt,
     classify_failure,
+    complete_persisted_attempt,
     finish_attempt,
     next_retry_time,
     plan_recovery,
 )
 from learnnest.models import StageStatus, TaskRecord
 from learnnest.stages import stage_artifacts
-from learnnest.task_store import load_task, write_task_atomic
+from learnnest.task_store import (
+    complete_task_goal,
+    create_task,
+    load_task,
+    write_task_atomic,
+)
 
 
 def _task(**changes: object) -> TaskRecord:
@@ -215,3 +221,37 @@ def test_recovery_plan_selects_earliest_invalid_stage_and_marks_paid_boundary(
     paid_plan = plan_recovery(task_dir)
     assert paid_plan.from_stage == "note"
     assert paid_plan.requires_paid is True
+
+
+def test_persisted_attempt_cycles_preserve_created_and_first_completed_time(
+    tmp_path: Path,
+) -> None:
+    task_dir = tmp_path / "task"
+    created = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+    completed_at = datetime(2026, 9, 7, 3, 0, tzinfo=UTC)
+    retry_start = datetime(2026, 9, 7, 3, 10, tzinfo=UTC)
+    retry_finish_write = datetime(2026, 9, 7, 3, 20, tzinfo=UTC)
+    task = create_task(
+        task_id="20260907-a1b2c3d4",
+        source_path="C:/videos/lesson.mp4",
+        source_fingerprint="a1b2c3d4",
+        title="lesson",
+        now=created,
+    )
+    write_task_atomic(task_dir, task, now=created)
+    write_task_atomic(
+        task_dir,
+        complete_task_goal(load_task(task_dir), now=completed_at),
+        now=completed_at,
+    )
+
+    begin_persisted_attempt(
+        task_dir, reason="retry", from_stage="note", now=retry_start
+    )
+    completed = complete_persisted_attempt(task_dir, now=retry_finish_write)
+    write_task_atomic(task_dir, completed, now=retry_finish_write)
+
+    persisted = load_task(task_dir)
+    assert persisted.created_at == created
+    assert persisted.completed_at == completed_at
+    assert persisted.updated_at == retry_finish_write

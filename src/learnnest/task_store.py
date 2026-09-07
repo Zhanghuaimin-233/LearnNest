@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from learnnest.execution_models import SourceIdentities
@@ -32,6 +33,14 @@ def _is_windows_replace_conflict(error: OSError) -> bool:
     return error_code in {5, 32}
 
 
+def _utc_stamp(value: datetime | None) -> datetime:
+    """Return one trustworthy timezone-aware UTC instant from an injectable clock."""
+    stamp = value if value is not None else datetime.now(UTC)
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ValueError("task lifecycle timestamps must be timezone-aware")
+    return stamp.astimezone(UTC)
+
+
 def create_task(
     *,
     task_id: str,
@@ -44,8 +53,15 @@ def create_task(
     profile: TaskProfile = "evidence",
     note_type_override: ConcreteNoteType | None = None,
     provider_bindings: dict[str, ProviderBindingSnapshot] | None = None,
+    now: datetime | None = None,
 ) -> TaskRecord:
-    """Create a task record from stable source metadata."""
+    """Create a task record from stable source metadata.
+
+    ``now`` is an injectable clock for deterministic tests; it defaults to the
+    real UTC clock. The creation instant is frozen as ``created_at`` and must
+    never be rewritten by later writes or re-runs.
+    """
+    frozen = _utc_stamp(now)
     return TaskRecord(
         task_id=task_id,
         source_path=source_path,
@@ -60,12 +76,38 @@ def create_task(
             role: binding.model_dump(mode="python")
             for role, binding in (provider_bindings or {}).items()
         },
+        created_at=frozen,
+        updated_at=frozen,
     )
 
 
-def write_task_atomic(task_dir: str | Path, task: TaskRecord) -> Path:
-    """Write ``task.json`` through a temporary file and atomically replace it."""
-    validated = TaskRecord.model_validate(task.model_dump(mode="python"))
+def complete_task_goal(task: TaskRecord, *, now: datetime | None = None) -> TaskRecord:
+    """Stamp ``completed_at`` exactly once; later calls never overwrite it.
+
+    The caller invokes this only after the frozen output goal's final artifact
+    has been validated and atomically published, so the first stamp is the
+    genuine completion instant.
+    """
+    if task.completed_at is not None:
+        return task
+    return task.model_copy(update={"completed_at": _utc_stamp(now)})
+
+
+def write_task_atomic(
+    task_dir: str | Path,
+    task: TaskRecord,
+    *,
+    now: datetime | None = None,
+) -> Path:
+    """Write ``task.json`` through a temporary file and atomically replace it.
+
+    Every successful write advances ``updated_at`` on both the persisted fact
+    and the in-memory record. Failed or invalid writes never fabricate a
+    success time.
+    """
+    stamp = _utc_stamp(now)
+    stamped = task.model_copy(update={"updated_at": stamp})
+    validated = TaskRecord.model_validate(stamped.model_dump(mode="python"))
     directory = Path(task_dir)
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / "task.json"
@@ -97,6 +139,7 @@ def write_task_atomic(task_dir: str | Path, task: TaskRecord) -> Path:
             except OSError:
                 pass
         raise
+    task.updated_at = validated.updated_at
     return destination
 
 

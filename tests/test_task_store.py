@@ -9,7 +9,12 @@ import pytest
 import learnnest.task_store as task_store
 from learnnest.execution_models import TaskAttempt
 from learnnest.identities import normalize_local_source
-from learnnest.task_store import create_task, load_task, write_task_atomic
+from learnnest.task_store import (
+    complete_task_goal,
+    create_task,
+    load_task,
+    write_task_atomic,
+)
 
 
 def test_task_store_creates_persists_and_loads_a_task_atomically(
@@ -326,3 +331,117 @@ def test_identity_lookup_lazily_matches_legacy_task_by_existing_media_bytes(
 
     assert found is not None
     assert found[1].task_id == "20260712-a1b2c3d4"
+
+
+def _base_create(*, now: datetime) -> task_store.TaskRecord:
+    return create_task(
+        task_id="20260907-a1b2c3d4",
+        source_path="C:/videos/lesson.mp4",
+        source_fingerprint="a1b2c3d4",
+        title="lesson",
+        now=now,
+    )
+
+
+def test_task_store_new_task_stamps_all_three_time_facts(tmp_path: Path) -> None:
+    created = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+
+    task = _base_create(now=created)
+
+    assert task.created_at == created
+    assert task.updated_at == created
+    assert task.completed_at is None
+
+
+def test_task_store_frees_created_at_and_advances_updated_at_on_each_write(
+    tmp_path: Path,
+) -> None:
+    created = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+    first_write = datetime(2026, 9, 7, 2, 31, tzinfo=UTC)
+    second_write = datetime(2026, 9, 7, 2, 45, tzinfo=UTC)
+    task = _base_create(now=created)
+
+    write_task_atomic(tmp_path, task, now=first_write)
+    write_task_atomic(tmp_path, task, now=second_write)
+
+    persisted = load_task(tmp_path)
+    assert persisted.created_at == created
+    assert persisted.updated_at == second_write
+
+
+def test_task_store_rejects_naive_or_reversed_task_times(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="timezone"):
+        _base_create(now=datetime(2026, 9, 7, 10, 0))
+
+    created = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+    task = _base_create(now=created)
+    with pytest.raises(ValueError, match="created_at"):
+        write_task_atomic(
+            tmp_path,
+            complete_task_goal(task, now=datetime(2026, 9, 7, 2, 29, tzinfo=UTC)),
+            now=datetime(2026, 9, 7, 2, 31, tzinfo=UTC),
+        )
+    with pytest.raises(ValueError, match="created_at"):
+        write_task_atomic(
+            tmp_path,
+            task,
+            now=datetime(2026, 9, 7, 2, 29, tzinfo=UTC),
+        )
+
+
+def test_task_store_completed_at_is_written_once_and_never_overwritten(
+    tmp_path: Path,
+) -> None:
+    created = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+    completed = datetime(2026, 9, 7, 3, 0, tzinfo=UTC)
+    rerun_write = datetime(2026, 9, 7, 3, 30, tzinfo=UTC)
+    write_task_atomic(tmp_path, _base_create(now=created), now=created)
+
+    write_task_atomic(
+        tmp_path,
+        complete_task_goal(load_task(tmp_path), now=completed),
+        now=completed,
+    )
+    write_task_atomic(tmp_path, load_task(tmp_path), now=rerun_write)
+
+    persisted = load_task(tmp_path)
+    assert persisted.created_at == created
+    assert persisted.updated_at == rerun_write
+    assert persisted.completed_at == completed
+
+
+def test_task_store_completed_at_silences_later_attempts(tmp_path: Path) -> None:
+    first = datetime(2026, 9, 7, 3, 0, tzinfo=UTC)
+    later = datetime(2026, 9, 7, 4, 0, tzinfo=UTC)
+    write_task_atomic(
+        tmp_path,
+        complete_task_goal(_base_create(now=first), now=first),
+        now=first,
+    )
+
+    same = complete_task_goal(load_task(tmp_path), now=later)
+
+    assert same.completed_at == first
+
+
+def test_task_store_failed_write_does_not_fabricate_success_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+    success_write = datetime(2026, 9, 7, 2, 40, tzinfo=UTC)
+    write_task_atomic(tmp_path, _base_create(now=created), now=success_write)
+
+    def fail_replace(source: Path, destination: Path) -> None:
+        raise OSError("replacement failed")
+
+    monkeypatch.setattr(task_store.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replacement failed"):
+        write_task_atomic(
+            tmp_path,
+            complete_task_goal(load_task(tmp_path), now=success_write),
+            now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC),
+        )
+
+    persisted = load_task(tmp_path)
+    assert persisted.updated_at == success_write
+    assert persisted.completed_at is None

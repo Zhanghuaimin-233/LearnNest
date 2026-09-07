@@ -44,7 +44,12 @@ from learnnest.publication import atomic_replace_bytes, read_audio_ownership_mar
 from learnnest.provider_profiles import load_settings, settings_sha256
 from learnnest.provider_service import assisted_snapshot_from_binding
 from learnnest.standard_note_publication import load_active_standard_note
-from learnnest.task_store import find_task_by_id, load_task, write_task_atomic
+from learnnest.task_store import (
+    complete_task_goal,
+    find_task_by_id,
+    load_task,
+    write_task_atomic,
+)
 from learnnest.tts_generation import DEFAULT_TTS_STYLE
 from learnnest.tts_providers import TtsProvider
 
@@ -533,7 +538,10 @@ def _activate_automated_audio(
                 "error_summary": None,
             }
         )
-        write_task_atomic(task_root, updated)
+        # Fully validated, ownership-bound playable audio is the frozen
+        # note+audio goal; the first activation write is the only time
+        # completed_at is set, so a later re-run never overwrites it.
+        write_task_atomic(task_root, complete_task_goal(updated))
 
 
 def _assert_activation_current(

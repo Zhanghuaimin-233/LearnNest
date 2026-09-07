@@ -24,7 +24,7 @@ from learnnest.publication import (
     atomic_replace_bytes,
     read_audio_ownership_marker,
 )
-from learnnest.task_store import load_task, write_task_atomic
+from learnnest.task_store import complete_task_goal, load_task, write_task_atomic
 from learnnest.tts_providers import TtsProvider, TtsProviderError
 from learnnest.util import safe_title
 
@@ -418,7 +418,9 @@ def _activate_tts_bundle(
             "error_summary": None,
         }
     )
-    write_task_atomic(root, updated)
+    # Validated, ownership-bound playable audio is the frozen note+audio goal;
+    # the first activation write is the one and only time completed_at is set.
+    write_task_atomic(root, complete_task_goal(updated))
     return updated
 
 

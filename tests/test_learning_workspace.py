@@ -950,3 +950,54 @@ def test_snapshot_items_carry_the_three_task_time_facts(tmp_path: Path) -> None:
     assert item.created_at == created
     assert item.updated_at == updated
     assert item.completed_at == updated
+
+
+def _corrupt_intake(root: Path, task_id: str) -> None:
+    intake_path = root / ".learnnest" / "automation" / "intake" / f"{task_id}.json"
+    intake_path.parent.mkdir(parents=True, exist_ok=True)
+    intake_path.write_text("{not-valid-json", encoding="utf-8")
+
+
+def test_corrupt_intake_fails_closed_instead_of_falling_back_to_note_only(
+    tmp_path: Path,
+) -> None:
+    import learnnest.standard_note_publication as standard_note
+
+    task_dir, task = _task(tmp_path, "corrupt-goal")
+    _corrupt_intake(tmp_path, task.task_id)
+
+    with pytest.raises(ValueError, match="cannot be verified"):
+        standard_note._task_frozen_goal_is_audio(task_dir, task, tmp_path)
+
+
+def test_frozen_output_goal_follows_a_valid_intake_only(tmp_path: Path) -> None:
+    import learnnest.standard_note_publication as standard_note
+
+    plain_dir, plain = _task(tmp_path, "plain-note-goal")
+    assert standard_note._task_frozen_goal_is_audio(plain_dir, plain, tmp_path) is False
+
+    audio_dir, audio = _task(tmp_path, "audio-goal-task")
+    create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=audio.task_id,
+            source_kind="local_video",
+            default_output="complete_note_with_audio",
+            created_at=datetime.now(UTC),
+            status="claimed",
+        ),
+    )
+    assert standard_note._task_frozen_goal_is_audio(audio_dir, audio, tmp_path) is True
+
+    note_dir, note = _task(tmp_path, "note-only-goal")
+    create_intake(
+        tmp_path,
+        AutomationIntake(
+            task_id=note.task_id,
+            source_kind="local_video",
+            default_output="complete_note",
+            created_at=datetime.now(UTC),
+            status="claimed",
+        ),
+    )
+    assert standard_note._task_frozen_goal_is_audio(note_dir, note, tmp_path) is False

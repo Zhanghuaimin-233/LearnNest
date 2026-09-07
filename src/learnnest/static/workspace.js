@@ -1146,11 +1146,30 @@ function formatTaskElapsed(startValue, endValue) {
 function taskTimeLine(item) {
   const created = formatTaskStamp(item.created_at);
   if (!created) return `ID · ${escapeHtml(item.item_ref)}`;
-  const elapsed = formatTaskElapsed(item.created_at, item.completed_at ? item.completed_at : new Date().toISOString());
+  const elapsed = formatTaskElapsed(
+    item.created_at,
+    item.completed_at ? item.completed_at : new Date().toISOString(),
+  );
   const base = `创建 ${created}`;
   return item.completed_at
-    ? `${base} · 完成 ${formatTaskStamp(item.completed_at)} · 历时 ${elapsed}`
-    : `${base} · 已历时 ${elapsed}`;
+    ? `${base} · 完成 ${formatTaskStamp(item.completed_at)} · 历时 <span class="task-elapsed" data-created="${escapeHtml(item.created_at)}" data-completed="${escapeHtml(item.completed_at)}">${elapsed}</span>`
+    : `${base} · 已历时 <span class="task-elapsed" data-created="${escapeHtml(item.created_at)}" data-completed="">${elapsed}</span>`;
+}
+
+function refreshTaskElapsed() {
+  // Recompose only the elapsed text from the time facts already on the row;
+  // this never writes task.json and never re-renders the whole list.
+  document
+    .querySelectorAll("small.task-times .task-elapsed[data-created]")
+    .forEach((node) => {
+      const created = node.getAttribute("data-created");
+      if (!created) return;
+      const completed = node.getAttribute("data-completed") || null;
+      node.textContent = formatTaskElapsed(
+        created,
+        completed ? completed : new Date().toISOString(),
+      );
+    });
 }
 
 function taskRowMarkup(item) {
@@ -1927,6 +1946,11 @@ function scheduleRefresh() {
   window.clearTimeout(timer);
   timer = window.setTimeout(() => refresh(), document.hidden ? 5000 : 2000);
 }
+
+// Keep in-progress "已历时" labels current even while the snapshot is
+// unchanged. The recompute only touches the elapsed text nodes.
+window.setInterval(() => refreshTaskElapsed(), 30000);
+window.refreshTaskElapsed = refreshTaskElapsed;
 
 async function actOnItem(itemRef, action) {
   try {

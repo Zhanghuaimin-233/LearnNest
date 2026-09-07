@@ -179,14 +179,18 @@ def _task_frozen_goal_is_audio(
 ) -> bool:
     """Return whether the task's frozen output goal requires playable audio.
 
-    The goal is authoritative on the automation intake; tasks without an intake
-    (manual notes and the CLI) freeze a note-only goal at creation.
+    A valid automation intake is authoritative; a task without any intake
+    (manual notes and the CLI) freezes a note-only goal at creation. A corrupt
+    or unverifiable intake is a failure, not a note-only fallback: completing
+    an audio task at the note stage would freeze ``completed_at`` too early.
     """
     del task_dir
     try:
         intake = find_intake(output_root, task.task_id)
-    except ValueError:
-        return False
+    except ValueError as error:
+        raise ValueError(
+            "task automation intake cannot be verified; its output goal is unknown"
+        ) from error
     return intake is not None and intake.default_output == "complete_note_with_audio"
 
 

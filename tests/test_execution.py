@@ -248,10 +248,13 @@ def test_persisted_attempt_cycles_preserve_created_and_first_completed_time(
     begin_persisted_attempt(
         task_dir, reason="retry", from_stage="note", now=retry_start
     )
-    completed = complete_persisted_attempt(task_dir, now=retry_finish_write)
-    write_task_atomic(task_dir, completed, now=retry_finish_write)
+    complete_persisted_attempt(task_dir, now=retry_finish_write)
 
+    # The attempt-cycle event times are injected facts, while updated_at is the
+    # real wall-clock of each successful persisted write; only the frozen
+    # created/first-completed facts and updated monotonicity are contractual.
     persisted = load_task(task_dir)
     assert persisted.created_at == created
     assert persisted.completed_at == completed_at
-    assert persisted.updated_at == retry_finish_write
+    assert persisted.updated_at is not None
+    assert persisted.updated_at >= persisted.completed_at

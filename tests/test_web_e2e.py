@@ -2535,6 +2535,25 @@ def test_task_times_global_sort_and_row_text_in_real_edge(
         expect(in_progress_row).to_contain_text("已历时")
         expect(in_progress_row).not_to_contain_text("完成")
 
+        # In-progress elapsed recomputes locally over time without touching disk:
+        # set the row's created fact five minutes ago and refresh the elapsed
+        # label through the real UI path.
+        refreshed_elapsed = page.evaluate(
+            """() => {
+              const node = document.querySelector(
+                'small.task-times .task-elapsed[data-created]'
+              );
+              if (!node) return null;
+              node.setAttribute(
+                'data-created',
+                new Date(Date.now() - 5 * 60000).toISOString()
+              );
+              window.refreshTaskElapsed();
+              return node.textContent;
+            }"""
+        )
+        assert refreshed_elapsed is not None and "5 分钟" in refreshed_elapsed
+
         # Switching to oldest created must clear the batch selection.
         page.locator("#task-list article[data-item-ref]:not([hidden])").first.locator(
             "input[data-task-select]"

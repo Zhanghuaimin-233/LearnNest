@@ -445,3 +445,51 @@ def test_task_store_failed_write_does_not_fabricate_success_times(
     persisted = load_task(tmp_path)
     assert persisted.updated_at == success_write
     assert persisted.completed_at is None
+
+
+def test_task_store_rejects_rewriting_frozen_created_or_completed_time(
+    tmp_path: Path,
+) -> None:
+    created = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+    completed = datetime(2026, 9, 7, 3, 0, tzinfo=UTC)
+    write_task_atomic(tmp_path, _base_create(now=created), now=created)
+    write_task_atomic(
+        tmp_path,
+        complete_task_goal(load_task(tmp_path), now=completed),
+        now=completed,
+    )
+
+    for mutation, match in (
+        ({"created_at": None}, "created_at"),
+        ({"created_at": datetime(2026, 9, 7, 2, 31, tzinfo=UTC)}, "created_at"),
+        ({"completed_at": None}, "completed_at"),
+        ({"completed_at": datetime(2026, 9, 7, 4, 0, tzinfo=UTC)}, "completed_at"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            write_task_atomic(
+                tmp_path,
+                load_task(tmp_path).model_copy(update=mutation),
+                now=datetime(2026, 9, 7, 3, 30, tzinfo=UTC),
+            )
+        persisted = load_task(tmp_path)
+        assert persisted.updated_at == completed
+        assert persisted.created_at == created
+        assert persisted.completed_at == completed
+
+
+def test_task_store_rejects_updated_at_moving_backwards(tmp_path: Path) -> None:
+    created = datetime(2026, 9, 7, 10, 0, tzinfo=UTC)
+    newer = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
+    write_task_atomic(tmp_path, _base_create(now=created), now=newer)
+
+    # 11:00 is still after created_at (10:00) but moves updated_at backwards
+    # from the persisted 12:00; only the write-boundary comparison can reject it.
+    with pytest.raises(ValueError, match="updated_at"):
+        write_task_atomic(
+            tmp_path,
+            load_task(tmp_path),
+            now=datetime(2026, 9, 7, 11, 0, tzinfo=UTC),
+        )
+
+    persisted = load_task(tmp_path)
+    assert persisted.updated_at == newer

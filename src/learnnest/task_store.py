@@ -93,6 +93,32 @@ def complete_task_goal(task: TaskRecord, *, now: datetime | None = None) -> Task
     return task.model_copy(update={"completed_at": _utc_stamp(now)})
 
 
+def _assert_lifecycle_facts_unchanged(
+    previous: TaskRecord, incoming: TaskRecord
+) -> None:
+    """Enforce the frozen lifecycle time contract at the single write boundary.
+
+    A task's first ``created_at``/``completed_at`` are frozen facts: any later
+    write that drops or mutates them is rejected. ``updated_at`` is monotonic
+    and must never move backwards against the already persisted fact. Tasks
+    without persisted time facts (historical records, ruled out of scope) are
+    left untouched.
+    """
+    if previous.created_at is not None and incoming.created_at != previous.created_at:
+        raise ValueError("created_at is frozen and must never change")
+    if (
+        previous.completed_at is not None
+        and incoming.completed_at != previous.completed_at
+    ):
+        raise ValueError("completed_at is frozen and must never change")
+    if (
+        previous.updated_at is not None
+        and incoming.updated_at is not None
+        and incoming.updated_at < previous.updated_at
+    ):
+        raise ValueError("updated_at must never move backwards")
+
+
 def write_task_atomic(
     task_dir: str | Path,
     task: TaskRecord,
@@ -102,8 +128,9 @@ def write_task_atomic(
     """Write ``task.json`` through a temporary file and atomically replace it.
 
     Every successful write advances ``updated_at`` on both the persisted fact
-    and the in-memory record. Failed or invalid writes never fabricate a
-    success time.
+    and the in-memory record. The frozen lifecycle facts are validated against
+    the already persisted record before anything touches the disk. Failed or
+    invalid writes never fabricate a success time.
     """
     stamp = _utc_stamp(now)
     stamped = task.model_copy(update={"updated_at": stamp})
@@ -111,6 +138,13 @@ def write_task_atomic(
     directory = Path(task_dir)
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / "task.json"
+    if destination.exists():
+        try:
+            previous = parse_task_bytes(destination.read_bytes(), base_dir=directory)
+        except (OSError, ValueError):
+            previous = None
+        if previous is not None:
+            _assert_lifecycle_facts_unchanged(previous, validated)
     serialized = json.dumps(
         validated.model_dump(mode="json"), ensure_ascii=False, indent=2, sort_keys=True
     )

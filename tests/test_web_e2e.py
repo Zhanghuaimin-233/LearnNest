@@ -1176,6 +1176,10 @@ def test_provider_model_picker_fetches_searches_saves_and_persists_on_desktop_an
 
         _open_settings_panel(page, "connections")
         row = page.locator('[data-connection="mimo-model"]')
+        assert (
+            row.evaluate("element => getComputedStyle(element).borderTopLeftRadius")
+            == "10px"
+        )
         row.locator("button[data-select-model]").click()
         expect(page.locator("#model-selection-dialog")).to_be_visible()
         expect(page.locator("#model-selection-current")).to_have_text("mimo-v2.5")

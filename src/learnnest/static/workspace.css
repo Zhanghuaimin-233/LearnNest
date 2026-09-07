@@ -2693,6 +2693,8 @@ select:focus {
   background: transparent;
 }
 
+.provider-capability-card .provider-row.is-current { border-radius: 10px; }
+
 .local-model-location,
 #local-model-list,
 .storage-facts {

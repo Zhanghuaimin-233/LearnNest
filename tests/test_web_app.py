@@ -1909,8 +1909,8 @@ def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
         assert f'id="{element_id}"' in page
     assert 'id="source-insight-rail"' not in page
     assert 'id="settings-insight-rail"' not in page
-    assert "/static/workspace.css?v=20260907-2" in page
-    assert "/static/workspace.js?v=20260907-2" in page
+    assert "/static/workspace.css?v=20260907-3" in page
+    assert "/static/workspace.js?v=20260907-3" in page
     assert ".source-console {" in stylesheet
     assert ".task-console," in stylesheet
     assert "grid-template-columns: minmax(0, 1fr);" in stylesheet
@@ -1918,6 +1918,11 @@ def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
     assert ".settings-panel > .settings-form," in stylesheet
     assert "#provider-role-list {" in stylesheet
     assert ".provider-capability-card {" in stylesheet
+    current_row_start = stylesheet.index(
+        ".provider-capability-card .provider-row.is-current"
+    )
+    current_row_end = stylesheet.index("}", current_row_start)
+    assert "border-radius: 10px;" in stylesheet[current_row_start:current_row_end]
     assert ".local-model-location," in stylesheet
     assert "border-radius: 16px;" in stylesheet
     assert ".note-reading {" in stylesheet

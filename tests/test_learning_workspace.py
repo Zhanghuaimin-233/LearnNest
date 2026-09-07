@@ -36,7 +36,12 @@ from learnnest.provider_profiles import (
     set_role_binding,
     settings_sha256,
 )
-from learnnest.task_store import create_task, load_task, write_task_atomic
+from learnnest.task_store import (
+    complete_task_goal,
+    create_task,
+    load_task,
+    write_task_atomic,
+)
 from learnnest.task_control import load_task_control
 
 
@@ -862,3 +867,86 @@ def test_note_requires_completed_publish_and_declared_task_internal_markdown(
     )[1]
     with pytest.raises(learning_workspace.LearningWorkspaceError):
         workspace.note(escaped.task_id)
+
+
+def _timed_task(
+    root: Path,
+    name: str,
+    task_id: str,
+    *,
+    now: datetime,
+    stages: dict[str, StageStatus] | None = None,
+) -> tuple[Path, TaskRecord]:
+    task_dir = root / "视频学习素材" / name
+    task = create_task(
+        task_id=task_id,
+        source_path=f"C:/private/{name}.mp4",
+        source_fingerprint=name,
+        title=f"课程 {name}",
+        profile="note",
+        now=now,
+    ).model_copy(
+        update={
+            "stages": stages or {},
+            "artifacts": {"content_pack": ["content_pack.json"]},
+        }
+    )
+    write_task_atomic(task_dir, task, now=now)
+    return task_dir, task
+
+
+def test_snapshot_orders_newest_created_first_even_when_directory_names_reverse(
+    tmp_path: Path,
+) -> None:
+    older = datetime(2026, 9, 7, 2, 0, tzinfo=UTC)
+    newer = datetime(2026, 9, 7, 8, 0, tzinfo=UTC)
+    # Directory names sort newest-task dir first, but its created_at is older.
+    _, older_task = _timed_task(
+        tmp_path,
+        "z-oldest-dir",
+        "20260907-older01",
+        now=older,
+        stages={"content_pack": StageStatus.COMPLETED},
+    )
+    _, newer_task = _timed_task(
+        tmp_path,
+        "a-newest-dir",
+        "20260907-newer01",
+        now=newer,
+        stages={"content_pack": StageStatus.COMPLETED},
+    )
+
+    snapshot = learning_workspace.LearningWorkspace(tmp_path).snapshot()
+
+    assert [item.item_ref for item in snapshot.inbox] == [
+        newer_task.task_id,
+        older_task.task_id,
+    ]
+
+
+def test_snapshot_items_carry_the_three_task_time_facts(tmp_path: Path) -> None:
+    created = datetime(2026, 9, 7, 2, 0, tzinfo=UTC)
+    updated = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+    _task_dir, task = _timed_task(
+        tmp_path,
+        "timed-item",
+        "20260907-timed01",
+        now=created,
+        stages={"publish": StageStatus.COMPLETED},
+    )
+    task = task.model_copy(
+        update={
+            "artifacts": {"publish": ["note.md"], "content_pack": ["content_pack.json"]}
+        }
+    )
+    (_task_dir / "note.md").write_text(
+        f"<!-- learnnest-task-id: {task.task_id} -->\n\n# 可读笔记\n",
+        encoding="utf-8",
+    )
+    write_task_atomic(_task_dir, complete_task_goal(task, now=updated), now=updated)
+
+    item = learning_workspace.LearningWorkspace(tmp_path).snapshot().library[0]
+
+    assert item.created_at == created
+    assert item.updated_at == updated
+    assert item.completed_at == updated

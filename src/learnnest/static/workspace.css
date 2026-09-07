@@ -172,7 +172,11 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 
 .task-canvas { min-width: 0; }
 .task-table-shell { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); box-shadow: 0 12px 30px rgba(50, 73, 103, 0.06); }
-.task-table-toolbar { min-height: 70px; padding: 13px 16px 13px 20px; display: grid; grid-template-columns: minmax(150px, 1fr) auto minmax(220px, 360px) auto; align-items: center; gap: 14px; border-bottom: 1px solid var(--line); }
+.task-table-toolbar { min-height: 70px; padding: 13px 16px 13px 20px; display: grid; grid-template-columns: minmax(150px, 1fr) auto auto minmax(220px, 360px) auto; align-items: center; gap: 14px; border-bottom: 1px solid var(--line); }
+.task-sort-control { min-height: 32px; display: inline-flex; align-items: stretch; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 10px; background: var(--fog); }
+.task-sort-control button { min-width: 72px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 10px; font-weight: 700; white-space: nowrap; cursor: pointer; }
+.task-sort-control button:hover { color: var(--ink); }
+.task-sort-control button.is-active { color: var(--blue-deep); background: var(--paper); box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08); }
 .task-table-title { display: flex; align-items: baseline; gap: 12px; }
 .task-table-title h2 { margin: 0; font-size: 18px; }
 .task-table-title span { color: var(--muted); font-size: 11px; }
@@ -641,8 +645,9 @@ input:focus, select:focus { border-color: var(--blue); outline: 3px solid rgba(5
   .task-tabs > button:first-child { grid-column: 1 / -1; }
   .task-table-shell { border-radius: 12px; }
   .task-table-toolbar { padding: 12px; grid-template-columns: minmax(0, 1fr) auto; }
-  .task-search { grid-column: 1 / -1; grid-row: 2; }
-  .task-select-control { grid-column: 1 / -1; grid-row: 3; }
+  .task-sort-control { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
+  .task-search { grid-column: 1 / -1; grid-row: 3; }
+  .task-select-control { grid-column: 1 / -1; grid-row: 4; }
   .task-selection-bar { padding: 10px 12px; align-items: stretch; flex-direction: column; }
   .task-selection-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .task-selection-actions button { width: 100%; }

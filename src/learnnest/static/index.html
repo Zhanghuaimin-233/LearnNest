@@ -63,6 +63,10 @@
                 <section class="task-table-shell" aria-labelledby="task-list-title">
                   <header class="task-table-toolbar">
                     <div class="task-table-title"><h2 id="task-list-title">全部任务</h2><span id="task-table-count">共 0 项</span></div>
+                    <div class="task-sort-control" role="group" aria-label="任务排序">
+                      <button type="button" data-task-sort="desc" class="is-active" title="最新创建的任务排在最前">最新创建</button>
+                      <button type="button" data-task-sort="asc" title="最早创建的任务排在最前">最早创建</button>
+                    </div>
                     <label class="task-select-control"><input id="task-select-visible" type="checkbox" /><span>全选当前结果</span></label>
                     <label class="task-search"><span aria-hidden="true">⌕</span><input id="task-search" type="search" placeholder="搜索任务标题、来源或状态" autocomplete="off" /></label>
                     <button class="icon-button" id="refresh-tasks" type="button" aria-label="刷新任务">↻</button>
@@ -85,9 +89,7 @@
                   </div>
                   <section class="task-list-panel">
                     <div class="task-list" id="task-list">
-                      <div id="processing-list" class="task-group"></div>
-                      <div id="inbox-list" class="task-group"></div>
-                      <div id="library-list" class="task-group"></div>
+                      <div class="task-group" id="task-sort-root"></div>
                       <div id="trash-list" class="task-group" hidden></div>
                       <p class="filter-empty" id="task-filter-empty" hidden>没有匹配的任务。请清除搜索或切换状态。</p>
                     </div>

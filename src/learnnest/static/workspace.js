@@ -24,11 +24,7 @@ const notice = document.querySelector("#notice");
 const sourceJobs = document.querySelector("#source-jobs");
 const uploadForm = document.querySelector("#upload-form");
 const urlForm = document.querySelector("#url-form");
-const lists = {
-  inbox: document.querySelector("#inbox-list"),
-  processing: document.querySelector("#processing-list"),
-  library: document.querySelector("#library-list"),
-};
+const taskSortRoot = document.querySelector("#task-sort-root");
 const favoriteList = document.querySelector("#douyin-favorites-list");
 const favoriteFolders = document.querySelector("#favorite-folders");
 const favoriteFolderTitle = document.querySelector("#favorite-folder-title");
@@ -190,6 +186,7 @@ let currentSnapshot = { inbox: [], processing: [], library: [] };
 let currentTrash = [];
 let activeTaskFilter = "all";
 let activeTaskQuery = "";
+let taskSortOrder = "desc";
 let selectedTaskKeys = new Set();
 let noticeTimer = null;
 let lastAutomationStatus = { configured: false, enabled: false };
@@ -1119,31 +1116,63 @@ async function refreshProviderSettingsWhenIdle() {
   if (!settingsFormNeedsProtection(providerForm) && !settingsFormNeedsProtection(providerCapabilityList) && !settingsFormNeedsProtection(providerRoleList) && !settingsFormNeedsProtection(providerLimitsForm)) await loadProviderSettings(automationForm.elements.default_output.value, true);
 }
 
-function renderList(target, items, empty) {
-  if (!items.length) {
-    target.innerHTML = empty ? `<p class="empty">${escapeHtml(empty)}</p>` : "";
-    return;
-  }
-  target.innerHTML = items.map((item) => {
-    const progress = taskProgress(item);
-    const output = item.output_goal === "complete_note_with_audio" ? "笔记 + 音频" : "完整笔记";
-    const failure = item.failure_reason
-      ? `<span class="row-problem"><strong>失败阶段 · ${escapeHtml(item.failure_stage || "处理内容")}</strong><span>${escapeHtml(item.failure_reason)}</span></span>`
-      : "";
-    const contextualAction = item.action && item.action_kind !== "open_note" && learningActionKinds.has(item.action_kind)
-      ? `<button class="task-row-context" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>`
-      : "";
-    const pauseControl = item.can_pause
-      ? `<button class="task-row-pause" type="button" data-pause-item-ref="${escapeHtml(item.item_ref)}" title="只暂停后续调度；已经开始的处理会继续完成">暂停</button>`
-      : "";
-    const deleteDisabled = item.state === "organizing" && !item.manually_paused;
-    const viewDisabled = !item.note_href;
-    const selected = selectedTaskKeys.has(item.item_ref);
-    return `
-    <article class="learning-row${selected ? " is-selected" : ""}" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}">
+function formatTaskStamp(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatTaskElapsed(startValue, endValue) {
+  const start = new Date(startValue).getTime();
+  const end = new Date(endValue).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "—";
+  const minutes = Math.max(0, Math.round((end - start) / 60000));
+  if (minutes < 1) return "不足 1 分钟";
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const minutesRest = minutes % 60;
+  if (hours < 24) return minutesRest ? `${hours} 小时 ${minutesRest} 分` : `${hours} 小时`;
+  const days = Math.floor(hours / 24);
+  const hoursRest = hours % 24;
+  return hoursRest ? `${days} 天 ${hoursRest} 小时` : `${days} 天`;
+}
+
+function taskTimeLine(item) {
+  const created = formatTaskStamp(item.created_at);
+  if (!created) return `ID · ${escapeHtml(item.item_ref)}`;
+  const elapsed = formatTaskElapsed(item.created_at, item.completed_at ? item.completed_at : new Date().toISOString());
+  const base = `创建 ${created}`;
+  return item.completed_at
+    ? `${base} · 完成 ${formatTaskStamp(item.completed_at)} · 历时 ${elapsed}`
+    : `${base} · 已历时 ${elapsed}`;
+}
+
+function taskRowMarkup(item) {
+  const progress = taskProgress(item);
+  const output = item.output_goal === "complete_note_with_audio" ? "笔记 + 音频" : "完整笔记";
+  const failure = item.failure_reason
+    ? `<span class="row-problem"><strong>失败阶段 · ${escapeHtml(item.failure_stage || "处理内容")}</strong><span>${escapeHtml(item.failure_reason)}</span></span>`
+    : "";
+  const contextualAction = item.action && item.action_kind !== "open_note" && learningActionKinds.has(item.action_kind)
+    ? `<button class="task-row-context" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="${escapeHtml(item.action_kind)}">${escapeHtml(item.action)}</button>`
+    : "";
+  const pauseControl = item.can_pause
+    ? `<button class="task-row-pause" type="button" data-pause-item-ref="${escapeHtml(item.item_ref)}" title="只暂停后续调度；已经开始的处理会继续完成">暂停</button>`
+    : "";
+  const deleteDisabled = item.state === "organizing" && !item.manually_paused;
+  const viewDisabled = !item.note_href;
+  const selected = selectedTaskKeys.has(item.item_ref);
+  return `
+  <article class="learning-row${selected ? " is-selected" : ""}" data-item-ref="${escapeHtml(item.item_ref)}" data-state="${escapeHtml(item.state)}" data-filter="${taskFilterFor(item)}" data-bucket="${item._bucket ? escapeHtml(item._bucket) : ""}">
       <div class="learning-copy">
         <input class="task-row-check" data-task-select="${escapeHtml(item.item_ref)}" type="checkbox" aria-label="选择任务 ${escapeHtml(item.title)}"${selected ? " checked" : ""} />
-        <div class="learning-copy-text"><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.source)}</p><small>ID · ${escapeHtml(item.item_ref)}</small></div>
+        <div class="learning-copy-text"><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.source)}</p><small class="task-times" title="任务 ID：${escapeHtml(item.item_ref)}">${taskTimeLine(item)}</small></div>
       </div>
       <div class="row-progress">
         <span class="progress-ring" aria-label="进度 ${progress}%" style="--task-progress:${progress}%"><strong>${progress}</strong><small>%</small></span>
@@ -1153,12 +1182,32 @@ function renderList(target, items, empty) {
       <span class="row-next">${escapeHtml(item.message)}</span>
       <div class="row-actions">${contextualAction}${pauseControl}<div class="row-action-pair"><button class="task-row-delete" type="button" data-delete-item-ref="${escapeHtml(item.item_ref)}"${deleteDisabled ? ' disabled title="当前步骤仍在完成，结束后可删除"' : ""}>删除</button><button class="task-row-view" type="button" data-item-ref="${escapeHtml(item.item_ref)}" data-action="open_note"${viewDisabled ? ' disabled title="笔记生成后即可查看"' : ` aria-label="查看 ${escapeHtml(item.title)}的笔记"`}>查看</button></div></div>
     </article>`;
-  }).join("");
-  target.querySelectorAll("button[data-item-ref][data-action]:not(:disabled)").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
-  target.querySelectorAll("button[data-pause-item-ref]").forEach((button) => button.addEventListener("click", () => pauseItem(button.dataset.pauseItemRef)));
+}
+
+function renderTaskList(items) {
+  if (!items.length) {
+    taskSortRoot.innerHTML = '<p class="empty">还没有任务。请从来源页添加内容。</p>';
+    return;
+  }
+  taskSortRoot.innerHTML = items.map(taskRowMarkup).join("");
+  taskSortRoot.querySelectorAll("button[data-item-ref][data-action]:not(:disabled)").forEach((button) => button.addEventListener("click", () => actOnItem(button.dataset.itemRef, button.dataset.action)));
+  taskSortRoot.querySelectorAll("button[data-pause-item-ref]").forEach((button) => button.addEventListener("click", () => pauseItem(button.dataset.pauseItemRef)));
   const itemsByRef = new Map(items.map((item) => [item.item_ref, item]));
-  target.querySelectorAll("button[data-delete-item-ref]:not(:disabled)").forEach((button) => button.addEventListener("click", () => openDeleteTask(itemsByRef.get(button.dataset.deleteItemRef))));
-  bindTaskSelectionInputs(target);
+  taskSortRoot.querySelectorAll("button[data-delete-item-ref]:not(:disabled)").forEach((button) => button.addEventListener("click", () => openDeleteTask(itemsByRef.get(button.dataset.deleteItemRef))));
+  bindTaskSelectionInputs(taskSortRoot);
+}
+
+function byCreatedAt(items, order) {
+  return items.slice().sort((left, right) => {
+    const leftMs = left.created_at ? new Date(left.created_at).getTime() : null;
+    const rightMs = right.created_at ? new Date(right.created_at).getTime() : null;
+    const a = leftMs !== null && Number.isFinite(leftMs) ? leftMs : null;
+    const b = rightMs !== null && Number.isFinite(rightMs) ? rightMs : null;
+    if (a === null && b === null) return 0;
+    if (a === null) return 1;
+    if (b === null) return -1;
+    return order === "asc" ? a - b : b - a;
+  });
 }
 
 function publicStateLabel(item) {
@@ -1192,11 +1241,8 @@ function renderTrash(items) {
 
 function render(snapshot) {
   currentSnapshot = snapshot;
-  renderList(lists.library, snapshot.library, "");
-  renderList(lists.processing, snapshot.processing, "");
-  renderList(lists.inbox, snapshot.inbox, "");
+  renderTaskList(byCreatedAt(allLearningItems(), taskSortOrder));
   const items = allLearningItems();
-  if (!items.length) lists.processing.innerHTML = '<p class="empty">还没有任务。请从来源页添加内容。</p>';
   const counts = {
     all: items.length,
     attention: items.filter((item) => taskFilterFor(item) === "attention").length,
@@ -1214,7 +1260,12 @@ function render(snapshot) {
 }
 
 function allLearningItems() {
-  return [...currentSnapshot.processing, ...currentSnapshot.inbox, ...currentSnapshot.library];
+  const tag = (bucket, item) => ({ ...item, _bucket: bucket });
+  return [
+    ...currentSnapshot.processing.map((item) => tag("processing", item)),
+    ...currentSnapshot.inbox.map((item) => tag("inbox", item)),
+    ...currentSnapshot.library.map((item) => tag("library", item)),
+  ];
 }
 
 function taskFilterFor(item) {
@@ -1302,7 +1353,7 @@ function clearTaskSelection() {
 
 function applyTaskFilter() {
   const showingTrash = activeTaskFilter === "trash";
-  Object.values(lists).forEach((list) => { list.hidden = showingTrash; });
+  [taskSortRoot].forEach((list) => { list.hidden = showingTrash; });
   trashList.hidden = !showingTrash;
   const rows = [...taskList.querySelectorAll("article[data-filter]")];
   rows.forEach((row) => {
@@ -2221,6 +2272,12 @@ document.querySelectorAll("[data-filter]").forEach((button) => button.addEventLi
   activeTaskFilter = button.dataset.filter;
   document.querySelectorAll("[data-filter]").forEach((item) => item.classList.toggle("is-active", item === button));
   applyTaskFilter();
+}));document.querySelectorAll("[data-task-sort]").forEach((button) => button.addEventListener("click", () => {
+  if (button.dataset.taskSort === taskSortOrder) return;
+  taskSortOrder = button.dataset.taskSort;
+  document.querySelectorAll("[data-task-sort]").forEach((item) => item.classList.toggle("is-active", item === button));
+  clearTaskSelection();
+  render(currentSnapshot);
 }));
 taskSearch.addEventListener("input", () => {
   clearTaskSelection();

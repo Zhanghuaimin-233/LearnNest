@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterable
+from datetime import UTC, datetime
 import re
 import threading
 import uuid
@@ -336,7 +337,17 @@ class WebService:
                 tasks.append((task_json.parent, load_task(task_json)))
             except (OSError, ValueError):
                 continue
-        tasks.sort(key=lambda item: item[0].name, reverse=True)
+        tasks.sort(
+            key=lambda item: (
+                item[1].created_at is None,
+                -(
+                    item[1].created_at.timestamp()
+                    if item[1].created_at is not None
+                    else 0.0
+                ),
+                item[0].name,
+            )
+        )
         return [_task_summary(task) for _, task in tasks]
 
     def task_detail(self, task_id: str) -> dict[str, Any]:
@@ -1804,7 +1815,17 @@ def _task_summary(task: TaskRecord) -> dict[str, Any]:
         "completed_stages": completed,
         "total_stages": len(task.stages),
         "error_summary": _safe_text(task.error_summary),
+        "created_at": _utc_iso(task.created_at),
+        "updated_at": _utc_iso(task.updated_at),
+        "completed_at": _utc_iso(task.completed_at),
     }
+
+
+def _utc_iso(value: datetime | None) -> str | None:
+    """Serialise one lifecycle time as timezone-attached UTC ISO text."""
+    if value is None:
+        return None
+    return value.astimezone(UTC).isoformat()
 
 
 def _task_state(task: TaskRecord) -> str:
@@ -1880,6 +1901,9 @@ def _learning_item_payload(
         "output_goal": item.output_goal,
         "manually_paused": item.manually_paused,
         "can_pause": item.can_pause,
+        "created_at": _utc_iso(item.created_at),
+        "updated_at": _utc_iso(item.updated_at),
+        "completed_at": _utc_iso(item.completed_at),
     }
     if workspace is not None:
         try:

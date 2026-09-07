@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 from hashlib import sha256
 from ipaddress import ip_address
 import json
@@ -91,6 +92,10 @@ class LearningItem:
     can_pause: bool = True
     failure_stage: str | None = None
     failure_stage_code: str | None = None
+    # Task lifecycle time facts (UTC aware datetimes) for display and sorting.
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    completed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if (self.action is None) != (self.action_kind is None):
@@ -366,7 +371,19 @@ class LearningWorkspace:
                     state_json.relative_to(state_root).as_posix(),
                     raw,
                 )
-        entries.sort(key=lambda entry: entry[0].name, reverse=True)
+        entries.sort(
+            key=lambda entry: (
+                # Newest created task first across every state; tasks without
+                # a creation fact (none exist in new output roots) stay last.
+                entry[1].created_at is None,
+                -(
+                    entry[1].created_at.timestamp()
+                    if entry[1].created_at is not None
+                    else 0.0
+                ),
+                entry[0].name,
+            )
+        )
         return entries, digest.hexdigest()
 
     def _item(self, task_dir: Path, task: TaskRecord) -> LearningItem:
@@ -381,6 +398,12 @@ class LearningWorkspace:
             task,
             intake=intake,
             intake_invalid=intake_invalid,
+        )
+        item = replace(
+            item,
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+            completed_at=task.completed_at,
         )
         output_goal: OutputGoal = (
             intake.default_output

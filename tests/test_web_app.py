@@ -2486,3 +2486,70 @@ def test_learning_api_declines_paid_continue_without_rerun(
     assert response.status_code == 200
     assert response.json()["outcome"] == "needs_setup"
     assert called is False
+
+
+def test_task_api_exposes_utc_times_and_sorts_by_created_at_across_states(
+    tmp_path: Path,
+) -> None:
+    older = datetime(2026, 9, 7, 2, 0, tzinfo=UTC)
+    newer = datetime(2026, 9, 7, 8, 0, tzinfo=UTC)
+    old_dir = tmp_path / "视频学习素材" / "z-older-first"
+    old_dir.mkdir(parents=True)
+    old_task = create_task(
+        task_id="20260907-old-api1",
+        source_path="C:/private-media/a.mp4",
+        source_fingerprint="old-api",
+        title="旧任务",
+        now=older,
+    ).model_copy(
+        update={
+            "stages": {"note": StageStatus.FAILED},
+            "error_summary": "note 遇到临时错误。",
+        }
+    )
+    write_task_atomic(old_dir, old_task, now=older)
+    new_dir = tmp_path / "视频学习素材" / "a-newer-second"
+    new_dir.mkdir(parents=True)
+    new_task = create_task(
+        task_id="20260907-new-api1",
+        source_path="C:/private-media/b.mp4",
+        source_fingerprint="new-api",
+        title="新任务",
+        now=newer,
+    ).model_copy(
+        update={
+            "stages": {"publish": StageStatus.COMPLETED, "tts": StageStatus.SKIPPED},
+            "artifacts": {
+                "publish": ["note.md"],
+                "content_pack": ["content_pack.json"],
+            },
+        }
+    )
+    (new_dir / "note.md").write_text(
+        f"<!-- learnnest-task-id: {new_task.task_id} -->\n\n# 新任务\n",
+        encoding="utf-8",
+    )
+    write_task_atomic(new_dir, new_task, now=newer)
+
+    client = _client(tmp_path)
+    tasks = client.get("/api/tasks").json()["tasks"]
+    assert [item["task_id"] for item in tasks] == [
+        new_task.task_id,
+        old_task.task_id,
+    ]
+    for item in tasks:
+        created = datetime.fromisoformat(item["created_at"])
+        assert created.tzinfo is not None and created.utcoffset() == timedelta(0)
+        assert datetime.fromisoformat(item["updated_at"]).utcoffset() == timedelta(0)
+        assert "completed_at" in item
+
+    snapshot = client.get("/api/learning/snapshot").json()
+    for bucket in ("inbox", "processing", "library"):
+        for item in snapshot[bucket]:
+            assert datetime.fromisoformat(item["created_at"]).utcoffset() == timedelta(
+                0
+            )
+            assert datetime.fromisoformat(item["updated_at"]).utcoffset() == timedelta(
+                0
+            )
+            assert "completed_at" in item

@@ -39,7 +39,13 @@ from learnnest.models import ContentPack, Evidence, StageStatus
 from learnnest.pipeline import PipelineError
 from learnnest.provider_model_catalog import ProviderModelCatalogError
 from learnnest.provider_profiles import load_settings
-from learnnest.task_store import create_task, find_task_by_id, write_task_atomic
+from learnnest.task_store import (
+    complete_task_goal,
+    create_task,
+    find_task_by_id,
+    load_task,
+    write_task_atomic,
+)
 from learnnest.task_control import load_task_control
 from learnnest.web_app import create_web_app
 
@@ -421,8 +427,18 @@ def _open_view(page: Page, view: str) -> None:
     expect(page.locator(f'[data-view-panel="{view}"]')).to_be_visible()
 
 
+_TASK_BUCKET_BY_LEGACY_LIST = {
+    "processing-list": "processing",
+    "inbox-list": "inbox",
+    "library-list": "library",
+}
+
+
 def _first_task_row(page: Page, list_id: str):
-    return page.locator(f"#{list_id} article[data-item-ref]").first
+    expected_bucket = _TASK_BUCKET_BY_LEGACY_LIST[list_id]
+    return page.locator(
+        f'#task-list article[data-item-ref][data-bucket="{expected_bucket}"]'
+    ).first
 
 
 def _open_settings_panel(page: Page, panel: str) -> None:
@@ -892,15 +908,15 @@ def test_goal4_three_sources_reach_a_safe_note_in_real_edge(
         expect(page.locator(".source-jobs .source-job")).to_have_count(3)
         deadline = time.monotonic() + 30
         while (
-            page.locator("#library-list article").count() != 3
+            page.locator('#task-list article[data-bucket="library"]').count() != 3
             and time.monotonic() < deadline
         ):
             page.wait_for_timeout(100)
         snapshot = page.evaluate(
             "async () => await (await fetch('/api/learning/snapshot')).json()"
         )
-        assert page.locator("#library-list article").count() == 3, json.dumps(
-            snapshot, ensure_ascii=False
+        assert page.locator('#task-list article[data-bucket="library"]').count() == 3, (
+            json.dumps(snapshot, ensure_ascii=False)
         )
         row = _first_task_row(page, "library-list")
         expect(row.locator(".progress-ring strong")).to_have_text("100")
@@ -945,10 +961,14 @@ def test_goal4_waiting_setup_survives_refresh_without_constructing_a_provider(
             page.locator('button[form="url-form"]').click()
         assert submitted.value.status == 202
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
-        expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
+        expect(
+            page.locator('#task-list article[data-bucket="processing"]')
+        ).to_contain_text("请先完成整理设置")
         page.reload()
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
-        expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
+        expect(
+            page.locator('#task-list article[data-bucket="processing"]')
+        ).to_contain_text("请先完成整理设置")
         assert loopback_app.provider_runs == []
         assert page.evaluate(
             "document.documentElement.scrollWidth <= window.innerWidth"
@@ -1556,7 +1576,9 @@ def test_goal4_substantive_setting_change_revokes_browser_authorization(
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator('button[form="url-form"]').click()
-        expect(page.locator("#processing-list")).to_contain_text("请开启付费整理许可")
+        expect(
+            page.locator('#task-list article[data-bucket="processing"]')
+        ).to_contain_text("请开启付费整理许可")
         assert loopback_app.provider_runs == []
         assert "first-test-key" not in page.locator("body").inner_text()
         assert "second-test-key" not in page.locator("body").inner_text()
@@ -1575,7 +1597,9 @@ def test_goal4_restarting_webui_keeps_source_job_and_intake_visible(
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator('button[form="url-form"]').click()
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
-        expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
+        expect(
+            page.locator('#task-list article[data-bucket="processing"]')
+        ).to_contain_text("请先完成整理设置")
         browser.close()
         _stop_loopback_server(loopback_app.server, loopback_app.thread)
         (
@@ -1589,7 +1613,9 @@ def test_goal4_restarting_webui_keeps_source_job_and_intake_visible(
         restored = restarted.new_page(viewport={"width": 1280, "height": 720})
         restored.goto(loopback_app.url)
         expect(restored.locator(".source-jobs .source-job")).to_have_count(1)
-        expect(restored.locator("#processing-list")).to_contain_text("请先完成整理设置")
+        expect(
+            restored.locator('#task-list article[data-bucket="processing"]')
+        ).to_contain_text("请先完成整理设置")
         assert (
             len(
                 list(
@@ -1671,12 +1697,12 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
                 abs((page_layout["leftMargin"] - 220) - page_layout["rightMargin"]) <= 5
             )
         _open_view(page, "tasks")
-        expect(page.locator("#processing-list article")).to_have_count(1)
+        expect(page.locator("#task-list article[data-item-ref]")).to_have_count(1)
         page.locator("#task-search").fill("does-not-exist")
-        expect(page.locator("#processing-list article")).to_be_hidden()
+        expect(page.locator("#task-list article[data-item-ref]")).to_be_hidden()
         expect(page.locator("#task-filter-empty")).to_be_visible()
         page.locator("#task-search").fill("safe-paused-input")
-        expect(page.locator("#processing-list article")).to_be_visible()
+        expect(page.locator("#task-list article[data-item-ref]")).to_be_visible()
         expect(page.locator("#task-filter-empty")).to_be_hidden()
         expect(page.locator("#task-focus")).to_have_count(0)
         row = _first_task_row(page, "processing-list")
@@ -1714,7 +1740,7 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
         page.locator("button[data-filter='paused']").click()
         expect(page.locator('[data-filter-count="paused"]')).to_have_text("1")
         expect(page.locator('[data-filter-count="processing"]')).to_have_text("0")
-        expect(page.locator("#processing-list article")).to_be_visible()
+        expect(page.locator("#task-list article[data-item-ref]")).to_be_visible()
         page.reload()
         expect(
             _first_task_row(page, "processing-list").locator(".learning-state")
@@ -1749,7 +1775,9 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
         assert loopback_app.provider_runs == []
         assert load_intake(loopback_app.root, task.task_id).status == "pending"
         restored.reload()
-        expect(restored.locator("#inbox-list article")).to_have_count(1)
+        expect(
+            restored.locator('#task-list article[data-bucket="inbox"]')
+        ).to_have_count(1)
         _open_view(restored, "tasks")
         row = _first_task_row(restored, "inbox-list")
         with restored.expect_response(
@@ -1773,7 +1801,9 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
             ).manually_paused,
         }
         restored.reload()
-        expect(restored.locator("#library-list article")).to_have_count(1)
+        expect(
+            restored.locator('#task-list article[data-bucket="library"]')
+        ).to_have_count(1)
         found = find_task_by_id(loopback_app.root, task.task_id)
         assert found is not None
         assert load_task_control(found[0], task.task_id).manually_paused is False
@@ -1802,17 +1832,23 @@ def test_goal4_corrupting_an_intake_fact_turns_the_browser_gate_red_then_green(
             page.locator('button[form="url-form"]').click()
         assert submitted.value.status == 202
         expect(page.locator(".source-jobs .source-job")).to_have_count(1)
-        expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
+        expect(
+            page.locator('#task-list article[data-bucket="processing"]')
+        ).to_contain_text("请先完成整理设置")
         intake = next(
             (loopback_app.root / ".learnnest" / "automation" / "intake").glob("*.json")
         )
         original = intake.read_bytes()
         intake.write_text("{broken", encoding="utf-8")
         page.reload()
-        expect(page.locator("#processing-list")).to_contain_text("需要你处理")
+        expect(
+            page.locator('#task-list article[data-bucket="processing"]')
+        ).to_contain_text("需要你处理")
         intake.write_bytes(original)
         page.reload()
-        expect(page.locator("#processing-list")).to_contain_text("请先完成整理设置")
+        expect(
+            page.locator('#task-list article[data-bucket="processing"]')
+        ).to_contain_text("请先完成整理设置")
         assert loopback_app.provider_runs == []
         browser.close()
 
@@ -2041,9 +2077,9 @@ def test_w2_failed_source_shows_stage_reason_and_exact_next_step(
             ),
         )
         page.goto(loopback_app.url)
-        expect(page.locator("#processing-list .learning-state")).to_have_text(
-            "处理已停止"
-        )
+        expect(
+            page.locator('#task-list article[data-bucket="processing"] .learning-state')
+        ).to_have_text("处理已停止")
         row = _first_task_row(page, "processing-list")
         expect(row.locator(".row-problem")).to_contain_text("失败阶段")
         expect(row.locator(".row-problem")).to_contain_text("获取内容")
@@ -2104,8 +2140,12 @@ def test_goal4_audio_success_is_playable_from_the_real_note_page(
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator('button[form="url-form"]').click()
-        expect(page.locator("#library-list article")).to_have_count(1)
-        expect(page.locator("#library-list")).to_contain_text("\u53ef\u64ad\u653e")
+        expect(page.locator('#task-list article[data-bucket="library"]')).to_have_count(
+            1
+        )
+        expect(
+            page.locator('#task-list article[data-bucket="library"]')
+        ).to_contain_text("\u53ef\u64ad\u653e")
         found = find_task_by_id(loopback_app.root, "20260813-goal40001")
         assert found is not None
         task_dir, task = found
@@ -2146,8 +2186,12 @@ def test_goal4_audio_failure_keeps_the_note_readable_and_distinct(
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator('button[form="url-form"]').click()
-        expect(page.locator("#library-list article")).to_have_count(1)
-        expect(page.locator("#library-list")).to_contain_text("音频仍在处理中")
+        expect(page.locator('#task-list article[data-bucket="library"]')).to_have_count(
+            1
+        )
+        expect(
+            page.locator('#task-list article[data-bucket="library"]')
+        ).to_contain_text("音频仍在处理中")
         row = _first_task_row(page, "library-list")
         with page.expect_popup() as note:
             row.locator("button[data-action='open_note']").click()
@@ -2172,7 +2216,9 @@ def test_goal4_retryable_writer_failure_retries_the_same_task_record(
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator('button[form="url-form"]').click()
-        expect(page.locator("#processing-list")).to_contain_text("处理已停止")
+        expect(
+            page.locator('#task-list article[data-bucket="processing"]')
+        ).to_contain_text("处理已停止")
         row = _first_task_row(page, "processing-list")
         expect(row.locator("button[data-action='retry_automation']")).to_have_count(1)
         task_id = next(
@@ -2180,7 +2226,9 @@ def test_goal4_retryable_writer_failure_retries_the_same_task_record(
         ).stem
         loopback_app.clock[0] = datetime.now(UTC)
         row.locator("button[data-action='retry_automation']").click()
-        expect(page.locator("#library-list article")).to_have_count(1)
+        expect(page.locator('#task-list article[data-bucket="library"]')).to_have_count(
+            1
+        )
         status = load_status(loopback_app.root)
         assert status is not None
         state = load_task_state(loopback_app.root, task_id, status.policy_sha256)
@@ -2238,7 +2286,9 @@ def test_goal4_unknown_and_permanent_automation_failures_hide_retry_and_stop_fac
         _open_view(page, "sources")
         page.locator("#public-url").fill("https://www.bilibili.com/video/BV1xx411c7mD")
         page.locator('button[form="url-form"]').click()
-        expect(page.locator("#processing-list")).to_contain_text("处理已停止")
+        expect(
+            page.locator('#task-list article[data-bucket="processing"]')
+        ).to_contain_text("处理已停止")
         row = _first_task_row(page, "processing-list")
         reason = row.locator(".row-problem")
         expect(reason).to_be_visible()
@@ -2354,3 +2404,185 @@ def test_douyin_url_admission_reaches_tasks_or_actionable_error_in_real_edge(
             browser.close()
     finally:
         _stop_loopback_server(server, thread)
+
+
+def _timestamped_task(
+    root: Path,
+    name: str,
+    task_id: str,
+    *,
+    created: datetime,
+    completed: datetime | None = None,
+    failure: bool = False,
+) -> str:
+    """Write one sortable task fact (ready note or in-progress failure)."""
+    task_dir = root / "视频学习素材" / name
+    title = f"时间任务 {name}"
+    task = create_task(
+        task_id=task_id,
+        source_path=f"C:/private/{name}.mp4",
+        source_fingerprint=name,
+        title=title,
+        profile="note",
+        now=created,
+    ).model_copy(
+        update={
+            "stages": (
+                {"note": StageStatus.FAILED}
+                if failure
+                else {"publish": StageStatus.COMPLETED}
+            ),
+            "artifacts": (
+                {}
+                if failure
+                else {"publish": ["note.md"], "content_pack": ["content_pack.json"]}
+            ),
+            "error_summary": "note 遇到临时错误。" if failure else None,
+        }
+    )
+    task_dir.mkdir(parents=True)
+    if not failure:
+        (task_dir / "note.md").write_text(
+            f"<!-- learnnest-task-id: {task_id} -->\n\n# {title}\n",
+            encoding="utf-8",
+        )
+    write_task_atomic(task_dir, task, now=created)
+    if completed is not None:
+        write_task_atomic(
+            task_dir,
+            complete_task_goal(load_task(task_dir), now=completed),
+            now=completed,
+        )
+    return task_id
+
+
+def _first_task_ref(page: Page) -> str | None:
+    return page.locator(
+        "#task-list article[data-item-ref]:not([hidden])"
+    ).first.get_attribute("data-item-ref")
+
+
+def test_task_times_global_sort_and_row_text_in_real_edge(
+    loopback_app: _LoopbackApp,
+) -> None:
+    """W5 lifecycle: newest/oldest global sort, completed/in-progress rows,
+    refresh stability, 1440x1000 and 390x844 without horizontal overflow."""
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    root = loopback_app.root
+    t1 = datetime(2026, 9, 7, 2, 0, tzinfo=UTC)
+    t2 = datetime(2026, 9, 7, 3, 0, tzinfo=UTC)
+    t3 = datetime(2026, 9, 7, 4, 0, tzinfo=UTC)
+    completed1 = _timestamped_task(
+        root,
+        "a-oldest",
+        "20260907-tsort01",
+        created=t1,
+        completed=t1 + timedelta(minutes=30),
+    )
+    _timestamped_task(
+        root,
+        "b-middle",
+        "20260907-tsort02",
+        created=t2,
+        completed=t2 + timedelta(minutes=20),
+    )
+    newest = _timestamped_task(
+        root, "z-newest-in-progress", "20260907-tsort03", created=t3, failure=True
+    )
+    periods = (t1, t2, t3)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        console_issues: list[str] = []
+        page.on(
+            "console",
+            lambda message: (
+                console_issues.append(message.text)
+                if message.type in {"error", "warning"}
+                else None
+            ),
+        )
+        page.goto(loopback_app.url)
+        deadline = time.monotonic() + 15
+        while (
+            page.locator("#task-list article[data-item-ref]").count() != 3
+            and time.monotonic() < deadline
+        ):
+            page.wait_for_timeout(100)
+        assert page.locator("#task-list article[data-item-ref]").count() == 3
+
+        # Default order is newest created first across every state.
+        assert _first_task_ref(page) == newest
+        expect(
+            page.locator('#task-list article[data-filter="completed"]')
+        ).to_have_count(2)
+        expect(
+            page.locator('#task-list article[data-filter="attention"]')
+        ).to_have_count(1)
+
+        # Completed rows show created + completed + elapsed; in-progress shows elapsed only.
+        completed_row = page.locator(
+            '#task-list article[data-filter="completed"] small.task-times'
+        ).first
+        expect(completed_row).to_contain_text("创建")
+        expect(completed_row).to_contain_text("完成")
+        expect(completed_row).to_contain_text("历时")
+        in_progress_row = page.locator(
+            '#task-list article[data-filter="attention"] small.task-times'
+        )
+        expect(in_progress_row).to_contain_text("创建")
+        expect(in_progress_row).to_contain_text("已历时")
+        expect(in_progress_row).not_to_contain_text("完成")
+
+        # Switching to oldest created must clear the batch selection.
+        page.locator("#task-list article[data-item-ref]:not([hidden])").first.locator(
+            "input[data-task-select]"
+        ).check()
+        expect(page.locator("#task-selection-bar")).to_be_visible()
+        page.locator("button[data-task-sort='asc']").click()
+        expect(page.locator("#task-selection-bar")).to_be_hidden()
+        assert _first_task_ref(page) == completed1
+        rows = page.locator("#task-list article[data-item-ref]:not([hidden])")
+        assert [rows.nth(i).get_attribute("data-item-ref") for i in range(3)] == [
+            completed1,
+            "20260907-tsort02",
+            newest,
+        ]
+
+        # Back to newest, then verify stability after a full reload.
+        page.locator("button[data-task-sort='desc']").click()
+        assert _first_task_ref(page) == newest
+        page.reload()
+        deadline = time.monotonic() + 15
+        while (
+            page.locator("#task-list article[data-item-ref]").count() != 3
+            and time.monotonic() < deadline
+        ):
+            page.wait_for_timeout(100)
+        assert _first_task_ref(page) == newest
+
+        # 1440x1000 has no horizontal overflow; neither does 390x844.
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth"
+        )
+        snapshot = page.evaluate(
+            "async () => await (await fetch('/api/learning/snapshot')).json()"
+        )
+        created_times = [
+            entry["created_at"]
+            for entry in [
+                *snapshot["inbox"],
+                *snapshot["processing"],
+                *snapshot["library"],
+            ]
+        ]
+        assert created_times == [period.isoformat() for period in reversed(periods)]
+        assert console_issues == []
+        page.set_viewport_size({"width": 390, "height": 844})
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth"
+        )
+        assert _first_task_ref(page) == newest
+        assert console_issues == []
+        browser.close()

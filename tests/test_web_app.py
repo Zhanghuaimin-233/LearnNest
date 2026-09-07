@@ -1909,8 +1909,8 @@ def test_workspace_page_uses_the_unified_three_view_shell_and_real_video_entry(
         assert f'id="{element_id}"' in page
     assert 'id="source-insight-rail"' not in page
     assert 'id="settings-insight-rail"' not in page
-    assert "/static/workspace.css?v=20260904-2" in page
-    assert "/static/workspace.js?v=20260904-2" in page
+    assert "/static/workspace.css?v=20260907-1" in page
+    assert "/static/workspace.js?v=20260907-1" in page
     assert ".source-console {" in stylesheet
     assert ".task-console," in stylesheet
     assert "grid-template-columns: minmax(0, 1fr);" in stylesheet

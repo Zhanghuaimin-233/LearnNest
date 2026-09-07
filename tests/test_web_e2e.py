@@ -1676,7 +1676,21 @@ def test_w2_manual_pause_survives_refresh_and_restart_before_resuming_scheduler(
         expect(page.locator("#task-filter-empty")).to_be_hidden()
         expect(page.locator("#task-focus")).to_have_count(0)
         row = _first_task_row(page, "processing-list")
-        expect(row.locator("button[data-pause-item-ref]")).to_be_visible()
+        pause_button = row.locator("button[data-pause-item-ref]")
+        expect(pause_button).to_be_visible()
+        pause_border = pause_button.evaluate(
+            """element => {
+              const style = getComputedStyle(element);
+              return {
+                borderTopStyle: style.borderTopStyle,
+                borderTopWidth: style.borderTopWidth,
+                borderColor: style.borderColor,
+              };
+            }"""
+        )
+        assert pause_border["borderTopStyle"] == "solid"
+        assert pause_border["borderTopWidth"] == "1px"
+        assert pause_border["borderColor"] != "rgba(0, 0, 0, 0)"
 
         with page.expect_response(
             lambda response: response.url.endswith("/pause")

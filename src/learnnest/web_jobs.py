@@ -86,6 +86,32 @@ class WebJobStore:
                     jobs.append(self._invalid_public_job(path.stem))
             return tuple(jobs)
 
+    def find_by_source(
+        self, source_kind: SourceKind, source_input: str
+    ) -> WebJob | None:
+        """Return the most recent recoverable intent for one canonical source.
+
+        A queued, running, or interrupted source job is the durable intent for
+        its canonical URL; it is reused instead of creating a duplicate.
+        Completed and failed intents are left to the existing retry path so an
+        automatic sync never silently restarts user-visible failures.
+        """
+        with self._lock:
+            found: WebJob | None = None
+            for path in sorted(self._directory().glob("*.json"), reverse=True):
+                try:
+                    job = self._read(path, expected_id=path.stem)
+                except ValueError:
+                    continue
+                if (
+                    job.source_kind == source_kind
+                    and job.source_input == source_input
+                    and job.status in {"queued", "running", "interrupted"}
+                    and (found is None or job.created_at >= found.created_at)
+                ):
+                    found = job
+            return found
+
     def start(self, job_id: str) -> WebJob:
         return self._replace_attempt(job_id, "running", error=None)
 

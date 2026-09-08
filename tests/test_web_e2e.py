@@ -19,14 +19,17 @@ from playwright.sync_api import Browser, Page, expect, sync_playwright
 from pydantic import SecretStr
 
 from learnnest.automation_coordinator import AutomationCoordinator
-from learnnest.automation_models import AutomationIntake
+from learnnest.automation_models import AutomationIntake, AutomationPolicy
+from learnnest.assisted_note_models import AssistedConnectionSnapshot
 from learnnest.automation_runner import AutomationProviders
 from learnnest.automation_runner import run_automation_tasks
 from learnnest.automation_store import (
+    authorize as authorize_automation,
     create_intake,
     load_intake,
     load_status,
     load_task_state,
+    save_policy as save_automation_policy,
 )
 from learnnest.douyin_favorites import (
     DouyinFavorite,
@@ -38,7 +41,11 @@ from learnnest.execution_models import FailureInfo, TaskAttempt
 from learnnest.models import ContentPack, Evidence, StageStatus
 from learnnest.pipeline import PipelineError
 from learnnest.provider_model_catalog import ProviderModelCatalogError
-from learnnest.provider_profiles import load_settings
+from learnnest.provider_profiles import (
+    connect,
+    load_settings,
+    set_role_binding,
+)
 from learnnest.task_store import (
     complete_task_goal,
     create_task,
@@ -318,6 +325,120 @@ class _StalledFavorites(_HistoricalFavorites):
             "抖音官方页面已返回首批收藏，但继续加载下一批时没有响应；"
             "本次收藏未更新，请重试。"
         )
+
+
+class _ConnectedAtStartLogin:
+    def __init__(self) -> None:
+        self.session_id = "offline-connected-session"
+
+    def current_session(self) -> dict[str, object]:
+        return {
+            "session_id": self.session_id,
+            "status": "connected",
+            "expires_in": 0,
+            "qr_available": False,
+            "message": "官方短信与扫码验证已完成。",
+        }
+
+    def cookie_for(self, session_id: str) -> SecretStr:
+        assert session_id == self.session_id
+        return SecretStr("offline-cookie")
+
+    def invalidate(self, _session_id: str) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+
+class _RefreshingFavorites:
+    def __init__(self) -> None:
+        self.sync_calls = 0
+        self.snapshot = _HistoricalFavorites().read_snapshot()
+        now = "2026-09-08T02:00:00+00:00"
+        self.updated = DouyinFavoritesSnapshot(
+            synced_at=now,
+            folders=(DouyinFavoritesFolder("default", "默认收藏夹", 2),),
+            items=(
+                self.snapshot.items[0],
+                DouyinFavorite(
+                    aweme_id="1234567890123456780",
+                    title="启动后自动刷新的收藏",
+                    url="https://www.douyin.com/video/1234567890123456780",
+                    synced_at=now,
+                    thumbnail_path=None,
+                ),
+            ),
+        )
+
+    def read_snapshot(self) -> DouyinFavoritesSnapshot:
+        return self.snapshot
+
+    def sync(self, _cookie: SecretStr, **_kwargs: object) -> DouyinFavoritesSnapshot:
+        self.sync_calls += 1
+        self.snapshot = self.updated
+        return self.updated
+
+    def thumbnail_file(self, _relative_path: str) -> Path:
+        raise FileNotFoundError
+
+
+class _FailingFavorites(_HistoricalFavorites):
+    def __init__(self) -> None:
+        self.status: dict[str, object] = {
+            "state": "idle",
+            "message": "",
+            "checked_at": None,
+        }
+
+    def sync(self, _cookie: SecretStr, **_kwargs: object) -> DouyinFavoritesSnapshot:
+        raise DouyinFavoritesError(
+            "抖音官方页面没有发起可验证的收藏请求；本次收藏未更新，请重新连接或稍后重试。"
+        )
+
+    def write_sync_status(
+        self,
+        state: str,
+        message: str,
+        *,
+        checked_at: str | None = None,
+    ) -> None:
+        self.status = {"state": state, "message": message, "checked_at": checked_at}
+
+    def read_sync_status(self) -> object:
+        from learnnest.douyin_favorites import DouyinFavoritesSyncStatus
+
+        return DouyinFavoritesSyncStatus(**self.status)
+
+    def thumbnail_file(self, _relative_path: str) -> Path:
+        raise FileNotFoundError
+
+
+def _configure_automation_policy(root: Path) -> None:
+    connect(
+        root, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
+    )
+    set_role_binding(root, role="note_writer", connection_name="note")
+    set_role_binding(root, role="note_reviewer", connection_name="note")
+    binding = AssistedConnectionSnapshot(
+        connection_name="note",
+        connection_id="note",
+        provider="xiaomi-mimo",
+        endpoint_identity="https://api.xiaomimimo.com/v1",
+        model="mimo-v2.5",
+        adapter_revision="1",
+    )
+    save_automation_policy(
+        root,
+        AutomationPolicy(
+            writer=binding,
+            reviewer=binding,
+            default_output="complete_note",
+            auto_organize_new_favorites=False,
+            check_interval_minutes=30,
+        ),
+    )
+    authorize_automation(root, now=datetime(2026, 8, 7, tzinfo=UTC))
 
 
 @dataclass
@@ -2605,3 +2726,90 @@ def test_task_times_global_sort_and_row_text_in_real_edge(
         assert _first_task_ref(page) == newest
         assert console_issues == []
         browser.close()
+
+
+def test_douyin_loopback_startup_sync_refreshes_existing_baseline_in_real_edge(
+    tmp_path: Path,
+) -> None:
+    _configure_automation_policy(tmp_path)
+    favorites = _RefreshingFavorites()
+    url, server, thread = _start_loopback_server(
+        tmp_path,
+        lambda *_args, **_kwargs: [],
+        douyin_login=_ConnectedAtStartLogin(),  # type: ignore[arg-type]
+        douyin_favorites=favorites,  # type: ignore[arg-type]
+    )
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    console_issues: list[str] = []
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(edge), headless=True
+            )
+            page = browser.new_page(viewport={"width": 2492, "height": 1415})
+            page.on(
+                "console",
+                lambda message: (
+                    console_issues.append(message.text)
+                    if message.type in {"error", "warning"}
+                    else None
+                ),
+            )
+            page.goto(url)
+            _open_view(page, "sources")
+            expect(page.locator("#douyin-favorites-list article")).to_have_count(
+                2, timeout=6_000
+            )
+            expect(page.locator("#favorites-status")).to_contain_text("最近同步")
+            assert favorites.sync_calls >= 1
+
+            page.set_viewport_size({"width": 390, "height": 844})
+            assert page.evaluate(
+                "document.documentElement.scrollWidth <= window.innerWidth"
+            )
+            assert console_issues == []
+            browser.close()
+    finally:
+        _stop_loopback_server(server, thread)
+
+
+def test_douyin_loopback_startup_sync_failure_shows_human_status_in_real_edge(
+    tmp_path: Path,
+) -> None:
+    _configure_automation_policy(tmp_path)
+    favorites = _FailingFavorites()
+    url, server, thread = _start_loopback_server(
+        tmp_path,
+        lambda *_args, **_kwargs: [],
+        douyin_login=_ConnectedAtStartLogin(),  # type: ignore[arg-type]
+        douyin_favorites=favorites,  # type: ignore[arg-type]
+    )
+    edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+    console_issues: list[str] = []
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=str(edge), headless=True
+            )
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            page.on(
+                "console",
+                lambda message: (
+                    console_issues.append(message.text)
+                    if message.type in {"error", "warning"}
+                    else None
+                ),
+            )
+            page.goto(url)
+            _open_view(page, "sources")
+            expect(page.locator("#favorites-sync-status")).to_be_visible(timeout=6_000)
+            expect(page.locator("#favorites-sync-status")).to_contain_text("未更新")
+            expect(page.locator("#favorites-sync-status")).to_contain_text(
+                "手动同步重试"
+            )
+            status_text = page.locator("#favorites-sync-status").text_content()
+            assert "runtime detail" not in status_text
+            assert console_issues == []
+            browser.close()
+    finally:
+        _stop_loopback_server(server, thread)

@@ -582,3 +582,81 @@ def test_coordinator_never_rebinds_an_executed_stale_task_or_enters_runner(
     assert factory_calls == []
     assert load_task(task_dir) == original
     assert load_intake(root, task_id).status == "needs_attention"
+
+
+def test_coordinator_runs_favorites_sync_once_at_start_and_wake_does_not_repeat(
+    tmp_path: Path,
+) -> None:
+    root = _authorized_root(tmp_path)
+    events: list[str] = []
+
+    async def exercise() -> None:
+        coordinator = AutomationCoordinator(
+            root,
+            favorites_sync=lambda: events.append("sync"),
+            interval_seconds=3600,
+        )
+        await coordinator.start()
+        for _ in range(100):
+            if events:
+                break
+            await asyncio.sleep(0.01)
+        for _ in range(5):
+            coordinator.wake()
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.1)
+        await coordinator.shutdown()
+        assert coordinator.running is False
+
+    asyncio.run(exercise())
+    assert events == ["sync"]
+
+
+def test_coordinator_periodic_timeout_fires_favorites_sync_beyond_startup(
+    tmp_path: Path,
+) -> None:
+    root = _authorized_root(tmp_path)
+    events: list[str] = []
+
+    async def exercise() -> None:
+        coordinator = AutomationCoordinator(
+            root,
+            favorites_sync=lambda: events.append("sync"),
+            interval_seconds=0.03,
+        )
+        await coordinator.start()
+        for _ in range(200):
+            if len(events) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        await coordinator.shutdown()
+        assert coordinator.running is False
+
+    asyncio.run(exercise())
+    assert events == ["sync", "sync"]
+
+
+def test_coordinator_shutdown_stops_future_favorites_syncs(
+    tmp_path: Path,
+) -> None:
+    root = _authorized_root(tmp_path)
+    events: list[str] = []
+
+    async def exercise() -> None:
+        coordinator = AutomationCoordinator(
+            root,
+            favorites_sync=lambda: events.append("sync"),
+            interval_seconds=0.03,
+        )
+        await coordinator.start()
+        for _ in range(100):
+            if events:
+                break
+            await asyncio.sleep(0.01)
+        await coordinator.shutdown()
+        count = len(events)
+        await asyncio.sleep(0.08)
+        assert len(events) == count
+
+    asyncio.run(exercise())
+    assert events == ["sync"]

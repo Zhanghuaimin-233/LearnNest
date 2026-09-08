@@ -112,6 +112,13 @@ def automation_lock(output_root: str | Path, *, timeout: float = 0.0) -> Iterato
     return _named_lock(output_root, "automation", "tick", timeout=timeout)
 
 
+def douyin_sync_lock(
+    output_root: str | Path, *, timeout: float = 0.0
+) -> Iterator[None]:
+    """Return the output-root-wide exclusive lock for one Douyin favorites sync."""
+    return _named_lock(output_root, "douyin", "sync", timeout=timeout)
+
+
 @contextmanager
 def resource_slot(
     output_root: str | Path,

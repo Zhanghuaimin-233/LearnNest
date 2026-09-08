@@ -8,6 +8,9 @@
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/static/workspace.css?v=20260907-3" />
     <script src="/static/workspace.js?v=20260907-3" defer></script>
+    <style>
+      .favorites-sync-status { display: block; margin-top: 0.3rem; color: #555; }
+    </style>
   </head>
   <body>
     <header class="app-header">
@@ -146,7 +149,7 @@
 
               <section class="source-douyin-panel" id="source-douyin">
                 <header class="source-panel-toolbar source-douyin-toolbar">
-                  <div><p class="panel-kicker">已连接的内容库</p><div class="source-douyin-title"><h2>抖音收藏</h2><span id="douyin-connection-state" class="status-pill">未连接</span></div><span>同步默认与自建收藏夹，再选择要加入任务的内容。</span><small id="favorites-status" aria-live="polite">连接抖音后，收藏会出现在这里。</small></div>
+                  <div><p class="panel-kicker">已连接的内容库</p><div class="source-douyin-title"><h2>抖音收藏</h2><span id="douyin-connection-state" class="status-pill">未连接</span></div><span>同步默认与自建收藏夹，再选择要加入任务的内容。</span><small id="favorites-status" aria-live="polite">连接抖音后，收藏会出现在这里。</small><small id="favorites-sync-status" class="favorites-sync-status" aria-live="polite" hidden></small></div>
                   <div class="source-actions"><button id="connect-douyin" class="secondary-button" type="button">打开抖音验证窗口</button><button id="sync-favorites" class="secondary-button" type="button">手动同步</button><button id="disconnect-douyin" class="secondary-button" type="button" hidden>断开连接</button></div>
                 </header>
                 <p class="source-connection-guidance">请在同一个抖音官方窗口完成手机号验证码和抖音 App 扫码确认；语栖验证收藏访问，通过后才显示已连接。验证与收藏环境只由当前 Windows 用户加密保存；同步会短暂恢复隔离官方页面，不会突然打开可见窗口。</p>

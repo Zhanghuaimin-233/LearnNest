@@ -50,3 +50,26 @@ def test_web_job_rejects_tampered_identity_and_malformed_fact(tmp_path) -> None:
     assert public["status"] == "failed"
     assert public["error"] == "来源操作记录无法读取。"
     assert "douyin" not in str(public)
+
+
+def test_web_jobs_find_by_source_reuses_only_recoverable_intents(tmp_path) -> None:
+    jobs = WebJobStore(tmp_path)
+    url_one = "https://www.douyin.com/video/1234567890123456789"
+    url_two = "https://www.douyin.com/video/2234567890123456789"
+
+    assert jobs.find_by_source("douyin_favorite", url_one) is None
+
+    created = jobs.create("douyin_favorite", url_one)
+    assert jobs.find_by_source("douyin_favorite", url_one).job_id == created.job_id
+    running = jobs.start(created.job_id)
+    assert jobs.find_by_source("douyin_favorite", url_one).job_id == running.job_id
+    interrupted = WebJobStore(tmp_path).get(created.job_id)
+    assert interrupted.status == "interrupted"
+    assert jobs.find_by_source("douyin_favorite", url_one).job_id == interrupted.job_id
+
+    completed = jobs.create("douyin_favorite", url_two)
+    jobs.complete(completed.job_id, "20260908-task-2")
+    assert jobs.find_by_source("douyin_favorite", url_two) is None
+
+    jobs.create("public_url", url_one)
+    assert jobs.find_by_source("douyin_favorite", url_one).job_id == interrupted.job_id

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -8,17 +10,21 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
+from learnnest import web_app as web_app_module
 from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import (
     DouyinAuthenticationError,
     DouyinHttpRequestError,
 )
 from learnnest.adapters.douyin_official_page import DouyinOfficialPageError
+from learnnest.automation_store import find_intake
 from learnnest.douyin_favorites import (
     DouyinFavoritesError,
     DouyinFavoritesStore,
 )
-from learnnest.provider_profiles import connect, set_role_binding
+from learnnest.provider_profiles import clear_role_binding, connect, set_role_binding
+from learnnest.task_store import create_task
+from learnnest.web_jobs import WebJobStore
 from learnnest.web_app import (
     AutomationAuthorizeRequest,
     AutomationConfigureRequest,
@@ -138,6 +144,14 @@ class FakeLogin:
         ],
     }
 
+    def current_session(self) -> dict[str, Any]:
+        return {
+            "session_id": "session1234567890",
+            "status": "connected",
+            "expires_in": 0,
+            "qr_available": False,
+        }
+
     def cookie_for(self, _session_id: str) -> SecretStr:
         return SecretStr("fake-cookie")
 
@@ -151,15 +165,56 @@ class FakeLogin:
         return None
 
 
+def _write_baseline(root: Path, items: list[tuple[str, str]]) -> None:
+    facts = root / ".learnnest" / "douyin" / "favorites.json"
+    facts.parent.mkdir(parents=True)
+    now = "2026-09-08T00:00:00+00:00"
+    facts.write_text(
+        json.dumps(
+            {
+                "synced_at": now,
+                "items": [
+                    {
+                        "aweme_id": item_id,
+                        "title": title,
+                        "url": f"https://www.douyin.com/video/{item_id}",
+                        "synced_at": now,
+                        "thumbnail_path": None,
+                    }
+                    for item_id, title in items
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _wait_for(predicate: Any, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError("timed out waiting for background work")
+
+
 def _authorized_service(
-    root: Path, store: DouyinFavoritesStore, *, auto: bool
+    root: Path,
+    store: DouyinFavoritesStore,
+    *,
+    auto: bool,
+    douyin_login: Any | None = None,
 ) -> WebService:
     connect(
         root, name="note", preset="mimo", secret_value="fake-key", model="mimo-v2.5"
     )
     set_role_binding(root, role="note_writer", connection_name="note")
     set_role_binding(root, role="note_reviewer", connection_name="note")
-    service = WebService(root, douyin_login=FakeLogin(), douyin_favorites=store)  # type: ignore[arg-type]
+    service = WebService(
+        root,
+        douyin_login=douyin_login or FakeLogin(),  # type: ignore[arg-type]
+        douyin_favorites=store,
+    )
     service.configure_automation(
         AutomationConfigureRequest(
             default_output="complete_note",
@@ -879,3 +934,389 @@ def test_douyin_favorites_web_explains_missing_official_page_response(
         "抖音官方页面没有返回可验证的收藏结果；收藏未更新，请稍后重试。"
     )
     assert "runtime detail" not in response.text
+
+
+def _single_page(*items: dict[str, Any]) -> list[Mapping[str, Any]]:
+    return [{"status_code": 0, "aweme_list": list(items), "has_more": False}]
+
+
+def test_startup_sync_refreshes_an_existing_baseline_exactly_once(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport(_single_page(_item("1", "历史"), _item("2", "新增")))
+    store = _store(tmp_path, transport)
+    _write_baseline(tmp_path, [("1", "历史")])
+    service = _authorized_service(tmp_path, store, auto=True)
+
+    service.startup_sync()
+
+    assert transport.calls == [(0, 10)]
+    assert [item.aweme_id for item in store.read_snapshot().items] == ["1", "2"]
+
+
+def test_startup_sync_without_baseline_never_requests_douyin(tmp_path: Path) -> None:
+    transport = FakeTransport(_single_page(_item("1", "首个")))
+    store = _store(tmp_path, transport)
+    service = _authorized_service(tmp_path, store, auto=True)
+
+    service.startup_sync()
+
+    assert transport.calls == []
+
+
+def test_lifespan_startup_sync_runs_once_and_publishes_its_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeTransport(_single_page(_item("1", "历史"), _item("2", "新增")))
+    store = _store(tmp_path, transport)
+    _write_baseline(tmp_path, [("1", "历史")])
+    _authorized_service(tmp_path, store, auto=True)
+
+    def fake_runner(self: WebService, job: Any) -> Any:
+        def run() -> None:
+            self.jobs.start(job.job_id)
+            self.jobs.complete(job.job_id, "20260908-app-task")
+
+        return run
+
+    monkeypatch.setattr(WebService, "_process_job_runner", fake_runner)
+    app = create_web_app(
+        tmp_path,
+        douyin_login=FakeLoginBoundary(),
+        douyin_favorites=store,
+    )
+
+    with TestClient(app) as client:
+        # Poll through the app's own service so reads share the jobs lock.
+        service = client.app.state.web_service
+        _wait_for(
+            lambda: (
+                bool(transport.calls)
+                and all(job.status == "completed" for job in service.jobs.list())
+            )
+        )
+        client.get("/api/douyin/favorites")
+
+    assert transport.calls == [(0, 10)]
+    jobs = WebJobStore(tmp_path).list()
+    assert [job.source_input for job in jobs] == ["https://www.douyin.com/video/2"]
+    assert all(job.status == "completed" for job in jobs)
+
+
+def test_auto_sync_refreshes_snapshot_but_queues_nothing_when_gate_closed(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport(_single_page(_item("1", "历史"), _item("2", "新增")))
+    store = _store(tmp_path, transport)
+    _write_baseline(tmp_path, [("1", "历史")])
+    service = _authorized_service(tmp_path, store, auto=False)
+
+    service.startup_sync()
+
+    assert [item.aweme_id for item in store.read_snapshot().items] == ["1", "2"]
+    assert service.jobs.list() == ()
+
+
+@pytest.mark.parametrize(
+    "gate_kind",
+    ["not_authorized", "roles_missing"],
+)
+def test_auto_queue_gate_rejects_each_component_with_zero_jobs(
+    tmp_path: Path, gate_kind: str
+) -> None:
+    transport = FakeTransport(_single_page(_item("1", "历史"), _item("2", "新增")))
+    store = _store(tmp_path, transport)
+    _write_baseline(tmp_path, [("1", "历史")])
+    if gate_kind == "not_authorized":
+        connect(
+            tmp_path,
+            name="note",
+            preset="mimo",
+            secret_value="fake-key",
+            model="mimo-v2.5",
+        )
+        set_role_binding(tmp_path, role="note_writer", connection_name="note")
+        set_role_binding(tmp_path, role="note_reviewer", connection_name="note")
+        service = WebService(
+            tmp_path,
+            douyin_login=FakeLogin(),  # type: ignore[arg-type]
+            douyin_favorites=store,
+        )
+        service.configure_automation(
+            AutomationConfigureRequest(
+                default_output="complete_note",
+                auto_organize_new_favorites=True,
+                check_interval_minutes=5,
+                max_items_per_tick=1,
+            )
+        )
+    else:
+        service = _authorized_service(tmp_path, store, auto=True)
+        clear_role_binding(tmp_path, role="note_reviewer")
+
+    service.startup_sync()
+
+    assert [item.aweme_id for item in store.read_snapshot().items] == ["1", "2"]
+    assert service.jobs.list() == ()
+
+
+def test_auto_sync_queues_only_new_default_favorites_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FolderTransport(FakeTransport):
+        def list_folders(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            return {
+                "status_code": 0,
+                "collects_list": [
+                    {
+                        "collects_id_str": "10",
+                        "collects_name": "编程",
+                        "total_number": 2,
+                    }
+                ],
+                "cursor": 0,
+                "has_more": False,
+            }
+
+        def list_folder_items(
+            self,
+            folder_id: str,
+            *,
+            cursor: int,
+            count: int,
+        ) -> Mapping[str, Any]:
+            del folder_id, cursor, count
+            return {
+                "status_code": 0,
+                "aweme_list": [
+                    _item("3", "同时在自建"),
+                    _item("5", "只在自建"),
+                ],
+                "cursor": 0,
+                "has_more": False,
+            }
+
+    transport = FolderTransport(
+        _single_page(_item("2", "新默认"), _item("3", "同时在自建"))
+        + _single_page(_item("2", "新默认"), _item("3", "同时在自建"))
+    )
+    store = _store(tmp_path, transport)
+    _write_baseline(tmp_path, [("1", "历史")])
+    service = _authorized_service(tmp_path, store, auto=True)
+    ran: list[str] = []
+
+    def capture_runner(self: WebService, job: Any) -> Any:
+        def run() -> None:
+            self.jobs.start(job.job_id)
+            ran.append(job.source_input)
+            self.jobs.complete(job.job_id, "20260908-task")
+
+        return run
+
+    monkeypatch.setattr(WebService, "_process_job_runner", capture_runner)
+
+    service.startup_sync()
+    service.startup_sync()
+
+    _wait_for(lambda: all(job.status == "completed" for job in service.jobs.list()))
+    jobs = service.jobs.list()
+    assert sorted(job.source_input for job in jobs) == [
+        "https://www.douyin.com/video/2",
+        "https://www.douyin.com/video/3",
+    ]
+    assert all(job.status == "completed" for job in jobs)
+    assert sorted(ran) == [
+        "https://www.douyin.com/video/2",
+        "https://www.douyin.com/video/3",
+    ]
+    assert [item.aweme_id for item in store.read_snapshot().items] == [
+        "2",
+        "3",
+        "5",
+    ]
+
+
+def test_auto_sync_failed_publish_keeps_baseline_and_reuses_the_queued_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeTransport(
+        _single_page(_item("1", "历史"), _item("2", "新增"))
+        + _single_page(_item("1", "历史"), _item("2", "新增"))
+    )
+    store = _store(tmp_path, transport)
+    _write_baseline(tmp_path, [("1", "历史")])
+    service = _authorized_service(tmp_path, store, auto=True)
+    ran: list[str] = []
+
+    def capture_runner(self: WebService, job: Any) -> Any:
+        def run() -> None:
+            self.jobs.start(job.job_id)
+            ran.append(job.source_input)
+            self.jobs.complete(job.job_id, "20260908-task")
+
+        return run
+
+    monkeypatch.setattr(WebService, "_process_job_runner", capture_runner)
+    from learnnest.douyin_favorites import _atomic_write_json as real_write
+
+    flaky = {"failed": False}
+
+    def flaky_write(path: Path, payload: Mapping[str, Any]) -> None:
+        if not flaky["failed"]:
+            flaky["failed"] = True
+            raise OSError("simulated publish failure")
+        return real_write(path, payload)
+
+    from learnnest import douyin_favorites as douyin_favorites_module
+
+    monkeypatch.setattr(douyin_favorites_module, "_atomic_write_json", flaky_write)
+
+    service.startup_sync()
+
+    assert ran == []
+    assert [item.aweme_id for item in store.read_snapshot().items] == ["1"]
+    jobs = service.jobs.list()
+    assert [job.source_input for job in jobs] == ["https://www.douyin.com/video/2"]
+    assert jobs[0].status == "queued"
+
+    service.startup_sync()
+
+    _wait_for(lambda: all(job.status == "completed" for job in service.jobs.list()))
+    assert ran == ["https://www.douyin.com/video/2"]
+    jobs = service.jobs.list()
+    assert len(jobs) == 1
+    assert jobs[0].status == "completed"
+    assert [item.aweme_id for item in store.read_snapshot().items] == ["1", "2"]
+
+
+def test_auto_sync_new_favorite_reaches_source_job_task_and_intake_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeTransport(
+        _single_page(_item("1", "历史"), _item("2", "新增"))
+        + _single_page(_item("1", "历史"), _item("2", "新增"))
+    )
+    store = _store(tmp_path, transport)
+    _write_baseline(tmp_path, [("1", "历史")])
+    service = _authorized_service(tmp_path, store, auto=True)
+    created: list[Any] = []
+
+    def fake_process_source(
+        source_item: Any,
+        output_root: Path,
+        profile: str,
+        *,
+        downloader: Any = None,
+    ) -> Any:
+        del output_root, profile, downloader
+        task = create_task(
+            task_id=f"20260908fav{len(created)}",
+            source_path=source_item.input,
+            source_fingerprint=source_item.input,
+            title="自动收藏",
+        )
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(web_app_module, "process_source", fake_process_source)
+
+    service.startup_sync()
+    service.startup_sync()
+
+    _wait_for(lambda: all(job.status == "completed" for job in service.jobs.list()))
+    jobs = service.jobs.list()
+    assert [job.source_input for job in jobs] == ["https://www.douyin.com/video/2"]
+    assert all(job.status == "completed" for job in jobs)
+    assert len(created) == 1
+    intake = find_intake(tmp_path, created[0].task_id)
+    assert intake is not None
+    assert intake.source_kind == "douyin_favorite"
+    assert intake.default_output == "complete_note"
+
+
+def test_manual_sync_is_rejected_while_a_background_sync_is_running(
+    tmp_path: Path,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            entered.set()
+            release.wait(timeout=5)
+            return {
+                "status_code": 0,
+                "aweme_list": [_item("1", "慢")],
+                "has_more": False,
+            }
+
+    store = _store(tmp_path, SlowTransport())
+    _write_baseline(tmp_path, [("1", "历史")])
+    service = _authorized_service(tmp_path, store, auto=True)
+
+    background = threading.Thread(target=service.auto_sync_favorites)
+    background.start()
+    assert entered.wait(timeout=2) is True
+    with pytest.raises(DouyinFavoritesError, match="正在自动同步"):
+        service.sync_douyin_favorites("session")
+    release.set()
+    background.join(timeout=5)
+    assert background.is_alive() is False
+
+
+def test_background_auth_failure_invalidates_session_and_keeps_baseline(
+    tmp_path: Path,
+) -> None:
+    class AuthTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            raise DouyinAuthenticationError("authentication failed")
+
+    store = DouyinFavoritesStore(
+        tmp_path,
+        transport_factory=lambda _cookie: AuthTransport(),
+    )
+    _write_baseline(tmp_path, [("1", "历史")])
+    login = FakeLoginBoundary()
+    service = _authorized_service(tmp_path, store, auto=True, douyin_login=login)
+
+    service.startup_sync()
+
+    assert login.invalidated is True
+    assert [item.title for item in store.read_snapshot().items] == ["历史"]
+    status = service.douyin_favorites_sync_status()
+    assert status["state"] == "reconnect_required"
+    assert "重新连接" in status["message"]
+
+
+def test_background_pagination_failure_is_safe_and_keeps_baseline(
+    tmp_path: Path,
+) -> None:
+    class StalledTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            raise DouyinOfficialPageError(
+                "runtime detail must not escape",
+                reason="pagination_stalled",
+            )
+
+    store = DouyinFavoritesStore(
+        tmp_path,
+        transport_factory=lambda _cookie: StalledTransport(),
+    )
+    _write_baseline(tmp_path, [("1", "历史")])
+    service = _authorized_service(tmp_path, store, auto=False)
+
+    service.startup_sync()
+
+    assert [item.title for item in store.read_snapshot().items] == ["历史"]
+    status = service.douyin_favorites_sync_status()
+    assert status["state"] == "failed"
+    assert "重试" in status["message"]
+    assert "runtime detail" not in status["message"]

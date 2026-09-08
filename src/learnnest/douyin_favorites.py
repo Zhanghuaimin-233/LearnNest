@@ -28,6 +28,7 @@ from learnnest.adapters.douyin_official_page import (
 
 _FAVORITES_DIRECTORY = Path(".learnnest") / "douyin"
 _FACTS_FILENAME = "favorites.json"
+_SYNC_STATUS_FILENAME = "sync_status.json"
 _THUMBNAIL_DIRECTORY = "thumbnails"
 DEFAULT_DOUYIN_FOLDER_ID = "default"
 _IMAGE_SUFFIXES = frozenset({".avif", ".gif", ".jpeg", ".jpg", ".png", ".webp"})
@@ -41,6 +42,9 @@ _CONTENT_TYPES = {
 _MAX_THUMBNAIL_BYTES = 8 * 1024 * 1024
 _DEFAULT_PAGE_SIZE = 20
 _DEFAULT_MAX_PAGES = 50
+_SYNC_STATUS_STATES = frozenset(
+    {"idle", "syncing", "success", "reconnect_required", "failed"}
+)
 
 
 class DouyinFavoritesError(RuntimeError):
@@ -107,6 +111,26 @@ class DouyinFavoritesSnapshot:
         }
 
 
+@dataclass(frozen=True)
+class DouyinFavoritesSyncStatus:
+    """A safe, human-facing fact about the latest automatic sync attempt.
+
+    Never carries cookies, signatures, request bodies, or raw provider
+    responses; only a limited state name, a localized next step, and a time.
+    """
+
+    state: str = "idle"
+    message: str = ""
+    checked_at: str | None = None
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "message": self.message,
+            "checked_at": self.checked_at,
+        }
+
+
 class DouyinFavoritesStore:
     """Keep only stable favorite facts and local thumbnail paths on disk."""
 
@@ -144,12 +168,45 @@ class DouyinFavoritesStore:
             return DouyinFavoritesSnapshot(synced_at=None, items=())
         return _safe_snapshot(payload, self.thumbnail_directory)
 
+    def read_sync_status(self) -> DouyinFavoritesSyncStatus:
+        try:
+            payload = json.loads(
+                self.directory.joinpath(_SYNC_STATUS_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return DouyinFavoritesSyncStatus()
+        return _safe_sync_status(payload)
+
+    def write_sync_status(
+        self,
+        state: str,
+        message: str,
+        *,
+        checked_at: str | None = None,
+    ) -> None:
+        if state not in _SYNC_STATUS_STATES:
+            raise ValueError("invalid douyin sync status state")
+        if not isinstance(message, str) or not message.strip():
+            raise ValueError("douyin sync status message must be safe text")
+        _atomic_write_json(
+            self.directory / _SYNC_STATUS_FILENAME,
+            DouyinFavoritesSyncStatus(
+                state=state,
+                message=message.strip(),
+                checked_at=checked_at or _now(),
+            ).payload(),
+        )
+
     def sync(
         self,
         cookie: SecretStr,
         *,
         browser_storage_state: Mapping[str, Any] | None = None,
         on_authentication_failure: Callable[[], None] | None = None,
+        on_collected: Callable[[DouyinFavoritesSnapshot, DouyinFavoritesSnapshot], None]
+        | None = None,
     ) -> DouyinFavoritesSnapshot:
         previous = self.read_snapshot()
         previous_by_id = {item.aweme_id: item for item in previous.items}
@@ -301,6 +358,11 @@ class DouyinFavoritesStore:
             items=tuple(items),
             folders=tuple(folder_facts),
         )
+        # Any durable intent for a new favorite is persisted before the
+        # baseline advances: a publish failure must never consume new
+        # identities without leaving a recoverable task intent behind.
+        if on_collected is not None:
+            on_collected(previous, snapshot)
         _atomic_write_json(self.facts_path, snapshot.payload())
         return snapshot
 
@@ -624,6 +686,21 @@ def _safe_snapshot(
         synced_at=safe_synced_at,
         items=tuple(items),
         folders=folders,
+    )
+
+
+def _safe_sync_status(payload: object) -> DouyinFavoritesSyncStatus:
+    if not isinstance(payload, Mapping):
+        return DouyinFavoritesSyncStatus()
+    state = payload.get("state")
+    message = payload.get("message")
+    checked_at = payload.get("checked_at")
+    return DouyinFavoritesSyncStatus(
+        state=state
+        if isinstance(state, str) and state in _SYNC_STATUS_STATES
+        else "idle",
+        message=message if isinstance(message, str) else "",
+        checked_at=checked_at if isinstance(checked_at, str) else None,
     )
 
 

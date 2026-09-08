@@ -29,6 +29,7 @@ const favoriteList = document.querySelector("#douyin-favorites-list");
 const favoriteFolders = document.querySelector("#favorite-folders");
 const favoriteFolderTitle = document.querySelector("#favorite-folder-title");
 const favoriteStatus = document.querySelector("#favorites-status");
+const favoriteSyncStatus = document.querySelector("#favorites-sync-status");
 const syncFavoritesButton = document.querySelector("#sync-favorites");
 const connectDouyinButton = document.querySelector("#connect-douyin");
 const loginPanel = document.querySelector("#douyin-login-panel");
@@ -1590,11 +1591,31 @@ function updateFavoriteSelection() {
   favoriteSelection.textContent = selected.length ? `已选 ${selected.length} 项，切换收藏夹不会丢失选择。` : "可跨收藏夹多选；首次同步不会自动处理。";
 }
 
+function renderFavoritesSyncStatus(status) {
+  if (!favoriteSyncStatus) return;
+  const state = status && status.state;
+  let text = "";
+  if (state === "syncing") {
+    text = status.message || "正在同步收藏…";
+  } else if (state === "reconnect_required") {
+    text = status.message || "需要重新连接抖音。";
+  } else if (state === "failed") {
+    text = `${status.message || "最近一次自动同步未完成。"}可稍后手动同步重试。`;
+  }
+  favoriteSyncStatus.textContent = text;
+  favoriteSyncStatus.hidden = !text;
+}
+
 async function loadFavorites() {
   try {
     renderFavorites(await api("/api/douyin/favorites"));
   } catch (error) {
     favoriteStatus.textContent = error.message;
+  }
+  try {
+    renderFavoritesSyncStatus(await api("/api/douyin/favorites/status"));
+  } catch (_) {
+    /* The optional sync-status line stays hidden when it cannot be read. */
   }
 }
 

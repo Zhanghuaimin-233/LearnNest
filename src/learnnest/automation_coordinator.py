@@ -48,6 +48,7 @@ from learnnest.task_control import load_task_control
 RunTasks = Callable[..., AutomationRunResult]
 Clock = Callable[[], datetime]
 ProviderFactory = Callable[[Path, str], AutomationProviders]
+FavoritesSync = Callable[[], None]
 
 
 class AutomationCoordinator:
@@ -60,11 +61,17 @@ class AutomationCoordinator:
         run_tasks: RunTasks | None = None,
         clock: Clock | None = None,
         provider_factory: ProviderFactory | None = None,
+        favorites_sync: FavoritesSync | None = None,
+        interval_seconds: float | None = None,
     ) -> None:
         self.output_root = Path(output_root).resolve()
         self._clock = clock or (lambda: datetime.now(UTC))
         self._provider_factory = provider_factory or automation_providers_for_task
         self._run_tasks = run_tasks or self._run_authorized_tasks
+        self._favorites_sync = favorites_sync
+        # An explicit wall-clock interval override for tests and deployments;
+        # the configured minutes remain the default source of truth.
+        self._interval_seconds = interval_seconds
         self._tick_lock = threading.Lock()
         self._wake_lock = threading.Lock()
         self._wake_generation = 0
@@ -72,6 +79,10 @@ class AutomationCoordinator:
         self._wake = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[None] | None = None
+
+    def set_favorites_sync(self, sync: FavoritesSync) -> None:
+        """Bind the app's one favorites sync entry after service construction."""
+        self._favorites_sync = sync
 
     @property
     def running(self) -> bool:
@@ -107,7 +118,11 @@ class AutomationCoordinator:
 
     async def _run_forever(self) -> None:
         seen_wake_generation = 0
+        startup_sync_pending = True
         while not self._stop.is_set():
+            if startup_sync_pending:
+                startup_sync_pending = False
+                await asyncio.to_thread(self._run_background_favorites_sync)
             result = await asyncio.to_thread(self.tick_once)
             if (
                 result is not None
@@ -118,10 +133,28 @@ class AutomationCoordinator:
             try:
                 seen_wake_generation = await asyncio.wait_for(
                     self._wait_for_wake_or_stop(seen_wake_generation),
-                    timeout=self._interval_minutes() * 60,
+                    timeout=(
+                        self._interval_seconds
+                        if self._interval_seconds is not None
+                        else self._interval_minutes() * 60
+                    ),
                 )
             except TimeoutError:
+                # Only a periodic timeout (and the single startup sync above)
+                # refreshes Douyin favorites; a plain wake never does.
+                await asyncio.to_thread(self._run_background_favorites_sync)
                 continue
+
+    def _run_background_favorites_sync(self) -> None:
+        """Run the app's favorites sync without ever failing this loop."""
+        if self._favorites_sync is None:
+            return
+        try:
+            self._favorites_sync()
+        except Exception:
+            # The service records observable failure states itself; an
+            # unexpected fault must not kill the intake loop.
+            return
 
     def _has_pending_intake(self) -> bool:
         """Drain an existing backlog without waiting for another wake signal."""

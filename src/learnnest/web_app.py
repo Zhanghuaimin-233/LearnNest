@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterable
 from datetime import UTC, datetime
@@ -45,6 +44,7 @@ from learnnest.adapters.douyin_http import (
 from learnnest.douyin_favorites import (
     DEFAULT_DOUYIN_FOLDER_ID,
     DouyinFavoritesError,
+    DouyinFavoritesSnapshot,
     DouyinFavoritesStore,
 )
 from learnnest.douyin_cookie_store import DouyinCookieStore
@@ -70,7 +70,7 @@ from learnnest.launcher import (
     save_launcher_model_root,
     save_launcher_output_root,
 )
-from learnnest.locks import LockUnavailable, task_lock
+from learnnest.locks import LockUnavailable, douyin_sync_lock, task_lock
 from learnnest.local_models import (
     LocalModelError,
     LocalModelNotFoundError,
@@ -88,6 +88,7 @@ from learnnest.provider_profiles import (
     connection_presets,
     connect as connect_provider,
     delete_connection,
+    freeze_role_bindings,
     get_connection,
     load_settings,
     public_settings as public_provider_settings,
@@ -129,6 +130,7 @@ from learnnest.learning_state import (
     public_provider_roles,
     public_provider_label,
     public_setup_readiness,
+    required_automation_roles,
 )
 
 _STATIC_DIRECTORY = Path(__file__).parent / "static"
@@ -314,6 +316,9 @@ class WebService:
         self.launcher_config_path = launcher_config_path
         self.local_models = local_models or LocalModelService()
         self._douyin_short_resolver = douyin_short_resolver
+        self._sync_active = False
+        self._sync_active_lock = threading.Lock()
+        self._shutdown = False
 
     def wake_automation(self) -> None:
         if self.coordinator is not None:
@@ -1006,6 +1011,20 @@ class WebService:
         return self.douyin_favorites.read_snapshot().payload()
 
     def sync_douyin_favorites(self, session_id: str) -> dict[str, Any]:
+        """One user-triggered sync; it must never overlap a background sync."""
+        if self._shutdown:
+            raise DouyinFavoritesError("服务已关闭，无法同步收藏。")
+        try:
+            with douyin_sync_lock(self.output_root, timeout=0):
+                self._set_sync_active(True)
+                try:
+                    return self._manual_sync_locked(session_id)
+                finally:
+                    self._set_sync_active(False)
+        except LockUnavailable as error:
+            raise DouyinFavoritesError("抖音收藏正在自动同步，请稍后再试。") from error
+
+    def _manual_sync_locked(self, session_id: str) -> dict[str, Any]:
         previous = self.douyin_favorites.read_snapshot()
         cookie = self.douyin_login.cookie_for(session_id)
         browser_state_getter = getattr(
@@ -1016,13 +1035,158 @@ class WebService:
         browser_storage_state = (
             browser_state_getter(session_id) if callable(browser_state_getter) else None
         )
+        try:
+            snapshot = self.douyin_favorites.sync(
+                cookie,
+                browser_storage_state=browser_storage_state,
+                on_authentication_failure=lambda: self.douyin_login.invalidate(
+                    session_id
+                ),
+            )
+        except (DouyinAuthenticationError, DouyinFavoritesError):
+            raise
+        except (DouyinLoginError, OSError, ValueError) as error:
+            raise DouyinFavoritesError("抖音收藏同步失败。") from error
+        if self._manual_can_organize(previous):
+            known = {item.aweme_id for item in previous.items}
+            for favorite in snapshot.items:
+                if (
+                    favorite.aweme_id not in known
+                    and DEFAULT_DOUYIN_FOLDER_ID in favorite.folder_ids
+                ):
+                    self.submit_process(favorite.url, source_kind="douyin_favorite")
+        self._write_favorites_status("success", "最近一次同步成功。")
+        return snapshot.payload()
+
+    def auto_sync_favorites(self) -> None:
+        """Startup and periodic refresh for a connected, baseline-enabled root.
+
+        Auto-discovery may refresh the favorites snapshot even when the paid
+        gate is closed, but source task intents are created only when the full
+        automatic gate is valid. Never raises: failures stay observable in the
+        sync status fact and are fail-closed.
+        """
+        if self._shutdown or not self._auto_sync_should_run():
+            return
+        try:
+            with douyin_sync_lock(self.output_root, timeout=0):
+                self._auto_sync_locked()
+        except LockUnavailable:
+            # A manual or another background sync already holds the lock.
+            return
+        except Exception as error:
+            self._write_favorites_status(
+                "failed", _safe_error_message(error) or "抖音收藏自动同步失败。"
+            )
+
+    def _auto_sync_should_run(self) -> bool:
+        """Cheap pre-lock guard: a connected session, a configured policy, and
+        an existing successful baseline are all required for auto-discovery."""
+        try:
+            session = self.douyin_login.current_session()
+        except DouyinLoginError:
+            return False
+        session_id = session.get("session_id") if isinstance(session, dict) else None
+        if session.get("status") != "connected" or not isinstance(session_id, str):
+            return False
+        if load_automation_status(self.output_root) is None:
+            # No automation policy means auto-discovery was never set up.
+            return False
+        previous = self.douyin_favorites.read_snapshot()
+        if previous.synced_at is None:
+            # The first successful sync only builds a baseline (manual/login).
+            return False
+        return True
+
+    def _auto_sync_locked(self) -> None:
+        try:
+            session = self.douyin_login.current_session()
+        except DouyinLoginError:
+            return
+        session_id = session.get("session_id") if isinstance(session, dict) else None
+        if session.get("status") != "connected" or not isinstance(session_id, str):
+            return
+        if load_automation_status(self.output_root) is None:
+            # No automation policy means auto-discovery was never set up.
+            return
+        previous = self.douyin_favorites.read_snapshot()
+        if previous.synced_at is None:
+            # The first successful sync only builds a baseline (manual/login).
+            return
+        self._set_sync_active(True)
+        try:
+            self._sync_once(session_id, previous=previous)
+        except DouyinAuthenticationError:
+            self._write_favorites_status(
+                "reconnect_required", "登录已失效，请重新连接抖音。"
+            )
+        except DouyinFavoritesError as error:
+            self._write_favorites_status("failed", str(error))
+        except (DouyinLoginError, OSError, ValueError) as error:
+            self._write_favorites_status(
+                "failed", _safe_error_message(error) or "抖音收藏自动同步失败。"
+            )
+        finally:
+            self._set_sync_active(False)
+
+    def _sync_once(
+        self,
+        session_id: str,
+        *,
+        previous: DouyinFavoritesSnapshot,
+    ) -> dict[str, Any]:
+        """Full critical section: old snapshot -> pagination -> new detection
+        -> recoverable intent -> publish -> start the source WebJobs."""
+        cookie = self.douyin_login.cookie_for(session_id)
+        browser_state_getter = getattr(
+            self.douyin_login,
+            "browser_storage_state_for",
+            None,
+        )
+        browser_storage_state = (
+            browser_state_getter(session_id) if callable(browser_state_getter) else None
+        )
+        pending_jobs: list[WebJob] = []
+
+        def on_collected(
+            old: DouyinFavoritesSnapshot, collected: DouyinFavoritesSnapshot
+        ) -> None:
+            if not self._auto_queue_gate(old):
+                return
+            known = {item.aweme_id for item in old.items}
+            for favorite in collected.items:
+                if (
+                    favorite.aweme_id not in known
+                    and DEFAULT_DOUYIN_FOLDER_ID in favorite.folder_ids
+                ):
+                    pending_jobs.append(self._ensure_favorite_intent(favorite))
+
         snapshot = self.douyin_favorites.sync(
             cookie,
             browser_storage_state=browser_storage_state,
             on_authentication_failure=lambda: self.douyin_login.invalidate(session_id),
+            on_collected=on_collected,
         )
+        for job in pending_jobs:
+            try:
+                self._start_job(job, self._process_job_runner(job))
+            except Exception:
+                # The intent fact stays queued: visible and retryable without
+                # blocking this sync's snapshot publish.
+                continue
+        self._write_favorites_status("success", "最近一次自动同步成功。")
+        return snapshot.payload()
+
+    def _ensure_favorite_intent(self, favorite: Any) -> WebJob:
+        """Create-or-reuse one durable source job intent per canonical URL."""
+        existing = self.jobs.find_by_source("douyin_favorite", favorite.url)
+        if existing is not None:
+            return existing
+        return self.jobs.create("douyin_favorite", favorite.url)
+
+    def _manual_can_organize(self, previous: DouyinFavoritesSnapshot) -> bool:
         status = load_automation_status(self.output_root)
-        can_organize = (
+        return (
             previous.synced_at is not None
             and status is not None
             and status.policy.enabled
@@ -1031,15 +1195,63 @@ class WebService:
             and status.policy.provider_settings_sha256
             == settings_sha256(load_settings(self.output_root))
         )
-        if can_organize:
-            known = {item.aweme_id for item in previous.items}
-            for favorite in snapshot.items:
-                if (
-                    favorite.aweme_id not in known
-                    and DEFAULT_DOUYIN_FOLDER_ID in favorite.folder_ids
-                ):
-                    self.submit_process(favorite.url, source_kind="douyin_favorite")
-        return snapshot.payload()
+
+    def _auto_queue_gate(self, previous: DouyinFavoritesSnapshot) -> bool:
+        if previous.synced_at is None:
+            return False
+        status = load_automation_status(self.output_root)
+        if status is None:
+            return False
+        policy = status.policy
+        if not (
+            policy.enabled
+            and policy.authorized_at is not None
+            and policy.auto_organize_new_favorites
+            and policy.provider_settings_sha256
+            == settings_sha256(load_settings(self.output_root))
+        ):
+            return False
+        try:
+            bindings = freeze_role_bindings(self.output_root)
+        except (KeyError, ValueError):
+            return False
+        return all(
+            role in bindings
+            for role in required_automation_roles(policy.default_output)
+        )
+
+    def douyin_favorites_sync_status(self) -> dict[str, Any]:
+        if self._sync_active:
+            return {
+                "state": "syncing",
+                "message": "正在同步收藏…",
+                "checked_at": None,
+            }
+        reader = getattr(self.douyin_favorites, "read_sync_status", None)
+        if not callable(reader):
+            return {"state": "idle", "message": "", "checked_at": None}
+        try:
+            fact = reader()
+        except (OSError, ValueError):
+            return {"state": "idle", "message": "", "checked_at": None}
+        return {
+            "state": getattr(fact, "state", "idle"),
+            "message": getattr(fact, "message", "") or "",
+            "checked_at": getattr(fact, "checked_at", None),
+        }
+
+    def _write_favorites_status(self, state: str, message: str) -> None:
+        writer = getattr(self.douyin_favorites, "write_sync_status", None)
+        if not callable(writer):
+            return
+        try:
+            writer(state, message)
+        except (OSError, ValueError):
+            pass
+
+    def _set_sync_active(self, active: bool) -> None:
+        with self._sync_active_lock:
+            self._sync_active = active
 
     def douyin_thumbnail(self, relative_path: str) -> Path:
         return self.douyin_favorites.thumbnail_file(relative_path)
@@ -1061,10 +1273,12 @@ class WebService:
         ]
 
     def startup_sync(self) -> None:
-        """Keep official-page synchronization user-controlled on app start."""
-        return
+        """One best-effort favorites refresh at app start for a connected,
+        baseline-enabled output root; never blocks or fails the lifespan."""
+        self.auto_sync_favorites()
 
     def shutdown(self) -> None:
+        self._shutdown = True
         self.local_models.shutdown()
         self.douyin_login.shutdown()
 
@@ -1091,10 +1305,12 @@ def create_web_app(
         local_models=local_models,
         douyin_short_resolver=douyin_short_resolver,
     )
+    # The coordinator owns both the single startup sync and each periodic
+    # timeout sync; a plain wake only drains intakes.
+    coordinator.set_favorites_sync(service.auto_sync_favorites)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> Any:
-        await asyncio.to_thread(service.startup_sync)
         await coordinator.start()
         try:
             yield
@@ -1220,6 +1436,10 @@ syncInitialHashBookmark();
     @app.get("/api/douyin/favorites")
     def douyin_favorites() -> dict[str, Any]:
         return service.douyin_favorites_snapshot()
+
+    @app.get("/api/douyin/favorites/status")
+    def douyin_favorites_status() -> dict[str, Any]:
+        return service.douyin_favorites_sync_status()
 
     @app.post("/api/douyin/favorites")
     def sync_douyin_favorites(

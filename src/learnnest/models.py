@@ -121,6 +121,12 @@ class TaskRecord(BaseModel):
             and self.completed_at < self.created_at
         ):
             raise ValueError("completed_at must not precede created_at")
+        if (
+            self.completed_at is not None
+            and self.updated_at is not None
+            and self.completed_at > self.updated_at
+        ):
+            raise ValueError("completed_at must not follow updated_at")
         return self
 
     @model_validator(mode="after")

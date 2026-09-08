@@ -544,3 +544,21 @@ def test_task_store_failed_existing_fact_read_preserves_original_bytes(
         write_task_atomic(tmp_path, _base_create(now=created), now=created)
 
     assert destination.read_bytes() == b"{corrupted-json"
+
+
+def test_task_store_rejects_completed_at_following_updated_at(
+    tmp_path: Path,
+) -> None:
+    created = datetime(2026, 9, 8, 10, 0, tzinfo=UTC)
+    updated = datetime(2026, 9, 8, 11, 0, tzinfo=UTC)
+    late_completed = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+    write_task_atomic(tmp_path, _base_create(now=created), now=created)
+    write_task_atomic(tmp_path, load_task(tmp_path), now=updated)
+
+    forged = load_task(tmp_path).model_copy(update={"completed_at": late_completed})
+    with pytest.raises(ValueError, match="updated_at"):
+        write_task_atomic(tmp_path, forged, now=updated)
+
+    persisted = load_task(tmp_path)
+    assert persisted.updated_at == updated
+    assert persisted.completed_at is None

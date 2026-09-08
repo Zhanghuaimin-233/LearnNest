@@ -154,9 +154,7 @@ def write_task_atomic(
         _assert_lifecycle_facts_unchanged(previous, validated)
         if previous.created_at is not None and validated.created_at is None:
             # Reuse the already frozen creation instant when a later write omits it.
-            stamped = stamped.model_copy(
-                update={"created_at": previous.created_at}
-            )
+            stamped = stamped.model_copy(update={"created_at": previous.created_at})
             validated = TaskRecord.model_validate(stamped.model_dump(mode="python"))
     else:
         if stamped.created_at is None:

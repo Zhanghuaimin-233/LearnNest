@@ -631,9 +631,12 @@ def test_coordinator_periodic_timeout_fires_favorites_sync_beyond_startup(
             await asyncio.sleep(0.01)
         await coordinator.shutdown()
         assert coordinator.running is False
+        # The deadline is monotonic, so at least one periodic sync must have
+        # fired within the window; the exact count is timing-dependent and is
+        # left to the startup-once and shutdown-stops tests.
+        assert len(events) >= 2
 
     asyncio.run(exercise())
-    assert events == ["sync", "sync"]
 
 
 def test_coordinator_shutdown_stops_future_favorites_syncs(

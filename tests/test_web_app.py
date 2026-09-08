@@ -611,6 +611,74 @@ def test_web_app_retries_a_durable_source_job_with_the_same_identity(
     assert calls == 2
 
 
+def test_source_job_retry_spawn_failure_returns_to_failed_not_queued(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import threading
+
+    source = tmp_path / "lesson.mp4"
+    source.write_bytes(b"video")
+    _, task = _task(tmp_path)
+
+    def fail_process(*_args: Any, **_kwargs: Any) -> TaskRecord:
+        raise PipelineError("transient source failure")
+
+    monkeypatch.setattr(web_app, "process_video", fail_process)
+    service = web_app.WebService(tmp_path)
+    job = service.submit_process(str(source))
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        state = service.jobs.get(job.job_id)
+        if state.status == "failed":
+            break
+        time.sleep(0.02)
+    assert service.jobs.get(job.job_id).status == "failed"
+
+    def failing_start(_self: threading.Thread) -> None:
+        raise RuntimeError("thread spawn failure")
+
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+
+    with pytest.raises(ValueError, match="任务未能启动"):
+        service.retry_source_job(job.job_id)
+
+    state = service.jobs.get(job.job_id)
+    assert state.status == "failed"
+    assert "任务未能启动" in state.error
+
+
+def test_source_job_retry_spawn_failure_is_an_actionable_http_error(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source = tmp_path / "lesson.mp4"
+    source.write_bytes(b"video")
+    _, task = _task(tmp_path)
+
+    def fail_process(*_args: Any, **_kwargs: Any) -> TaskRecord:
+        raise PipelineError("transient source failure")
+
+    monkeypatch.setattr(web_app, "process_video", fail_process)
+    client = _client(tmp_path)
+    first = client.post("/api/learning/submit", json={"source": str(source)})
+    failed = _wait_for_job(client, first.json()["job_id"])
+    assert failed["status"] == "failed"
+
+    def failing_start_job(
+        _service: web_app.WebService, _job: Any, _runner: Any
+    ) -> None:
+        raise RuntimeError("thread spawn failure")
+
+    monkeypatch.setattr(web_app.WebService, "_start_job", failing_start_job)
+
+    response = client.post(f"/api/learning/jobs/{failed['job_id']}/retry")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "来源操作当前不能重试。"
+    state = web_app.WebJobStore(tmp_path).get(failed["job_id"])
+    assert state.status == "failed"
+    assert "任务未能启动" in state.error
+
+
 def test_source_job_reuses_an_existing_tasks_frozen_intake(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

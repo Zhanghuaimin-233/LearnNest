@@ -427,7 +427,13 @@ class WebService:
 
     def retry_source_job(self, job_id: str) -> WebJob:
         job = self.jobs.retry(job_id)
-        self._start_job(job, self._process_job_runner(job))
+        try:
+            self._start_job(job, self._process_job_runner(job))
+        except Exception:
+            # A second spawn failure must land back on a visible, retryable
+            # failed fact instead of a never-reclaimed queued intent.
+            self.jobs.fail(job.job_id, "任务未能启动，请在来源处理中重试。")
+            raise ValueError("任务未能启动，请稍后重试。")
         return job
 
     def _douyin_runtime_downloader(self) -> YtDlpDownloader:

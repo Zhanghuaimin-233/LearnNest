@@ -11,8 +11,10 @@ from learnnest.adapters.douyin import DouyinAdapterError
 from learnnest.adapters.douyin_http import DouyinAuthenticationError
 from learnnest.adapters.douyin_official_page import (
     _RUNTIME_COLLECTIONS_SCRIPT,
+    _RUNTIME_FAVORITES_SCRIPT,
     DouyinOfficialPageError,
     DouyinOfficialPageTransport,
+    bootstrap_official_favorites_request,
     collect_official_collections,
     collect_official_favorites,
 )
@@ -236,6 +238,58 @@ def test_official_page_cold_collection_runtime_uses_action_results_before_react_
     }
 
 
+def test_runtime_favorites_script_selects_params_module_by_exports() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(channel="msedge", headless=True)
+        page = browser.new_page()
+        page.set_content("<main>offline runtime fixture</main>")
+        page.evaluate(
+            """() => {
+                window.axiosInstance = () => {};
+                const modules = {
+                    decoy: {
+                        COMMON_SEARCH_PARAMS: {not: "the params"},
+                    },
+                    valid: {
+                        COMMON_SEARCH_PARAMS: {
+                            device_platform: "webapp",
+                            aid: "6383",
+                            channel: "channel_pc_web",
+                        },
+                        DISABLE_SECRET_VIDEO_PARAMS: {
+                            publish_video_strategy_type: "2",
+                        },
+                    },
+                    request: {
+                        v_: async () => ({status_code: 0, aweme_list: []}),
+                    },
+                };
+                const webpackRequire = (id) => modules[id];
+                webpackRequire.m = {
+                    decoy: function decoyFactory() {
+                        // COMMON_SEARCH_PARAMS DISABLE_SECRET_VIDEO_PARAMS CHANNEL_PC_WEB
+                    },
+                    valid: function validFactory() {
+                        // COMMON_SEARCH_PARAMS DISABLE_SECRET_VIDEO_PARAMS CHANNEL_PC_WEB
+                    },
+                    request: function requestFactory() {
+                        // ies.janus.proxy v_
+                    },
+                };
+                const chunk = [];
+                chunk.push = (entry) => entry[2](webpackRequire);
+                window.webpackChunkLearnNestFixture = chunk;
+            }"""
+        )
+        result = page.evaluate(
+            _RUNTIME_FAVORITES_SCRIPT,
+            {"cursor": 0, "count": 20, "timeoutMs": 1_000},
+        )
+        browser.close()
+
+    assert result == {"status_code": 0, "aweme_list": []}
+
+
 def test_official_page_retries_scroll_until_the_next_page_responds() -> None:
     page = FakePage(
         [
@@ -388,6 +442,15 @@ class FakeBootstrapRequest:
         }
 
 
+class FakeBootstrapCandidateRequest(FakeBootstrapRequest):
+    def __init__(self, *, signature: str | None) -> None:
+        suffix = "" if signature is None else f"&a_bogus={signature}"
+        self.url = (
+            "https://www.douyin.com/aweme/v1/web/aweme/listcollection/"
+            f"?aid=6383{suffix}"
+        )
+
+
 class FakeBootstrapPage:
     def __init__(self, payload: Mapping[str, Any]) -> None:
         self.payload = payload
@@ -405,6 +468,23 @@ class FakeBootstrapPage:
         self.evaluate_calls.append(argument)
         for handler in self.handlers.get("request", []):
             handler(FakeBootstrapRequest())
+        return self.payload
+
+
+class FakeBootstrapCandidatePage(FakeBootstrapPage):
+    def __init__(
+        self,
+        payload: Mapping[str, Any],
+        requests: list[FakeBootstrapCandidateRequest],
+    ) -> None:
+        super().__init__(payload)
+        self.requests = requests
+
+    def evaluate(self, script: str, argument: Mapping[str, int]) -> Mapping[str, Any]:
+        self.evaluate_calls.append(argument)
+        for request in self.requests:
+            for handler in self.handlers.get("request", []):
+                handler(request)
         return self.payload
 
 
@@ -566,6 +646,77 @@ def test_official_transport_restores_encrypted_browser_storage_state() -> None:
         {"locale": "zh-CN", "storage_state": storage_state}
     ]
     assert runtime.context.cookies_added == []
+
+
+@pytest.mark.parametrize(
+    ("signatures", "expected_signature"),
+    [
+        (["signed-first", None], "signed-first"),
+        ([None, "signed-last"], "signed-last"),
+        (["signed-first", None, "signed-last"], "signed-last"),
+    ],
+)
+def test_bootstrap_selects_signed_candidate_regardless_of_event_order(
+    signatures: list[str | None],
+    expected_signature: str,
+) -> None:
+    page = FakeBootstrapCandidatePage(
+        _payload("101", cursor=0, has_more=False),
+        [FakeBootstrapCandidateRequest(signature=value) for value in signatures],
+    )
+
+    _payload_result, signer = bootstrap_official_favorites_request(
+        page,
+        cursor=0,
+        count=20,
+        timeout_ms=1_000,
+    )
+
+    assert signer.params["a_bogus"] == expected_signature
+
+
+def test_bootstrap_reports_missing_pagination_template_after_successful_response() -> (
+    None
+):
+    page = FakeBootstrapCandidatePage(
+        _payload("101", cursor=0, has_more=False),
+        [FakeBootstrapCandidateRequest(signature=None)],
+    )
+
+    with pytest.raises(DouyinOfficialPageError) as error:
+        bootstrap_official_favorites_request(
+            page,
+            cursor=0,
+            count=20,
+            timeout_ms=1_000,
+        )
+
+    assert error.value.reason == "pagination_template_unavailable"
+    assert "signed-secret" not in str(error.value)
+
+
+def test_bootstrap_candidate_diagnostic_contains_only_safe_shape(caplog: Any) -> None:
+    page = FakeBootstrapCandidatePage(
+        _payload("101", cursor=0, has_more=False),
+        [
+            FakeBootstrapCandidateRequest(signature="signed-secret"),
+            FakeBootstrapCandidateRequest(signature=None),
+        ],
+    )
+
+    with caplog.at_level("INFO", logger="learnnest.adapters.douyin_official_page"):
+        bootstrap_official_favorites_request(
+            page,
+            cursor=0,
+            count=20,
+            timeout_ms=1_000,
+        )
+
+    assert "candidate_count=2" in caplog.text
+    assert "method=POST" in caplog.text
+    assert "path=/aweme/v1/web/aweme/listcollection/" in caplog.text
+    assert "signature_present=[True, False]" in caplog.text
+    assert "signed-secret" not in caplog.text
 
 
 def test_official_transport_rejects_nonzero_cursor_before_runtime_bootstrap() -> None:

@@ -56,7 +56,9 @@ _CAPTURED_HEADER_NAMES = frozenset(
         "user-agent",
     }
 )
-_SIGNATURE_PARAM_NAMES = frozenset({"a_bogus", "msToken", "x-secsdk-web-signature"})
+_SIGNATURE_PARAM_NAMES = frozenset(
+    {"a_bogus", "fp", "msToken", "verifyFp", "x-secsdk-web-signature"}
+)
 _RUNTIME_FAVORITES_SCRIPT = r"""
 async ({cursor, count, timeoutMs}) => {
   const deadline = Date.now() + timeoutMs;
@@ -86,17 +88,37 @@ async ({cursor, count, timeoutMs}) => {
         const source = String(factory);
         return source.includes("ies.janus.proxy") && source.includes("v_");
       });
-      const paramsEntry = factories.find(([, factory]) => {
+      const paramsEntries = factories.filter(([, factory]) => {
         const source = String(factory);
         return source.includes("COMMON_SEARCH_PARAMS") &&
           source.includes("DISABLE_SECRET_VIDEO_PARAMS") &&
           source.includes("CHANNEL_PC_WEB");
       });
-      if (!requestEntry || !paramsEntry) {
+      if (!requestEntry || !paramsEntries.length) {
         throw new Error("official favorites modules unavailable");
       }
       const requestModule = webpackRequire(requestEntry[0]);
-      const paramsModule = webpackRequire(paramsEntry[0]);
+      let paramsModule;
+      for (const [moduleId] of paramsEntries) {
+        try {
+          const candidate = webpackRequire(moduleId);
+          const exportedObjects = Object.values(candidate || {}).filter(
+            (value) => value && typeof value === "object" && !Array.isArray(value)
+          );
+          const commonParams = exportedObjects.find(
+            (value) => value.device_platform && value.aid && value.channel
+          );
+          const strategyParams = exportedObjects.find(
+            (value) => value.publish_video_strategy_type !== undefined
+          );
+          if (commonParams && strategyParams) {
+            paramsModule = candidate;
+            break;
+          }
+        } catch (_) {
+          continue;
+        }
+      }
       const requestFunction = requestModule && requestModule.v_;
       if (typeof requestFunction !== "function") {
         throw new Error("official request function unavailable");
@@ -292,6 +314,7 @@ class DouyinOfficialPageError(DouyinAdapterError):
             "business_error",
             "invalid_response",
             "runtime_unavailable",
+            "pagination_template_unavailable",
             "network_error",
         ],
         status_code: int | str | None = None,
@@ -560,18 +583,38 @@ def bootstrap_official_favorites_request(
             "Douyin official request response has no aweme_list",
             reason="invalid_response",
         )
-    if not captured:
-        raise DouyinOfficialPageError(
-            "Douyin official request template was not captured",
-            reason="no_response",
+    candidates: list[tuple[dict[str, str], Mapping[str, str], bool]] = []
+    for request_url, headers in captured:
+        query = dict(parse_qsl(urlsplit(request_url).query, keep_blank_values=True))
+        candidates.append(
+            (query, headers, bool(_SIGNATURE_PARAM_NAMES.intersection(query)))
         )
-    request_url, headers = captured[-1]
-    query = dict(parse_qsl(urlsplit(request_url).query, keep_blank_values=True))
-    if not _SIGNATURE_PARAM_NAMES.intersection(query):
+    _LOGGER.info(
+        "douyin official favorites bootstrap request_candidates "
+        "candidate_count=%s method=POST path=%s signature_present=%s "
+        "parameter_names=%s",
+        len(candidates),
+        _FAVORITES_PATH,
+        [signature_present for _query, _headers, signature_present in candidates],
+        [sorted(query) for query, _headers, _signature_present in candidates],
+    )
+    signed_candidates = [
+        (query, headers)
+        for query, headers, signature_present in candidates
+        if signature_present
+    ]
+    if not signed_candidates:
+        if not captured:
+            raise DouyinOfficialPageError(
+                "Douyin official request template was not captured",
+                reason="no_response",
+            )
         raise DouyinOfficialPageError(
-            "Douyin official request has no current signature",
-            reason="runtime_unavailable",
+            "Douyin official request returned favorites but no signed "
+            "pagination template was captured",
+            reason="pagination_template_unavailable",
         )
+    query, headers = signed_candidates[-1]
     _LOGGER.info(
         "douyin official favorites bootstrap path=%s status_code=%s",
         _FAVORITES_PATH,

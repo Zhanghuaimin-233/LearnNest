@@ -519,6 +519,24 @@ def test_official_runtime_change_is_specific() -> None:
         store.sync(SecretStr("cookie"))
 
 
+def test_official_success_without_pagination_template_is_actionable() -> None:
+    class MissingPaginationTemplateTransport:
+        def list_video_favorites(self, *, cursor: int, count: int) -> Mapping[str, Any]:
+            del cursor, count
+            raise DouyinOfficialPageError(
+                "safe detail must not escape",
+                reason="pagination_template_unavailable",
+            )
+
+    store = DouyinFavoritesStore(
+        Path("artifacts/local/douyin-test"),
+        transport_factory=lambda _cookie: MissingPaginationTemplateTransport(),
+    )
+
+    with pytest.raises(DouyinFavoritesError, match="首批收藏.*翻页.*请求模板不可用"):
+        store.sync(SecretStr("cookie"))
+
+
 def test_official_page_pagination_stall_is_specific_and_keeps_snapshot(
     tmp_path: Path,
 ) -> None:

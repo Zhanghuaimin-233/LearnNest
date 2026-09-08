@@ -255,6 +255,11 @@ class DouyinFavoritesStore:
                     "抖音官方网页的请求组件已变化，无法生成本次 HTTP 请求签名；"
                     "本次收藏未更新。"
                 ) from None
+            if error.reason == "pagination_template_unavailable":
+                raise DouyinFavoritesError(
+                    "抖音官方页已返回首批收藏，但后续翻页的请求模板不可用；"
+                    "本次收藏未更新，请稍后重试。"
+                ) from None
             if error.reason == "network_error":
                 raise DouyinFavoritesError(
                     "抖音官方运行时生成首批收藏请求时网络连接失败；"

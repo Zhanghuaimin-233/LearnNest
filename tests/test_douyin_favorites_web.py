@@ -998,13 +998,17 @@ def test_lifespan_startup_sync_runs_once_and_publishes_its_baseline(
 
     with TestClient(app) as client:
         # Poll through the app's own service so reads share the jobs lock.
+        # Await exactly one completed job: once the job fact exists and has
+        # reached completed, the startup sync side effects are stable.
         service = client.app.state.web_service
-        _wait_for(
-            lambda: (
-                bool(transport.calls)
-                and all(job.status == "completed" for job in service.jobs.list())
-            )
-        )
+
+        def startup_sync_settled() -> bool:
+            if not transport.calls:
+                return False
+            jobs = service.jobs.list()
+            return len(jobs) == 1 and jobs[0].status == "completed"
+
+        _wait_for(startup_sync_settled)
         client.get("/api/douyin/favorites")
 
     assert transport.calls == [(0, 10)]

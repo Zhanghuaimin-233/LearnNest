@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -119,10 +120,14 @@ class AutomationCoordinator:
     async def _run_forever(self) -> None:
         seen_wake_generation = 0
         startup_sync_pending = True
+        # A monotonic deadline owned by the favorites sync: a plain wake only
+        # drains intakes and must never postpone the periodic refresh.
+        next_sync_deadline = self._next_periodic_deadline()
         while not self._stop.is_set():
             if startup_sync_pending:
                 startup_sync_pending = False
                 await asyncio.to_thread(self._run_background_favorites_sync)
+                next_sync_deadline = self._next_periodic_deadline()
             result = await asyncio.to_thread(self.tick_once)
             if (
                 result is not None
@@ -130,20 +135,31 @@ class AutomationCoordinator:
                 and await asyncio.to_thread(self._has_pending_intake)
             ):
                 continue
+            now = time.monotonic()
+            if now >= next_sync_deadline:
+                # The interval elapsed while wake events kept the loop busy.
+                await asyncio.to_thread(self._run_background_favorites_sync)
+                next_sync_deadline = self._next_periodic_deadline()
+                continue
             try:
                 seen_wake_generation = await asyncio.wait_for(
                     self._wait_for_wake_or_stop(seen_wake_generation),
-                    timeout=(
-                        self._interval_seconds
-                        if self._interval_seconds is not None
-                        else self._interval_minutes() * 60
-                    ),
+                    timeout=next_sync_deadline - now,
                 )
             except TimeoutError:
                 # Only a periodic timeout (and the single startup sync above)
                 # refreshes Douyin favorites; a plain wake never does.
                 await asyncio.to_thread(self._run_background_favorites_sync)
+                next_sync_deadline = self._next_periodic_deadline()
                 continue
+
+    def _next_periodic_deadline(self) -> float:
+        interval = (
+            self._interval_seconds
+            if self._interval_seconds is not None
+            else self._interval_minutes() * 60
+        )
+        return time.monotonic() + max(interval, 0.0)
 
     def _run_background_favorites_sync(self) -> None:
         """Run the app's favorites sync without ever failing this loop."""

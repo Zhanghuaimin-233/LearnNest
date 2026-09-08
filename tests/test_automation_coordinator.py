@@ -659,4 +659,38 @@ def test_coordinator_shutdown_stops_future_favorites_syncs(
         assert len(events) == count
 
     asyncio.run(exercise())
-    assert events == ["sync"]
+    assert events
+
+
+def test_coordinator_plain_wakes_never_delay_the_periodic_favorites_sync(
+    tmp_path: Path,
+) -> None:
+    root = _authorized_root(tmp_path)
+    events: list[str] = []
+
+    async def exercise() -> None:
+        coordinator = AutomationCoordinator(
+            root,
+            favorites_sync=lambda: events.append("sync"),
+            interval_seconds=0.03,
+        )
+        await coordinator.start()
+        for _ in range(100):
+            if events:
+                break
+            await asyncio.sleep(0.01)
+        # A steady stream of plain wakes must never postpone the periodic
+        # deadline; the favorites sync still fires once the interval elapses.
+        deadline = asyncio.get_running_loop().time() + 0.25
+        wakes = 0
+        while asyncio.get_running_loop().time() < deadline:
+            coordinator.wake()
+            wakes += 1
+            await asyncio.sleep(0.001)
+        await coordinator.shutdown()
+        assert events, "startup favorites sync did not run"
+        assert len(events) >= 2, (
+            f"only startup sync ran ({events!r}) after {wakes} plain wakes"
+        )
+
+    asyncio.run(exercise())

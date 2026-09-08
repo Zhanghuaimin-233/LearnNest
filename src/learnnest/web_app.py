@@ -1025,7 +1025,6 @@ class WebService:
             raise DouyinFavoritesError("抖音收藏正在自动同步，请稍后再试。") from error
 
     def _manual_sync_locked(self, session_id: str) -> dict[str, Any]:
-        previous = self.douyin_favorites.read_snapshot()
         cookie = self.douyin_login.cookie_for(session_id)
         browser_state_getter = getattr(
             self.douyin_login,
@@ -1035,6 +1034,21 @@ class WebService:
         browser_storage_state = (
             browser_state_getter(session_id) if callable(browser_state_getter) else None
         )
+        pending_jobs: list[WebJob] = []
+
+        def on_collected(
+            old: DouyinFavoritesSnapshot, collected: DouyinFavoritesSnapshot
+        ) -> None:
+            if not self._manual_can_organize(old):
+                return
+            known = {item.aweme_id for item in old.items}
+            for favorite in collected.items:
+                if (
+                    favorite.aweme_id not in known
+                    and DEFAULT_DOUYIN_FOLDER_ID in favorite.folder_ids
+                ):
+                    pending_jobs.append(self._ensure_favorite_intent(favorite))
+
         try:
             snapshot = self.douyin_favorites.sync(
                 cookie,
@@ -1042,19 +1056,17 @@ class WebService:
                 on_authentication_failure=lambda: self.douyin_login.invalidate(
                     session_id
                 ),
+                on_collected=on_collected,
             )
         except (DouyinAuthenticationError, DouyinFavoritesError):
             raise
         except (DouyinLoginError, OSError, ValueError) as error:
             raise DouyinFavoritesError("抖音收藏同步失败。") from error
-        if self._manual_can_organize(previous):
-            known = {item.aweme_id for item in previous.items}
-            for favorite in snapshot.items:
-                if (
-                    favorite.aweme_id not in known
-                    and DEFAULT_DOUYIN_FOLDER_ID in favorite.folder_ids
-                ):
-                    self.submit_process(favorite.url, source_kind="douyin_favorite")
+        for job in pending_jobs:
+            try:
+                self._start_job(job, self._process_job_runner(job))
+            except Exception:
+                self.jobs.fail(job.job_id, "任务未能启动，请在来源处理中重试。")
         self._write_favorites_status("success", "最近一次同步成功。")
         return snapshot.payload()
 
@@ -1171,9 +1183,9 @@ class WebService:
             try:
                 self._start_job(job, self._process_job_runner(job))
             except Exception:
-                # The intent fact stays queued: visible and retryable without
-                # blocking this sync's snapshot publish.
-                continue
+                # A thread-spawn failure must leave a visible, retryable fact
+                # instead of a never-reclaimed queued intent.
+                self.jobs.fail(job.job_id, "任务未能启动，请在来源处理中重试。")
         self._write_favorites_status("success", "最近一次自动同步成功。")
         return snapshot.payload()
 

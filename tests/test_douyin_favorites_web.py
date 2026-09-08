@@ -248,17 +248,24 @@ def test_first_favorite_sync_is_a_baseline_but_later_new_items_are_queued(
         ),
     )
     service = _authorized_service(tmp_path, store, auto=True)
-    queued: list[tuple[str, str | None]] = []
-    monkeypatch.setattr(
-        service,
-        "submit_process",
-        lambda source, *, source_kind=None: queued.append((source, source_kind)),
-    )
+
+    def capture_runner(job: Any) -> Any:
+        def run() -> None:
+            service.jobs.start(job.job_id)
+            service.jobs.complete(job.job_id, "20260908-task")
+
+        return run
+
+    monkeypatch.setattr(service, "_process_job_runner", capture_runner)
 
     service.sync_douyin_favorites("session")
     service.sync_douyin_favorites("session")
 
-    assert queued == [("https://www.douyin.com/video/2", "douyin_favorite")]
+    _wait_for(lambda: all(job.status == "completed" for job in service.jobs.list()))
+    jobs = service.jobs.list()
+    assert [job.source_input for job in jobs] == ["https://www.douyin.com/video/2"]
+    assert all(job.source_kind == "douyin_favorite" for job in jobs)
+    assert all(job.status == "completed" for job in jobs)
 
 
 def test_web_sync_passes_complete_browser_state_to_favorites_store(
@@ -288,12 +295,14 @@ def test_web_sync_passes_complete_browser_state_to_favorites_store(
         *,
         browser_storage_state: Mapping[str, Any] | None = None,
         on_authentication_failure: Any = None,
+        on_collected: Any = None,
     ) -> Any:
         observed_state.append(browser_storage_state)
         return original_sync(
             cookie,
             browser_storage_state=browser_storage_state,
             on_authentication_failure=on_authentication_failure,
+            on_collected=on_collected,
         )
 
     monkeypatch.setattr(store, "sync", capture_sync)
@@ -1320,3 +1329,83 @@ def test_background_pagination_failure_is_safe_and_keeps_baseline(
     assert status["state"] == "failed"
     assert "重试" in status["message"]
     assert "runtime detail" not in status["message"]
+
+
+def test_manual_sync_persists_the_intent_before_publish_and_reuses_it_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeTransport(
+        _single_page(_item("1", "历史"), _item("2", "新增"))
+        + _single_page(_item("1", "历史"), _item("2", "新增"))
+    )
+    store = _store(tmp_path, transport)
+    _write_baseline(tmp_path, [("1", "历史")])
+    service = _authorized_service(tmp_path, store, auto=True)
+
+    def capture_runner(job: Any) -> Any:
+        def run() -> None:
+            service.jobs.start(job.job_id)
+            service.jobs.complete(job.job_id, "20260908-task")
+
+        return run
+
+    monkeypatch.setattr(service, "_process_job_runner", capture_runner)
+    from learnnest import douyin_favorites as douyin_favorites_module
+
+    real_write = douyin_favorites_module._atomic_write_json
+    flaky = {"failed": False}
+
+    def flaky_write(path: Path, payload: Mapping[str, Any]) -> None:
+        if not flaky["failed"]:
+            flaky["failed"] = True
+            raise OSError("simulated publish failure")
+        return real_write(path, payload)
+
+    monkeypatch.setattr(douyin_favorites_module, "_atomic_write_json", flaky_write)
+
+    with pytest.raises(DouyinFavoritesError):
+        service.sync_douyin_favorites("session")
+
+    jobs = service.jobs.list()
+    assert [job.source_input for job in jobs] == ["https://www.douyin.com/video/2"]
+    assert jobs[0].status == "queued"
+    assert [item.aweme_id for item in store.read_snapshot().items] == ["1"]
+
+    service.sync_douyin_favorites("session")
+
+    _wait_for(lambda: all(job.status == "completed" for job in service.jobs.list()))
+    jobs = service.jobs.list()
+    assert len(jobs) == 1
+    assert jobs[0].source_input == "https://www.douyin.com/video/2"
+    assert jobs[0].status == "completed"
+    assert [item.aweme_id for item in store.read_snapshot().items] == ["1", "2"]
+
+
+def test_thread_spawn_failure_leaves_a_retryable_failed_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeTransport(
+        _single_page(_item("1", "历史"), _item("2", "新增"))
+        + _single_page(_item("1", "历史"), _item("2", "新增"))
+    )
+    store = _store(tmp_path, transport)
+    _write_baseline(tmp_path, [("1", "历史")])
+    service = _authorized_service(tmp_path, store, auto=True)
+
+    def failing_start(self: threading.Thread) -> None:
+        del self
+        raise RuntimeError("thread spawn failure")
+
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+
+    service.startup_sync()
+
+    jobs = service.jobs.list()
+    assert len(jobs) == 1
+    assert jobs[0].status == "failed"
+    assert "重试" in jobs[0].error or "启动" in jobs[0].error
+
+    retried = service.jobs.retry(jobs[0].job_id)
+    assert retried.status == "queued"
